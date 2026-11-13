@@ -50,11 +50,13 @@
 (autoload 'rat-kingdom-agent-shell-start "rat-kingdom-agent-shell")
 (autoload 'rat-kingdom-agent-shell-stop "rat-kingdom-agent-shell")
 (autoload 'rat-kingdom-agent-shell-send "rat-kingdom-agent-shell")
+(autoload 'rat-kingdom-agent-shell-busy-p "rat-kingdom-agent-shell")
 
 (defconst rat-kingdom-run-default-backend
   (list :start #'rat-kingdom-agent-shell-start
         :stop #'rat-kingdom-agent-shell-stop
-        :send #'rat-kingdom-agent-shell-send)
+        :send #'rat-kingdom-agent-shell-send
+        :busy #'rat-kingdom-agent-shell-busy-p)
   "The backend used when `rat-kingdom-run-backend' is nil: agent-shell.")
 
 (defvar rat-kingdom-run-backend nil
@@ -68,7 +70,10 @@ up again instead of starting a new one.  It should arrange for
 for `rat-kingdom-run-idle-functions' to run when the agent ends a turn.
 `:stop' is called with the handle.  `:send' is called with the handle
 and a text; it gives the agent the text as its next prompt and returns
-non-nil, or returns nil if the agent cannot take one now.")
+non-nil, or returns nil if the agent cannot take one now.  `:busy' is
+called with the handle; it returns non-nil if the agent is in the
+middle of a turn or the user has typed input there that is not yet
+sent, so that the agent must not be stopped now.")
 
 ;; An Emacs that loaded an older version of this file holds a copy of
 ;; the built-in backend here, perhaps an incomplete one; use the
@@ -76,7 +81,8 @@ non-nil, or returns nil if the agent cannot take one now.")
 (when (cl-loop for (_key function) on rat-kingdom-run-backend by #'cddr
                always (memq function '(rat-kingdom-agent-shell-start
                                        rat-kingdom-agent-shell-stop
-                                       rat-kingdom-agent-shell-send)))
+                                       rat-kingdom-agent-shell-send
+                                       rat-kingdom-agent-shell-busy-p)))
   (setq rat-kingdom-run-backend nil))
 
 (defun rat-kingdom-run--backend (key)
@@ -225,6 +231,17 @@ never takes one; that is warned about once."
                          "The run backend has no :send, so no agent can be \
 given a prompt after it starts; see `rat-kingdom-run-backend'"))
       nil)))
+
+(defun rat-kingdom-run-busy-p (id)
+  "Return non-nil if the agent of the run ID must not be stopped now.
+That is while it is in the middle of a turn or the user has typed input
+there that is not yet sent.  A backend without `:busy' cannot tell, so
+its agents are always taken to be busy.  A run with no agent in this
+Emacs is not busy."
+  (when-let* ((handle (gethash id rat-kingdom-run--handles)))
+    (if-let* ((busy (rat-kingdom-run--backend :busy)))
+        (funcall busy handle)
+      t)))
 
 (defvar rat-kingdom-run--dying nil
   "Non-nil once Emacs has begun to exit.

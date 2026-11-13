@@ -50,6 +50,8 @@
 ;;   M-x rat-kingdom-tasks-refresh show the trackers' ready tasks as
 ;;                                `available' in the space
 ;;   M-x rat-kingdom-reload       load changed source into this Emacs
+;;   M-x rat-kingdom-king-restart restart the king's session in place,
+;;                                so it has its current tools
 ;;
 ;; A worker is a Claude Code session in an agent-shell buffer, in its own
 ;; worktree.  When it reports that it is done, its commit is merged in a
@@ -168,6 +170,18 @@ stopping the king if it is running."
                (or (plist-get (rat-kingdom-run-get space rat-kingdom-king-id)
                               :error)
                    "no reason was recorded"))))))
+
+;;;###autoload
+(defun rat-kingdom-king-restart ()
+  "Restart the king's session in place.
+The king is stopped and its session taken up again, so it keeps the
+conversation but fetches its tools afresh and, if they or its
+instructions changed, is given the current instructions.  This is
+refused while the king is in the middle of a turn or you have typed
+something in its buffer that is not sent."
+  (interactive)
+  (rat-kingdom-king-restart-session (rat-kingdom-space-default))
+  (message "rat-kingdom: restarted the king's session in place"))
 
 ;;;; By hand
 
@@ -351,18 +365,32 @@ Run this after pulling or merging changes to rat-kingdom.  What is
 running keeps running: agents, the open space, the tool endpoint and
 the king.  If `rat-kingdom-mode' is on, the reactions are attached
 again, so that new definitions take effect, and the watch is
-restarted."
+restarted.  If the reload changed the king's tools or instructions,
+the king is restarted in place, keeping its conversation; see
+`rat-kingdom-king-refresh' and `rat-kingdom-king-restart-on-reload'."
   (interactive)
   (let* ((directory (rat-kingdom--directory))
-         (files (rat-kingdom--load-files directory)))
+         (files (rat-kingdom--load-files directory))
+         (king nil))
     (when rat-kingdom-mode
       (let ((space (rat-kingdom-space-default)))
         (rat-kingdom-reaction-detach space)
         (rat-kingdom-reaction-attach space))
       (rat-kingdom--start-watch))
-    (message "rat-kingdom: reloaded %d files from %s%s"
+    (when (rat-kingdom-run-live-p rat-kingdom-king-id)
+      (setq king (rat-kingdom-king-refresh (rat-kingdom-space-default))))
+    (message "rat-kingdom: reloaded %d files from %s%s%s"
              (length files) (abbreviate-file-name directory)
-             (if rat-kingdom-mode "; reactions attached again" ""))))
+             (if rat-kingdom-mode "; reactions attached again" "")
+             (pcase king
+               ('restarted "; the king's tools or instructions changed, so \
+its session was restarted in place, keeping the conversation")
+               ('deferred "; the king's tools or instructions changed: it \
+will be restarted in place when it next ends a turn, or run M-x \
+rat-kingdom-king-restart once it is idle")
+               ('changed "; the king's tools or instructions changed: M-x \
+rat-kingdom-king-restart gives them to it once it is idle")
+               (_ "")))))
 
 (provide 'rat-kingdom)
 ;;; rat-kingdom.el ends here

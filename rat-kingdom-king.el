@@ -112,6 +112,16 @@ message from the engine is never a request to push.
   :type 'number
   :group 'rat-kingdom)
 
+(defcustom rat-kingdom-king-restart-on-reload t
+  "Non-nil means `rat-kingdom-reload' restarts the king when it must.
+That is when the reload changed the king's tools or instructions.  The
+king's session is taken up again, so its conversation is kept, but
+only while it is between turns and no input is half typed there;
+otherwise it is restarted when it next ends a turn.  Nil means the
+reload only says that `rat-kingdom-king-restart' is needed."
+  :type 'boolean
+  :group 'rat-kingdom)
+
 (defconst rat-kingdom-king-diff-limit 40000
   "Most characters of a diff that `story_diff' returns.")
 
@@ -439,14 +449,38 @@ OP and SUBJECT are as for `rat-kingdom-space-change-functions'."
 
 ;;;; Starting the king
 
-(defun rat-kingdom-king--prompt (space resumed)
+(defun rat-kingdom-king-fingerprint ()
+  "Return a hash of what the king is given when its session starts.
+That is its tools, as `tools/list' serves them, and
+`rat-kingdom-king-instructions'.  If the hash a running king was
+started with differs, its tools or instructions are out of date."
+  (secure-hash
+   'sha256
+   (json-serialize
+    (vector (vconcat (sort (rat-kingdom-mcp-tool-list 'king)
+                           (lambda (a b)
+                             (string< (plist-get a :name)
+                                      (plist-get b :name)))))
+            rat-kingdom-king-instructions))))
+
+(defun rat-kingdom-king--prompt (space resumed &optional changed)
   "Return the first prompt for the king in SPACE.
-RESUMED is non-nil if its earlier session is being taken up again."
+RESUMED is non-nil if its earlier session is being taken up again.
+CHANGED is non-nil if that session was started with other tools or
+instructions; the king is then given the current instructions."
   (concat
    (if resumed
-       "[rat-kingdom] Your session was restarted; you are still the king. \
-Tools you called before the restart may need calling again. This is how \
-things stand now:\n\n"
+       (concat
+        "[rat-kingdom] Your session was restarted; you are still the king. \
+Tools you called before the restart may need calling again."
+        (if changed
+            (concat "\n\nThese instructions replace the ones you were given \
+earlier:\n\n"
+                    rat-kingdom-king-instructions
+                    "\n\nYour tools may have changed too. Rely on the tool \
+list you have now, not on what you remember of the earlier one.\n\n")
+          " ")
+        "This is how things stand now:\n\n")
      (concat rat-kingdom-king-instructions
              "\n\nThis is how things stand now:\n\n"))
    (rat-kingdom-king-status space)
@@ -461,16 +495,97 @@ none.  Signal an error if the king is already running."
     (error "The king is already running"))
   (let* ((old (rat-kingdom-run-get space rat-kingdom-king-id))
          (session (and (not fresh) (plist-get old :session-id)))
+         (fingerprint (rat-kingdom-king-fingerprint))
+         (prompt (rat-kingdom-king--prompt
+                  space session
+                  (not (equal (plist-get old :fingerprint) fingerprint))))
          (directory (file-name-as-directory
                      (expand-file-name (or rat-kingdom-king-directory
                                            rat-kingdom-directory)))))
     (make-directory directory t)
-    (rat-kingdom-space-retract space (list 'run :identity rat-kingdom-king-id)
-                               :actor "user")
-    (rat-kingdom-run-create
-     space :id rat-kingdom-king-id :role 'king :worktree directory
-     :resume session
-     :prompt (rat-kingdom-king--prompt space session))))
+    (rat-kingdom-space-with-transaction space
+      (rat-kingdom-space-retract space (list 'run :identity rat-kingdom-king-id)
+                                 :actor "user")
+      (rat-kingdom-run-create
+       space :id rat-kingdom-king-id :role 'king :worktree directory
+       :resume session :prompt prompt)
+      (rat-kingdom-run-update space rat-kingdom-king-id
+                              :fingerprint fingerprint))))
+
+;;;; Restarting the king in place
+
+;; The king's tools and instructions are fixed when its session starts.
+;; After a reload changes them, the king is stopped and its session
+;; taken up again, which keeps the conversation but has its tools
+;; fetched afresh, and it is given the new instructions.  News for the
+;; king waits in the space meanwhile and is delivered when the new
+;; session ends its first turn.
+
+(defun rat-kingdom-king-stale-p (space)
+  "Return non-nil if the running king in SPACE has out-of-date tools.
+That is, if it was started with other tools or instructions than
+`rat-kingdom-king-fingerprint' describes.  A king that is not running
+is not stale: it is given the current ones when it starts."
+  (and (rat-kingdom-run-live-p rat-kingdom-king-id)
+       (not (equal (plist-get (rat-kingdom-run-get space rat-kingdom-king-id)
+                              :fingerprint)
+                   (rat-kingdom-king-fingerprint)))))
+
+(defun rat-kingdom-king--why-not-restart (space)
+  "Return why the king in SPACE cannot be restarted now, or nil if it can."
+  (cond ((not (rat-kingdom-run-live-p rat-kingdom-king-id))
+         "The king is not running")
+        ((not (plist-get (rat-kingdom-run-get space rat-kingdom-king-id)
+                         :session-id))
+         "The king's session has not started yet; try again in a moment")
+        ((rat-kingdom-run-busy-p rat-kingdom-king-id)
+         "The king is in the middle of a turn, or has input you have not \
+sent; try again when it is idle")))
+
+(defun rat-kingdom-king-restart-session (space)
+  "Stop the king in SPACE and start it again in the same session.
+Its conversation is kept, its tools are fetched afresh, and if they or
+its instructions changed it is given the current instructions.  Signal
+a `user-error' if the king is not running, has no session yet, is in
+the middle of a turn, or has input in its buffer that is not sent."
+  (when-let* ((reason (rat-kingdom-king--why-not-restart space)))
+    (user-error "%s" reason))
+  (rat-kingdom-run-stop space rat-kingdom-king-id)
+  (rat-kingdom-king-start space)
+  (rat-kingdom-reaction-run space))
+
+(defvar rat-kingdom-king--restart-pending nil
+  "Non-nil if the king is to be restarted when it next ends a turn.")
+
+(defun rat-kingdom-king-refresh (space)
+  "Give the running king in SPACE its current tools and instructions.
+Do nothing unless it is stale; see `rat-kingdom-king-stale-p'.  Return
+nil if nothing was needed, `restarted' if the king was restarted now,
+`deferred' if it will be when it next ends a turn, or `changed' if
+`rat-kingdom-king-restart-on-reload' is nil and nothing was done."
+  (setq rat-kingdom-king--restart-pending nil)
+  (when (rat-kingdom-king-stale-p space)
+    (cond ((not rat-kingdom-king-restart-on-reload) 'changed)
+          ((rat-kingdom-king--why-not-restart space)
+           (setq rat-kingdom-king--restart-pending t)
+           'deferred)
+          (t (rat-kingdom-king-restart-session space)
+             'restarted))))
+
+(defun rat-kingdom-king--restart-on-idle (run)
+  "Restart the king if RUN is the king and a restart is pending."
+  (when (and rat-kingdom-king--restart-pending
+             (equal run rat-kingdom-king-id))
+    (let ((space (rat-kingdom-space-default)))
+      (cond ((not (rat-kingdom-king-stale-p space))
+             (setq rat-kingdom-king--restart-pending nil))
+            ((not (rat-kingdom-king--why-not-restart space))
+             (setq rat-kingdom-king--restart-pending nil)
+             (rat-kingdom-king-restart-session space)
+             (message "rat-kingdom: restarted the king's session in place, \
+to give it its new tools and instructions"))))))
+
+(add-hook 'rat-kingdom-run-idle-functions #'rat-kingdom-king--restart-on-idle)
 
 ;;;; The king's tools
 

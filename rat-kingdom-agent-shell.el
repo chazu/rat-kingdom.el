@@ -408,16 +408,24 @@ If RUN has `:resume', take that session up again."
     (not (string-blank-p
           (buffer-substring-no-properties mark (point-max))))))
 
+(defun rat-kingdom-agent-shell-busy-p (buffer)
+  "Return non-nil if the agent in BUFFER is in a turn or has input not sent.
+Input not sent is text the user has typed in BUFFER.  A buffer that is
+gone is not busy."
+  (and (buffer-live-p buffer)
+       (with-current-buffer buffer
+         (or (ignore-errors (shell-maker-busy))
+             (rat-kingdom-agent-shell--input-pending-p)))))
+
 (defun rat-kingdom-agent-shell-send (buffer text)
   "Give the agent in BUFFER TEXT as its next prompt.
 Return non-nil if it was sent.  Nothing is sent, and nil is returned,
 while the agent is in a turn, has no session yet, or the user has
 typed something there that is not yet sent."
-  (when (buffer-live-p buffer)
+  (when (and (buffer-live-p buffer)
+             (not (rat-kingdom-agent-shell-busy-p buffer)))
     (with-current-buffer buffer
-      (when (and (map-nested-elt agent-shell--state '(:session :id))
-                 (not (ignore-errors (shell-maker-busy)))
-                 (not (rat-kingdom-agent-shell--input-pending-p)))
+      (when (map-nested-elt agent-shell--state '(:session :id))
         (let ((agent-shell-prefer-viewport-interaction nil))
           (agent-shell-insert :text text :submit t :no-focus t
                               :shell-buffer buffer))

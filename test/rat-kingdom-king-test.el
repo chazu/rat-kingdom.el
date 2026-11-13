@@ -285,6 +285,204 @@ Fail the test if the call failed."
       (should-not (rat-kingdom-king-test--news space))
       (should (equal (car rat-kingdom-story-test--events) '(review . "S-1"))))))
 
+;;;; Restarting in place
+
+(defun rat-kingdom-king-test--tell-busy ()
+  "Make the fake backend say an agent is busy while the test says so.
+That is while `rat-kingdom-story-test--busy' is non-nil."
+  (setq rat-kingdom-run-backend
+        (append (list :busy (lambda (_handle) rat-kingdom-story-test--busy))
+                rat-kingdom-run-backend)))
+
+(defun rat-kingdom-king-test--change-a-tool ()
+  "Give the king's `status' tool an argument it did not have."
+  (rat-kingdom-mcp-define-tool
+   "status" :description "Status." :roles '(king)
+   :args '((:name "verbose" :type string :optional t :description "More."))
+   :function #'ignore))
+
+(defun rat-kingdom-king-test--restart (space)
+  "Restart the king in SPACE, then record its session as a backend would."
+  (rat-kingdom-king-restart-session space)
+  (rat-kingdom-run-update space "king" :session-id "session-1"))
+
+(defun rat-kingdom-king-test--resumed-session ()
+  "Return the session the newest start of the king took up, if any."
+  (plist-get (car (car rat-kingdom-story-test--started)) :resume))
+
+(ert-deftest rat-kingdom-king-test-fingerprint ()
+  (rat-kingdom-story-test-with-repo (space _path)
+    (let ((rat-kingdom-mcp--tools (copy-sequence rat-kingdom-mcp--tools))
+          (rat-kingdom-king-instructions rat-kingdom-king-instructions))
+      (rat-kingdom-king-test--start space)
+      (let ((fingerprint (rat-kingdom-king-fingerprint)))
+        (should (equal (plist-get (rat-kingdom-run-get space "king")
+                                  :fingerprint)
+                       fingerprint))
+        (should (equal (rat-kingdom-king-fingerprint) fingerprint))
+        (should-not (rat-kingdom-king-stale-p space))
+        ;; A worker's tool is not the king's business.
+        (rat-kingdom-mcp-define-tool "finish" :description "Other."
+                                     :roles '(rat) :function #'ignore)
+        (should (equal (rat-kingdom-king-fingerprint) fingerprint))
+        ;; A change to a king's tool's schema is.
+        (rat-kingdom-king-test--change-a-tool)
+        (let ((changed (rat-kingdom-king-fingerprint)))
+          (should-not (equal changed fingerprint))
+          (should (rat-kingdom-king-stale-p space))
+          ;; So is a change to the instructions.
+          (setq rat-kingdom-king-instructions "Be brief.")
+          (should-not (member (rat-kingdom-king-fingerprint)
+                              (list fingerprint changed))))))))
+
+(ert-deftest rat-kingdom-king-test-restart-keeps-the-session ()
+  (rat-kingdom-story-test-with-repo (space _path)
+    (rat-kingdom-king-test--tell-busy)
+    (rat-kingdom-king-test--start space)
+    ;; No session to take up yet.
+    (should-error (rat-kingdom-king-restart-session space) :type 'user-error)
+    (rat-kingdom-run-update space "king" :session-id "session-1")
+    ;; Not in the middle of a turn, nor over input the user has not sent.
+    (setq rat-kingdom-story-test--busy t)
+    (should-error (rat-kingdom-king-restart-session space) :type 'user-error)
+    (should-not rat-kingdom-story-test--stopped)
+    (should (eql (length rat-kingdom-story-test--started) 1))
+    ;; News arrives while it waits.
+    (rat-kingdom-space-out space 'message :scope "demo"
+                           :payload (list :to "king" :story "S-1"
+                                          :text "S-1 is merged.")
+                           :actor "engine")
+    (should (zerop (rat-kingdom-king-deliver space)))
+    (setq rat-kingdom-story-test--busy nil)
+    (rat-kingdom-king-restart-session space)
+    (should (member "king" rat-kingdom-story-test--stopped))
+    (should (eql (length rat-kingdom-story-test--started) 2))
+    (should (equal (rat-kingdom-king-test--resumed-session) "session-1"))
+    (should (rat-kingdom-run-live-p "king"))
+    (should (equal (plist-get (rat-kingdom-run-get space "king") :state)
+                   "working"))
+    ;; Nothing changed, so the prompt is the short one.
+    (let ((prompt (nth 1 (car rat-kingdom-story-test--started))))
+      (should (string-search "Your session was restarted" prompt))
+      (should-not (string-search "replace the ones" prompt))
+      (should-not (string-search "You are the king of" prompt)))
+    ;; The news is still there, and reaches the new session.
+    (should (eql (length (rat-kingdom-king-test--news space)) 1))
+    (rat-kingdom-king--on-idle "king")
+    (should (string-search "S-1 is merged."
+                           (cdr (car rat-kingdom-story-test--sent))))
+    (should-not (rat-kingdom-king-test--news space))
+    (should-not (rat-kingdom-reaction-failures space))))
+
+(ert-deftest rat-kingdom-king-test-a-backend-that-cannot-tell-is-busy ()
+  (rat-kingdom-story-test-with-repo (space _path)
+    (rat-kingdom-king-test--start space)
+    (rat-kingdom-run-update space "king" :session-id "session-1")
+    (should (rat-kingdom-run-busy-p "king"))
+    (should-error (rat-kingdom-king-restart-session space) :type 'user-error)
+    (should-not (rat-kingdom-run-busy-p "nobody"))))
+
+(ert-deftest rat-kingdom-king-test-resume-prompt-gives-changed-instructions ()
+  (rat-kingdom-story-test-with-repo (space _path)
+    (let ((rat-kingdom-mcp--tools (copy-sequence rat-kingdom-mcp--tools))
+          (rat-kingdom-king-instructions "You are the king. Rule one."))
+      (rat-kingdom-king-test--tell-busy)
+      (rat-kingdom-king-test--start space)
+      (rat-kingdom-run-update space "king" :session-id "session-1")
+      (setq rat-kingdom-king-instructions "You are the king. Rule two.")
+      (rat-kingdom-king-test--restart space)
+      (let ((prompt (nth 1 (car rat-kingdom-story-test--started))))
+        (should (string-prefix-p "[rat-kingdom] Your session was restarted"
+                                 prompt))
+        (should (string-search "These instructions replace the ones you were given earlier:
+
+You are the king. Rule two.
+
+" prompt))
+        (should (string-search "Your tools may have changed" prompt))
+        (should (string-search "Rely on the tool list you have now" prompt))
+        (should (string-search "Stories in progress:" prompt)))
+      ;; The new fingerprint is recorded, so the next restart is short.
+      (should-not (rat-kingdom-king-stale-p space))
+      (rat-kingdom-king-test--restart space)
+      (should-not (string-search "Rule two"
+                                 (nth 1 (car rat-kingdom-story-test--started))))
+      ;; A tool's schema changing is enough.
+      (rat-kingdom-king-test--change-a-tool)
+      (rat-kingdom-king-test--restart space)
+      (let ((prompt (nth 1 (car rat-kingdom-story-test--started))))
+        (should (string-search "Rule two" prompt))
+        (should (string-search "Your tools may have changed" prompt))))))
+
+(ert-deftest rat-kingdom-king-test-refresh-restarts-an-idle-king ()
+  (rat-kingdom-story-test-with-repo (space _path)
+    (let ((rat-kingdom-mcp--tools (copy-sequence rat-kingdom-mcp--tools))
+          (rat-kingdom-king-restart-on-reload t)
+          (rat-kingdom-king--restart-pending nil))
+      (rat-kingdom-king-test--tell-busy)
+      ;; No king running: nothing to do.
+      (should-not (rat-kingdom-king-refresh space))
+      (rat-kingdom-king-test--start space)
+      (rat-kingdom-run-update space "king" :session-id "session-1")
+      ;; Nothing changed: nothing to do.
+      (should-not (rat-kingdom-king-refresh space))
+      (should (eql (length rat-kingdom-story-test--started) 1))
+      (rat-kingdom-king-test--change-a-tool)
+      (should (eq (rat-kingdom-king-refresh space) 'restarted))
+      (should (eql (length rat-kingdom-story-test--started) 2))
+      (should (equal (rat-kingdom-king-test--resumed-session) "session-1"))
+      (should-not rat-kingdom-king--restart-pending)
+      (should-not (rat-kingdom-king-stale-p space)))))
+
+(ert-deftest rat-kingdom-king-test-refresh-waits-for-a-busy-king ()
+  (rat-kingdom-story-test-with-repo (space _path)
+    (let ((rat-kingdom-mcp--tools (copy-sequence rat-kingdom-mcp--tools))
+          (rat-kingdom-king-restart-on-reload t)
+          (rat-kingdom-king--restart-pending nil))
+      (rat-kingdom-king-test--tell-busy)
+      (rat-kingdom-king-test--start space)
+      (rat-kingdom-run-update space "king" :session-id "session-1")
+      (rat-kingdom-king-test--change-a-tool)
+      (setq rat-kingdom-story-test--busy t)
+      (should (eq (rat-kingdom-king-refresh space) 'deferred))
+      (should rat-kingdom-king--restart-pending)
+      (should (eql (length rat-kingdom-story-test--started) 1))
+      ;; Another run's turn ending changes nothing; nor does the king's
+      ;; while the user still has input there.
+      (setq rat-kingdom-story-test--busy nil)
+      (run-hook-with-args 'rat-kingdom-run-idle-functions "S-1.1")
+      (should (eql (length rat-kingdom-story-test--started) 1))
+      (setq rat-kingdom-story-test--busy t)
+      (run-hook-with-args 'rat-kingdom-run-idle-functions "king")
+      (should (eql (length rat-kingdom-story-test--started) 1))
+      (should rat-kingdom-king--restart-pending)
+      ;; When it is idle it is restarted, once.
+      (setq rat-kingdom-story-test--busy nil)
+      (run-hook-with-args 'rat-kingdom-run-idle-functions "king")
+      (should (eql (length rat-kingdom-story-test--started) 2))
+      (should (equal (rat-kingdom-king-test--resumed-session) "session-1"))
+      (should (string-search "Your tools may have changed"
+                             (nth 1 (car rat-kingdom-story-test--started))))
+      (should-not rat-kingdom-king--restart-pending)
+      (run-hook-with-args 'rat-kingdom-run-idle-functions "king")
+      (should (eql (length rat-kingdom-story-test--started) 2)))))
+
+(ert-deftest rat-kingdom-king-test-refresh-only-tells-when-asked-to ()
+  (rat-kingdom-story-test-with-repo (space _path)
+    (let ((rat-kingdom-mcp--tools (copy-sequence rat-kingdom-mcp--tools))
+          (rat-kingdom-king-restart-on-reload nil)
+          (rat-kingdom-king--restart-pending nil))
+      (rat-kingdom-king-test--tell-busy)
+      (rat-kingdom-king-test--start space)
+      (rat-kingdom-run-update space "king" :session-id "session-1")
+      (rat-kingdom-king-test--change-a-tool)
+      (should (eq (rat-kingdom-king-refresh space) 'changed))
+      (should-not rat-kingdom-king--restart-pending)
+      (run-hook-with-args 'rat-kingdom-run-idle-functions "king")
+      (should (eql (length rat-kingdom-story-test--started) 1))
+      (should-not rat-kingdom-story-test--stopped)
+      (should (rat-kingdom-king-stale-p space)))))
+
 ;;;; Tasks
 
 (ert-deftest rat-kingdom-king-test-status-lists-available-tasks ()

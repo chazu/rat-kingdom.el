@@ -78,7 +78,9 @@ Everything the king does has a command, for when you would sooner do it
 by hand: `rat-kingdom-add-repo`, `rat-kingdom-start-story`,
 `rat-kingdom-move-story`, `rat-kingdom-review-story`,
 `rat-kingdom-cancel-story`, `rat-kingdom-publish`. `M-x
-rat-kingdom-inspect` shows the space.
+rat-kingdom-inspect` shows the space. `M-x rat-kingdom-king-restart`
+restarts the king's session in place, keeping the conversation, so that it
+fetches its tools afresh.
 
 ### After a restart
 
@@ -177,7 +179,16 @@ eldev lint
 
 After pulling or merging changes to rat-kingdom, run `M-x rat-kingdom-reload`
 to load them into the running Emacs. Running agents, the open space, the tool
-endpoint and the king are kept, and no agent is started or stopped.
+endpoint and the king are kept, and no agent is started or stopped, with one
+exception. The king's tools and instructions are fixed when its session
+starts, so a reload that changes them restarts the king's session in place:
+it is stopped and its session taken up again, keeping the conversation, with
+its tools fetched afresh and the new instructions given to it. That waits
+until the king is between turns and you have nothing half typed in its
+buffer; until then the reload message tells you, and the king is restarted
+when it next ends a turn. News for the king waits meanwhile. With
+`rat-kingdom-king-restart-on-reload` set to nil the reload only tells you to
+run `M-x rat-kingdom-king-restart`.
 
 Reloading only works if no default lives in a `defvar`'s initial value, since
 `defvar` never overwrites a variable that is already bound. So:
