@@ -50,6 +50,14 @@ for no limit). A story started beyond that waits "for a free worker" and
 gets one, oldest first, as soon as another worker finishes, blocks, ends or
 is stopped. Waiting does not count as one of its workers.
 
+If a worktree needs something before the code builds or its tests run,
+such as installed dependencies, give the repository a setup command: tell
+the king "add ~/src/app with check `npm test` and setup `npm ci`", or
+answer the setup prompt of `M-x rat-kingdom-add-repo`. It runs, without a
+shell, in each new worktree before its worker starts, and in the scratch
+worktree before the check. A setup that fails stops the story with its
+output.
+
 Finished work lands on the target branch only. Your checkout is not
 touched and nothing is pushed. Merge or discard that branch yourself.
 
@@ -87,8 +95,8 @@ fetches its tools afresh.
 Turning on `rat-kingdom-mode`, which `rat-kingdom-king` does, recovers
 what the last Emacs left in flight. A worker that was cut off is replaced
 by a new one in the same worktree, told to look at what is there. A check
-that was running runs again. The king takes up its earlier session; `C-u
-M-x rat-kingdom-king` starts a new one instead.
+or setup that was running runs again. The king takes up its earlier
+session; `C-u M-x rat-kingdom-king` starts a new one instead.
 
 ### Workflows
 

@@ -210,12 +210,16 @@ that fails is reported and otherwise ignored."
      (if repos
          (mapconcat
           (lambda (repo)
-            (format "- %s at %s; target %s; check %s; workflow %s"
+            (format "- %s at %s; target %s; check %s%s; workflow %s"
                     (plist-get repo :name) (plist-get repo :path)
                     (plist-get repo :target)
                     (if (plist-get repo :check)
                         (combine-and-quote-strings (plist-get repo :check))
                       "none")
+                    (if (plist-get repo :setup)
+                        (concat "; setup " (combine-and-quote-strings
+                                            (plist-get repo :setup)))
+                      "")
                     (or (plist-get repo :workflow)
                         rat-kingdom-story-default-workflow)))
           repos "\n")
@@ -631,6 +635,10 @@ from HEAD if it does not exist."
        :description "The command that must succeed before work is merged, \
 for example \"make test\". It is run without a shell in a scratch worktree \
 that has the work merged in. Leave out for no check.")
+      (:name "setup" :type string :optional t
+       :description "Command run without a shell in each fresh worktree \
+before a worker starts and before the check, e.g. \"npm ci\". Leave out \
+for none.")
       (:name "target" :type string :optional t
        :description "The branch finished work is merged into. Default \
 rk/integration. It must not be a branch that is checked out.")
@@ -641,6 +649,7 @@ rk/integration. It must not be a branch that is checked out.")
   (let ((repo (rat-kingdom-repo-add
                space (expand-file-name (arg 'path))
                :check (and (arg 'check) (split-string-and-unquote (arg 'check)))
+               :setup (and (arg 'setup) (split-string-and-unquote (arg 'setup)))
                :target (arg 'target) :workflow (arg 'workflow))))
     (string-join
      (cons (format "Registered %s at %s. Finished work is merged into %s."

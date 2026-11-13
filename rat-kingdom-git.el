@@ -102,13 +102,16 @@ Signal `rat-kingdom-git-error' if it fails."
 
 ;;;; Repositories
 
-(cl-defun rat-kingdom-repo-add (space path &key name target check workflow)
+(cl-defun rat-kingdom-repo-add (space path
+                                      &key name target check setup workflow)
   "Register the repository at PATH in SPACE and return its record.
 NAME defaults to the directory's name.  TARGET is the branch finished
 work is merged into, by default `rat-kingdom-git-default-target'; it
 is created from HEAD if it does not exist.  CHECK is the command, a
 list of strings, that must succeed before work is merged; it is run
-without a shell.  WORKFLOW names the workflow its stories follow
+without a shell.  SETUP is a command of the same kind run in each new
+worktree before a worker starts in it and before the check, for example
+to install dependencies.  WORKFLOW names the workflow its stories follow
 unless they say otherwise.  Registering a name again replaces its
 record."
   (let* ((top (rat-kingdom-git path "rev-parse" "--show-toplevel"))
@@ -118,6 +121,8 @@ record."
       (error "A repository name is letters, digits, dots, dashes: %S" name))
     (unless (and (listp check) (cl-every #'stringp check))
       (error "A check is a list of strings: %S" check))
+    (unless (and (listp setup) (cl-every #'stringp setup))
+      (error "A setup is a list of strings: %S" setup))
     (unless (rat-kingdom-git-ok-p top "rev-parse" "--verify" "--quiet" "HEAD")
       (error "%s has no commits yet" top))
     (unless (rat-kingdom-git-ok-p top "rev-parse" "--verify" "--quiet"
@@ -125,7 +130,7 @@ record."
       (rat-kingdom-git top "branch" target "HEAD"))
     (rat-kingdom-space-put space 'repo :scope name :identity name
                            :payload (list :path top :target target
-                                          :check check
+                                          :check check :setup setup
                                           :workflow (and workflow
                                                          (format "%s" workflow)))
                            :actor "user")
@@ -133,8 +138,8 @@ record."
 
 (defun rat-kingdom-repo-get (space name)
   "Return the record of the repository NAME in SPACE, or nil.
-The record is a property list: `:name', `:path', `:target', `:check'
-and `:workflow'."
+The record is a property list: `:name', `:path', `:target', `:check',
+`:setup' and `:workflow'."
   (when-let* ((tuple (rat-kingdom-space-rd
                       space (list 'repo :scope name :identity name))))
     (append (list :name (plist-get tuple :identity))
