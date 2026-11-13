@@ -47,6 +47,8 @@
 ;;   M-x rat-kingdom-review-story give a verdict on a story in review
 ;;   M-x rat-kingdom-cancel-story end a story
 ;;   M-x rat-kingdom-reconcile    recover work an Emacs restart cut off
+;;   M-x rat-kingdom-tasks-refresh show the trackers' ready tasks as
+;;                                `available' in the space
 ;;
 ;; A worker is a Claude Code session in an agent-shell buffer, in its own
 ;; worktree.  When it reports that it is done, its commit is merged in a
@@ -64,6 +66,7 @@
 (require 'rat-kingdom-mcp)
 (require 'rat-kingdom-run)
 (require 'rat-kingdom-workflow)
+(require 'rat-kingdom-task)
 (require 'rat-kingdom-story)
 (require 'rat-kingdom-king)
 
@@ -112,7 +115,8 @@ again (%s)"
   "React to what is written to the rat-kingdom space.
 While this is on, stories move: workers are started, their results
 checked, reviewed and merged.  Turning it on first recovers whatever
-an earlier Emacs left in flight."
+an earlier Emacs left in flight, then shows each repository's ready
+tasks as `available' in the space."
   :global t
   :group 'rat-kingdom
   (when (timerp rat-kingdom--watch-timer)
@@ -122,6 +126,8 @@ an earlier Emacs left in flight."
       (let ((space (rat-kingdom-space-default)))
         (rat-kingdom-reaction--ensure-table space)
         (rat-kingdom-reconcile)
+        (with-demoted-errors "rat-kingdom: projecting tasks: %S"
+          (rat-kingdom-task-project-all space))
         (rat-kingdom-reaction-attach space)
         (setq rat-kingdom--watch-timer
               (run-at-time rat-kingdom-story-watch-interval

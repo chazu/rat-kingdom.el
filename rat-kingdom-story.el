@@ -49,6 +49,7 @@
 (require 'rat-kingdom-git)
 (require 'rat-kingdom-run)
 (require 'rat-kingdom-workflow)
+(require 'rat-kingdom-task)
 
 (defcustom rat-kingdom-story-default-workflow "story"
   "The workflow of a story whose repository names none."
@@ -76,7 +77,8 @@ A step's `:timeout' overrides this.  A kind left out has no limit."
 (defconst rat-kingdom-story-output-limit 4000
   "Most characters of a check's output that are kept.")
 
-(defvar rat-kingdom-story-event-functions (list #'rat-kingdom-story--announce)
+(defvar rat-kingdom-story-event-functions
+  (list #'rat-kingdom-story--announce #'rat-kingdom-task-story-event)
   "Functions called when something a person should know happens to a story.
 Each is called with the space, the event and the story's token.  The
 events are `done' (merged and about to be archived), `parked' (stopped
@@ -194,12 +196,15 @@ CHANGES is merged into its payload."
       (setq id (format "S-%04x" (random 65536))))
     id))
 
-(defun rat-kingdom-story-start (space repo title &optional description id workflow)
+(defun rat-kingdom-story-start (space repo title &optional description id
+                                      workflow task)
   "Start a story in SPACE for the repository REPO and return its id.
 TITLE says what to do in a line; DESCRIPTION gives the acceptance
 criteria.  ID names the story; one is made up if it is nil.  WORKFLOW
 names its workflow; by default the repository's, and failing that
-`rat-kingdom-story-default-workflow'."
+`rat-kingdom-story-default-workflow'.  TASK, if given, is the id of
+the tracker's task the story works on: its `available' tuple is taken
+and the task is claimed for the story."
   (let ((record (or (rat-kingdom-repo-get space repo)
                     (error "No repository called %s is registered" repo)))
         (id (or id (rat-kingdom-story--new-id space))))
@@ -214,13 +219,21 @@ names its workflow; by default the repository's, and failing that
                                 (mapconcat (lambda (workflow)
                                              (plist-get workflow :name))
                                            (rat-kingdom-workflow-list) ", ")))))
-      (rat-kingdom-space-out
-       space 'story :scope repo :identity id :owner id
-       :payload (list :workflow name :at (plist-get workflow :start)
-                      :phase "enter" :title title :description description
-                      :attempt 0
-                      :entered (funcall rat-kingdom-space-now-function))
-       :actor "user")
+      (rat-kingdom-space-with-transaction space
+        (when task
+          (rat-kingdom-space-in space (list 'available :scope repo :identity task)
+                                :actor "user"))
+        (rat-kingdom-space-out
+         space 'story :scope repo :identity id :owner id
+         :payload (append
+                   (list :workflow name :at (plist-get workflow :start)
+                         :phase "enter" :title title :description description
+                         :attempt 0
+                         :entered (funcall rat-kingdom-space-now-function))
+                   (and task (list :task task)))
+         :actor "user"))
+      (when task
+        (rat-kingdom-task-claim-for-story space repo task id))
       id)))
 
 (defun rat-kingdom-story-warnings (space repo)
@@ -772,6 +785,7 @@ who cancelled it.  Return a sentence saying what is left."
       (rat-kingdom-story--put space story :phase "cancelled" :step nil
                               :awaiting nil)
       (rat-kingdom-space-sweep space (plist-get story :owner)))
+    (rat-kingdom-task-story-ended space story)
     (if (plist-get payload :worktree)
         (format "Cancelled %s. Its worktree %s and branch %s are kept."
                 id (plist-get payload :worktree) (plist-get payload :branch))
