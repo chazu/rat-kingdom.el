@@ -4,7 +4,7 @@
 
 ;; Author: Chaz Straney <chaz.straney@gmail.com>
 ;; Maintainer: Chaz Straney <chaz.straney@gmail.com>
-;; URL: https://github.com/chazu/rk3
+;; URL: https://github.com/chazu/rat-kingdom.el
 ;; Version: 0.1.0
 ;; Package-Requires: ((emacs "29.1"))
 ;; Keywords: tools, processes
