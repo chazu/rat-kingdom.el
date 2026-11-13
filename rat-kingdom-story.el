@@ -77,14 +77,16 @@ A step's `:timeout' overrides this.  A kind left out has no limit."
 (defconst rat-kingdom-story-output-limit 4000
   "Most characters of a check's output that are kept.")
 
-(defvar rat-kingdom-story-event-functions
-  (list #'rat-kingdom-story--announce #'rat-kingdom-task-story-event)
+(defvar rat-kingdom-story-event-functions nil
   "Functions called when something a person should know happens to a story.
 Each is called with the space, the event and the story's token.  The
 events are `done' (merged and about to be archived), `parked' (stopped
 until someone moves it; its `:reason' says why), `review' (it waits for
 a verdict) and `stuck'.  They are called inside the transaction that
 made the change.")
+
+(add-hook 'rat-kingdom-story-event-functions #'rat-kingdom-story--announce t)
+(add-hook 'rat-kingdom-story-event-functions #'rat-kingdom-task-story-event t)
 
 (defvar rat-kingdom-story--actor "engine"
   "Who is recorded as moving tokens.")

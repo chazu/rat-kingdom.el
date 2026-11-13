@@ -49,6 +49,7 @@
 ;;   M-x rat-kingdom-reconcile    recover work an Emacs restart cut off
 ;;   M-x rat-kingdom-tasks-refresh show the trackers' ready tasks as
 ;;                                `available' in the space
+;;   M-x rat-kingdom-reload       load changed source into this Emacs
 ;;
 ;; A worker is a Claude Code session in an agent-shell buffer, in its own
 ;; worktree.  When it reports that it is done, its commit is merged in a
@@ -110,6 +111,15 @@ again (%s)"
     (when (rat-kingdom-space-db space)
       (rat-kingdom-story-watch space))))
 
+(defun rat-kingdom--start-watch ()
+  "Start the timer that looks for stuck stories, replacing any."
+  (when (timerp rat-kingdom--watch-timer)
+    (cancel-timer rat-kingdom--watch-timer))
+  (setq rat-kingdom--watch-timer
+        (run-at-time rat-kingdom-story-watch-interval
+                     rat-kingdom-story-watch-interval
+                     #'rat-kingdom--watch)))
+
 ;;;###autoload
 (define-minor-mode rat-kingdom-mode
   "React to what is written to the rat-kingdom space.
@@ -129,10 +139,7 @@ tasks as `available' in the space."
         (with-demoted-errors "rat-kingdom: projecting tasks: %S"
           (rat-kingdom-task-project-all space))
         (rat-kingdom-reaction-attach space)
-        (setq rat-kingdom--watch-timer
-              (run-at-time rat-kingdom-story-watch-interval
-                           rat-kingdom-story-watch-interval
-                           #'rat-kingdom--watch)))
+        (rat-kingdom--start-watch))
     (rat-kingdom-reaction-detach (rat-kingdom-space-default))
     (rat-kingdom-mcp-stop)))
 
@@ -256,6 +263,73 @@ candidate worktree; work is merged only if it succeeds."
   "End STORY for good, keeping its worktree and branch."
   (interactive (list (rat-kingdom--read-story "Cancel story: ")))
   (message "%s" (rat-kingdom-story-cancel (rat-kingdom-space-default) story)))
+
+;;;; Reloading
+
+(defconst rat-kingdom--files
+  '("rat-kingdom-space" "rat-kingdom-reaction" "rat-kingdom-git"
+    "rat-kingdom-mcp" "rat-kingdom-inspector" "rat-kingdom-agent-shell"
+    "rat-kingdom-run" "rat-kingdom-workflow" "rat-kingdom-task"
+    "rat-kingdom-story" "rat-kingdom-king" "rat-kingdom")
+  "The package's files, each after the files it requires.")
+
+(defun rat-kingdom--directory ()
+  "Return the directory rat-kingdom was loaded from."
+  (file-name-directory (or (symbol-file 'rat-kingdom--directory 'defun)
+                           (locate-library "rat-kingdom")
+                           (error "Cannot tell where rat-kingdom is"))))
+
+(defun rat-kingdom--options-at-default ()
+  "Return the rat-kingdom user options whose value is still their default."
+  (let (options)
+    (mapatoms
+     (lambda (symbol)
+       (when (and (string-prefix-p "rat-kingdom-" (symbol-name symbol))
+                  (default-boundp symbol)
+                  (get symbol 'standard-value)
+                  (equal (default-value symbol)
+                         (ignore-errors
+                           (eval (car (get symbol 'standard-value)) t))))
+         (push symbol options))))
+    options))
+
+(defun rat-kingdom--load-files (directory)
+  "Load the source of every rat-kingdom file in DIRECTORY again.
+Variables keep their values, as `defvar' does, but a user option that
+was at its default takes its new default, and the inspector's keymap is
+made again.  Return the files loaded."
+  (let ((options (rat-kingdom--options-at-default)))
+    (makunbound 'rat-kingdom-inspector-mode-map)
+    (prog1 (mapcar (lambda (name)
+                     (let ((file (expand-file-name (concat name ".el")
+                                                   directory)))
+                       (load file nil t t)
+                       file))
+                   rat-kingdom--files)
+      (dolist (option options)
+        (let ((value (eval (car (get option 'standard-value)) t)))
+          (unless (equal value (default-value option))
+            (set-default option value)))))))
+
+;;;###autoload
+(defun rat-kingdom-reload ()
+  "Load rat-kingdom's source files again, after they have changed.
+Run this after pulling or merging changes to rat-kingdom.  What is
+running keeps running: agents, the open space, the tool endpoint and
+the king.  If `rat-kingdom-mode' is on, the reactions are attached
+again, so that new definitions take effect, and the watch is
+restarted."
+  (interactive)
+  (let* ((directory (rat-kingdom--directory))
+         (files (rat-kingdom--load-files directory)))
+    (when rat-kingdom-mode
+      (let ((space (rat-kingdom-space-default)))
+        (rat-kingdom-reaction-detach space)
+        (rat-kingdom-reaction-attach space))
+      (rat-kingdom--start-watch))
+    (message "rat-kingdom: reloaded %d files from %s%s"
+             (length files) (abbreviate-file-name directory)
+             (if rat-kingdom-mode "; reactions attached again" ""))))
 
 (provide 'rat-kingdom)
 ;;; rat-kingdom.el ends here

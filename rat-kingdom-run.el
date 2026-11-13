@@ -51,11 +51,15 @@
 (autoload 'rat-kingdom-agent-shell-stop "rat-kingdom-agent-shell")
 (autoload 'rat-kingdom-agent-shell-send "rat-kingdom-agent-shell")
 
-(defvar rat-kingdom-run-backend
+(defconst rat-kingdom-run-default-backend
   (list :start #'rat-kingdom-agent-shell-start
         :stop #'rat-kingdom-agent-shell-stop
         :send #'rat-kingdom-agent-shell-send)
+  "The backend used when `rat-kingdom-run-backend' is nil: agent-shell.")
+
+(defvar rat-kingdom-run-backend nil
   "How agents are started and stopped, as a property list of functions.
+Nil means `rat-kingdom-run-default-backend'.
 `:start' is called with the run's record and its prompt.  It starts an
 agent in the run's worktree, sends it the prompt, and returns a handle.
 If the record has `:resume', a session id, it should take that session
@@ -65,6 +69,19 @@ for `rat-kingdom-run-idle-functions' to run when the agent ends a turn.
 `:stop' is called with the handle.  `:send' is called with the handle
 and a text; it gives the agent the text as its next prompt and returns
 non-nil, or returns nil if the agent cannot take one now.")
+
+;; An Emacs that loaded an older version of this file holds a copy of
+;; the built-in backend here, perhaps an incomplete one; use the
+;; current default instead.
+(when (cl-loop for (_key function) on rat-kingdom-run-backend by #'cddr
+               always (memq function '(rat-kingdom-agent-shell-start
+                                       rat-kingdom-agent-shell-stop
+                                       rat-kingdom-agent-shell-send)))
+  (setq rat-kingdom-run-backend nil))
+
+(defun rat-kingdom-run--backend (key)
+  "Return the function KEY, such as `:start', of the backend in use."
+  (plist-get (or rat-kingdom-run-backend rat-kingdom-run-default-backend) key))
 
 (defvar rat-kingdom-run-idle-functions nil
   "Functions called with a run's id when its agent has ended a turn.")
@@ -158,7 +175,7 @@ If it cannot be started, the run is marked exited, with the error."
     (condition-case err
         (progn
           (puthash id
-                   (funcall (plist-get rat-kingdom-run-backend :start)
+                   (funcall (rat-kingdom-run--backend :start)
                             run (plist-get run :prompt))
                    rat-kingdom-run--handles)
           (rat-kingdom-run-update space id :state "working"))
@@ -182,26 +199,40 @@ its state."
   (when-let* ((handle (gethash id rat-kingdom-run--handles)))
     (remhash id rat-kingdom-run--handles)
     (with-demoted-errors "rat-kingdom: stopping a run: %S"
-      (funcall (plist-get rat-kingdom-run-backend :stop) handle)))
+      (funcall (rat-kingdom-run--backend :stop) handle)))
   (rat-kingdom-mcp-revoke id)
   (when-let* ((run (rat-kingdom-run-get space id))
               ((member (plist-get run :state)
                        '("starting" "working" "exited" "interrupted"))))
     (rat-kingdom-run-update space id :state "stopped")))
 
+(defvar rat-kingdom-run--warned-no-send nil
+  "Non-nil once a backend without `:send' has been warned about.")
+
 (defun rat-kingdom-run-send (id text)
   "Give the agent of the run ID TEXT as its next prompt.
 Return non-nil if it took it, and nil if the run has no agent in this
-Emacs or the agent cannot take a prompt now."
-  (when-let* ((handle (gethash id rat-kingdom-run--handles))
-              (send (plist-get rat-kingdom-run-backend :send)))
-    (funcall send handle text)))
+Emacs or the agent cannot take a prompt now.  A backend without `:send'
+never takes one; that is warned about once."
+  (when-let* ((handle (gethash id rat-kingdom-run--handles)))
+    (if-let* ((send (rat-kingdom-run--backend :send)))
+        (funcall send handle text)
+      (unless rat-kingdom-run--warned-no-send
+        (setq rat-kingdom-run--warned-no-send t)
+        (display-warning 'rat-kingdom
+                         "The run backend has no :send, so no agent can be \
+given a prompt after it starts; see `rat-kingdom-run-backend'"))
+      nil)))
 
 (defvar rat-kingdom-run--dying nil
   "Non-nil once Emacs has begun to exit.
 Sessions that end from then on were interrupted, not ended.")
 
-(add-hook 'kill-emacs-hook (lambda () (setq rat-kingdom-run--dying t)))
+(defun rat-kingdom-run--note-dying ()
+  "Note that Emacs has begun to exit."
+  (setq rat-kingdom-run--dying t))
+
+(add-hook 'kill-emacs-hook #'rat-kingdom-run--note-dying)
 
 (defun rat-kingdom-run-exited (id)
   "Note that the agent session of the run ID has ended.

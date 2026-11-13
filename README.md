@@ -148,6 +148,22 @@ eldev compile -W
 eldev lint
 ```
 
+After pulling or merging changes to rat-kingdom, run `M-x rat-kingdom-reload`
+to load them into the running Emacs. Running agents, the open space, the tool
+endpoint and the king are kept, and no agent is started or stopped.
+
+Reloading only works if no default lives in a `defvar`'s initial value, since
+`defvar` never overwrites a variable that is already bound. So:
+
+- Put built-in configuration in a `defconst`, with the variable, if any,
+  holding only what is added to it or nil meaning "the default".
+- Start a hook variable as nil and register its built-in members with
+  `add-hook` at top level, after the variable is defined.
+- Keep `defvar` for state that must survive a reload: live runs, grants,
+  timers, the open space, and registries filled by `-define` calls, which
+  replace an entry of the same name.
+- Add a new file to `rat-kingdom--files` in rat-kingdom.el.
+
 ## License
 
 GPL-3.0-or-later.
