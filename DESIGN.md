@@ -280,13 +280,43 @@ On Emacs startup, and on demand, reconcile:
   with a brief that says what exists in the worktree.
 - Stopping never commits, merges, pushes or deletes.
 
-**To verify:** how completely Claude's ACP adapter restores a session by
-ID. The design does not depend on it.
+**Checked, 2026-11-12** (agent-shell `6ae364b`, claude-agent-acp 0.101.0,
+by reading both; not yet exercised by a test):
+
+- `agent-shell--start` starts a shell from code. It takes an agent config,
+  `:no-focus` for the background, and `:session-strategy 'new` to skip the
+  session picker. It returns the buffer.
+- Passing `:session-id` restores that session with `session/resume` or
+  `session/load`, whichever the agent advertises, and starts a new session
+  if it advertises neither. Claude's adapter advertises `loadSession` and
+  implements resume. The session ID is in the shell's state once the
+  session is up, and is stored on the `run` tuple.
+- `agent-shell-insert` with `:submit t` sends a prompt to a shell.
+  `agent-shell-subscribe-to` delivers its events.
+- `agent-shell--start` and the shell's state are internal to agent-shell.
+  deathless and meta-agent-shell already depend on both. rat-kingdom keeps
+  every such call in one file.
 
 ## 9. Roles and tools
 
-Tools are served by the existing `emacs` MCP endpoint, scoped by role. A
+Tools are served by an MCP endpoint inside Emacs, scoped by role. A
 worker's session does not contain the coordinator tools at all.
+
+**Checked, 2026-11-12:** an agent config carries its own `:mcp-servers`,
+and agent-shell sends those with the session request in place of the
+global list. So each run gets a server entry whose URL holds a token for
+that run. The endpoint looks the token up, knows the run and its role, and
+lists only that role's tools. The global list is replaced, not merged, so
+rat-kingdom adds the user's other servers to each run's list itself.
+
+The `emacs` endpoint in the user's configuration has one token and one
+tool registry, so it cannot tell runs apart. rat-kingdom ships its own
+endpoint, built the same way.
+
+An agent config also carries `:session-meta`, sent as `_meta` with the
+session request. Claude's adapter reads a system prompt and lists of
+allowed and disallowed tools from it. That is where a role's instructions
+go, and it lets a role be denied built-in tools as well.
 
 | Role | Lifetime | Tools |
 |---|---|---|
@@ -426,10 +456,10 @@ wait longer for review than for implementation.
 
 ## 15. Build order
 
-1. **Space** (built: `rat-kingdom-space.el`): SQLite schema,
-   `out`/`in`/`rd`/`scan`, patterns, modalities, owner sweep to archive,
-   operations log. Tested without agents. A plain space inspector
-   (surface 8) is still to do.
+1. **Space** (built: `rat-kingdom-space.el`, `rat-kingdom-inspector.el`):
+   SQLite schema, `out`/`in`/`rd`/`scan`, patterns, modalities, owner
+   sweep to archive, operations log. Tested without agents. The inspector
+   is surface 8 in a plain form: a tabulated list, not yet a2ui.
 2. **Reactions** (built: `rat-kingdom-reaction.el`): definition, joins,
    one transaction per firing, recorded failures, once-per-match memory,
    scheduling after commit, external-write polling.

@@ -223,6 +223,23 @@ announced.  A transaction inside another one joins it."
                file version rat-kingdom-space--schema-version))))
     space))
 
+(defcustom rat-kingdom-space-default-file
+  (locate-user-emacs-file "rat-kingdom/space.db")
+  "The file holding the space that rat-kingdom works in."
+  :type 'file
+  :group 'rat-kingdom)
+
+(defvar rat-kingdom-space--default nil
+  "The open default space, or nil.")
+
+(defun rat-kingdom-space-default ()
+  "Return the space in `rat-kingdom-space-default-file', opening it if needed."
+  (unless (and rat-kingdom-space--default
+               (rat-kingdom-space-db rat-kingdom-space--default))
+    (setq rat-kingdom-space--default
+          (rat-kingdom-space-open rat-kingdom-space-default-file)))
+  rat-kingdom-space--default)
+
 (defun rat-kingdom-space-close (space)
   "Close SPACE."
   (when-let* ((db (rat-kingdom-space-db space)))
@@ -588,6 +605,17 @@ how many tuples moved."
       count)))
 
 ;;;; Inspection
+
+(defun rat-kingdom-space-counts (space)
+  "Return an alist of category and live tuple count for SPACE.
+Categories with no tuples are left out.  Sorted by category name."
+  (mapcar (lambda (row) (cons (intern (car row)) (cadr row)))
+          (sqlite-select
+           (rat-kingdom-space-db space)
+           "SELECT category, COUNT(*) FROM tuples
+            WHERE expires IS NULL OR expires > ?
+            GROUP BY category ORDER BY category"
+           (list (rat-kingdom-space--now)))))
 
 (defun rat-kingdom-space-archived (space &optional owner)
   "Return the archived tuples of SPACE, oldest first.

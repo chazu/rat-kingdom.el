@@ -4,8 +4,7 @@ Swarm orchestration for coding agents, inside Emacs. A king you talk to,
 workers in their own Git worktrees, and a tuplespace they coordinate
 through. See [DESIGN.md](DESIGN.md).
 
-**Status:** early. The tuplespace (`rat-kingdom-space.el`) and reactions
-(`rat-kingdom-reaction.el`) exist. Nothing here starts an agent yet.
+**Status:** early. The tuplespace, reactions and a space inspector exist. Nothing here starts an agent yet.
 
 ## Requirements
 
@@ -49,6 +48,22 @@ Emacs 29.1 or later, built with SQLite support.
 
 A firing is one transaction: the take and whatever the body writes commit
 together, or not at all. The commentary in each file has the details.
+
+## Looking inside
+
+`M-x rat-kingdom-inspect` lists the space in `rat-kingdom-space-default-file`
+(`~/.emacs.d/rat-kingdom/space.db`).
+
+| Key   | Does                                     |
+|-------|------------------------------------------|
+| `t`   | list the live tuples                     |
+| `l`   | list the operations log, newest first    |
+| `A`   | list the archive, newest first           |
+| `/`   | narrow the tuples to a pattern           |
+| `RET` | show the row at point in full            |
+| `d`   | retract the tuple at point, after asking |
+| `+`   | write a tuple                            |
+| `g`   | re-read the space                        |
 
 ## Development
 

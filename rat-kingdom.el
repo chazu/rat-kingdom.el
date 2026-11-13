@@ -38,6 +38,7 @@
 
 (require 'rat-kingdom-space)
 (require 'rat-kingdom-reaction)
+(require 'rat-kingdom-inspector)
 
 (defgroup rat-kingdom nil
   "Swarm orchestration for coding agents."
