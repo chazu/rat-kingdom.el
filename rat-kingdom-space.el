@@ -59,6 +59,7 @@
     (result . persistent)
     (blocked . persistent)
     (checked . persistent)
+    (setup . persistent)
     (review . linear)
     (verdict . linear)
     (message . linear)

@@ -120,6 +120,7 @@ is the audit trail and can be replayed.
 | `result` | persistent | worker `finish` | commit, summary, reported checks |
 | `blocked` | persistent | worker `block` | why the worker stopped |
 | `checked` | persistent | engine | what the engine itself verified |
+| `setup` | persistent | engine | how a new worktree's setup command came out |
 | `review` | linear | engine | a request for the king or user to judge |
 | `verdict` | linear | king or user | `pass` or `fix` with notes |
 | `message` | linear | anyone | text for one run, delivered at a turn boundary |
@@ -128,7 +129,7 @@ is the audit trail and can be replayed.
 | `policy` | persistent | king | an epic or task override of configuration |
 | `event` | affine | ingress, engine | something happened outside or inside |
 | `stuck` | persistent | watchdog | a token that cannot move |
-| `repo` | persistent | user | a registered repository: path, target branch, check |
+| `repo` | persistent | user | a registered repository: path, target branch, check, setup |
 
 ### 5.5 The rule: agents write, rules read
 
@@ -249,7 +250,15 @@ doc, no code), `epic` (dispatches child stories in dependency order).
   the reason. An error never leaves a token half moved or waiting on a
   failed reaction.
 - Steps have timeouts: by default two hours for a worker and thirty
-  minutes for a check, and none for a review.
+  minutes for a check, and none for a review. A repository's setup in a
+  new worker worktree has the check's limit; in a candidate it is part of
+  the check and shares its time.
+- A setup runs as a process, like a check, and never blocks Emacs. While
+  it runs its story waits for "setup" and holds a worker place, so the
+  worker that follows cannot go over the limit. A setup that fails parks
+  the story at the failure place with the command, its exit and the end
+  of its output; that uses none of the story's workers. Moving or
+  cancelling the story kills it.
 - At most `rat-kingdom-story-max-workers` workers (three by default) run
   at once. A story whose worker would go over waits in its step for "a
   free worker", with no worktree, run or attempt, and its step's time
@@ -257,8 +266,8 @@ doc, no code), `epic` (dispatches child stories in dependency order).
   reaction on every change to a run, when a story is archived, by the
   watchdog and by reconciling, so it cannot wait while a worker is free.
 - A watchdog, once a minute, writes `stuck` for a token whose step has run
-  past its time, whose check is not running, whose worker's record is
-  gone, or which no reaction has picked up. The king is told.
+  past its time, whose check or setup is not running, whose worker's
+  record is gone, or which no reaction has picked up. The king is told.
 - The user or king can move any token to any place by hand. Its worker is
   stopped, a running check is abandoned, and no file is touched. Each move
   is logged with who made it.
@@ -340,7 +349,8 @@ Emacs. A run recorded as `working` with no agent in this Emacs becomes
 worktree, with a fresh session and a prompt that says what happened. That
 worker takes its old place ahead of the queue for a free worker, which is
 kept and served once the replaced workers have started. A
-check that was running is run again. The king takes up its earlier
+check that was running is run again, and so is a setup that was running
+in a new worker worktree, which keeps its worker place. The king takes up its earlier
 session by its id. Sessions that end while Emacs is exiting are not
 recorded as ended, so they are found interrupted on the next start.
 
@@ -428,7 +438,8 @@ projected in turn. That is how an epic's waves advance without a foreman.
 Integration follows rk2:
 
 1. Merge the reported commit into a detached candidate worktree.
-2. Run the configured check there.
+2. Run the configured check there, after the repository's setup command
+   if it has one. A setup that fails fails the check, and says so.
 3. Advance the target branch with a compare-and-swap. A target checked out
    elsewhere is refused.
 4. Close the task. Write `checked` with what integration itself ran,
@@ -436,6 +447,13 @@ Integration follows rk2:
 
 A failed merge or check keeps the worker's work and the candidate. The
 user's checkout, index, stash and hooks are never touched.
+
+Each worktree starts empty of whatever the repository does not commit,
+such as installed dependencies. A repository may therefore have a setup
+command, run without a shell like the check: in a worker's worktree when
+it is made, before the worker starts, and in each candidate before the
+check. A worker that replaces another in the same worktree is not set up
+again. After a restart, a setup that was running is run again (8.4).
 
 Publication is a king tool that pushes one named branch to one named
 remote, only on the user's explicit request, and writes a receipt.

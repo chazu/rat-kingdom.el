@@ -225,6 +225,22 @@ Fail the test if the call failed."
       (should (cdr (rat-kingdom-king-test--call "repo_sync"
                                                 '(repo . "nowhere")))))))
 
+(ert-deftest rat-kingdom-king-test-repo-add-sets-and-clears-setup ()
+  (rat-kingdom-story-test-with-repo (space path)
+    (rat-kingdom-king-test--start space)
+    (should-not (string-search "setup" (rat-kingdom-king-test--ok "status")))
+    (rat-kingdom-king-test--ok "repo_add" `(path . ,path)
+                               '(check . "make test") '(setup . "npm ci"))
+    (should (equal (plist-get (rat-kingdom-repo-get space "demo") :setup)
+                   '("npm" "ci")))
+    (should (string-search "check make test; setup npm ci; workflow"
+                           (rat-kingdom-king-test--ok "status")))
+    ;; Registering again without it clears it.
+    (rat-kingdom-king-test--ok "repo_add" `(path . ,path))
+    (should-not (plist-get (rat-kingdom-repo-get space "demo") :setup))
+    (should-not (string-search "setup" (rat-kingdom-king-test--ok "status")))
+    (should-error (rat-kingdom-repo-add space path :setup "npm ci"))))
+
 (ert-deftest rat-kingdom-king-test-news-waits-for-a-quiet-king ()
   (rat-kingdom-story-test-with-repo (space _path)
     (rat-kingdom-story-start space "demo" "Add a file" nil "S-1")

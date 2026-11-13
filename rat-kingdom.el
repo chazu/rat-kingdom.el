@@ -87,20 +87,22 @@
 (defun rat-kingdom-reconcile ()
   "Recover the work that was in flight when Emacs last stopped.
 A worker that was cut off is replaced by a new one in the same
-worktree, and a check that was running is run again.  Turning on
+worktree, and a check or setup that was running is run again.  Turning on
 `rat-kingdom-mode' does this, so it is seldom needed by hand."
   (interactive)
   (let* ((space (rat-kingdom-space-default))
          (found (rat-kingdom-story-reconcile space))
          (runs (plist-get found :runs))
-         (checks (plist-get found :checks)))
-    (when (and rat-kingdom-mode (or runs checks))
+         (checks (plist-get found :checks))
+         (setups (plist-get found :setups)))
+    (when (and rat-kingdom-mode (or runs checks setups))
       (rat-kingdom-reaction-run space))
-    (if (or runs checks)
+    (if (or runs checks setups)
         (message "rat-kingdom: recovering: %d interrupted (%s), %d to check \
-again (%s)"
+again (%s), %d to set up again (%s)"
                  (length runs) (string-join runs ", ")
-                 (length checks) (string-join checks ", "))
+                 (length checks) (string-join checks ", ")
+                 (length setups) (string-join setups ", "))
       (when (called-interactively-p 'interactive)
         (message "rat-kingdom: nothing was interrupted")))
     found))
@@ -194,16 +196,20 @@ PATTERN, if given, is a story pattern the story must match."
            nil t)))))
 
 ;;;###autoload
-(defun rat-kingdom-add-repo (path &optional check)
+(defun rat-kingdom-add-repo (path &optional check setup)
   "Register the repository at PATH, with CHECK as its merge check.
 CHECK is a command as a list of strings, run without a shell in a
-candidate worktree; work is merged only if it succeeds."
+candidate worktree; work is merged only if it succeeds.  SETUP is a
+command of the same kind run in each new worktree before a worker
+starts and before the check, such as one that installs dependencies."
   (interactive
    (list (read-directory-name "Repository: " nil nil t)
          (rat-kingdom--read-command
-          "Check before merging (empty for none), e.g. make check: ")))
+          "Check before merging (empty for none), e.g. make check: ")
+         (rat-kingdom--read-command
+          "Setup in each new worktree (empty for none), e.g. npm ci: ")))
   (let ((repo (rat-kingdom-repo-add (rat-kingdom-space-default) path
-                                    :check check)))
+                                    :check check :setup setup)))
     (message "Registered %s; finished work is merged into %s"
              (plist-get repo :name) (plist-get repo :target))))
 

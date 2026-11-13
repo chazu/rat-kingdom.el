@@ -824,7 +824,7 @@ Return what finish answered."
       ;; Recovery finds the run, and the story gets a new worker in the
       ;; same worktree, told what happened.
       (should (equal (rat-kingdom-story-reconcile space)
-                     '(:runs ("S-1.1") :checks nil)))
+                     '(:runs ("S-1.1") :checks nil :setups nil)))
       (should (equal (plist-get (rat-kingdom-run-get space "S-1.1") :state)
                      "interrupted"))
       (rat-kingdom-reaction-run space)
@@ -841,7 +841,7 @@ Return what finish answered."
                              (rat-kingdom-story-test--prompt "S-1.2")))
       ;; Nothing more to recover; the new worker finishes the story.
       (should (equal (rat-kingdom-story-reconcile space)
-                     '(:runs nil :checks nil)))
+                     '(:runs nil :checks nil :setups nil)))
       (delete-file (expand-file-name "half" worktree))
       (rat-kingdom-story-test--work space "S-1" "feature.txt")
       (rat-kingdom-story-test--settle space "S-1")
@@ -861,14 +861,14 @@ Return what finish answered."
     (should (process-live-p (gethash "S-1" rat-kingdom-story--checks)))
     ;; A running check is not disturbed.
     (should (equal (rat-kingdom-story-reconcile space)
-                   '(:runs nil :checks nil)))
+                   '(:runs nil :checks nil :setups nil)))
     ;; Emacs stops, taking the check with it.
     (rat-kingdom-story--abandon-check "S-1")
     (should-not (rat-kingdom-space-rd space '(checked :identity "S-1")))
     (should (eql (rat-kingdom-story-watch space) 0))
     (rat-kingdom-repo-add space path :check '("true"))
     (should (equal (rat-kingdom-story-reconcile space)
-                   '(:runs nil :checks ("S-1"))))
+                   '(:runs nil :checks ("S-1") :setups nil)))
     (rat-kingdom-story-test--settle space "S-1")
     (should-not (rat-kingdom-story-get space "S-1"))
     (should (equal (rat-kingdom-story-test--git
@@ -998,7 +998,7 @@ Return what finish answered."
       (clrhash rat-kingdom-mcp--grants)
       ;; The interrupted worker is replaced first; the queue keeps its place.
       (should (equal (rat-kingdom-story-reconcile space)
-                     '(:runs ("S-1.1") :checks nil)))
+                     '(:runs ("S-1.1") :checks nil :setups nil)))
       (rat-kingdom-reaction-run space)
       (should (equal (rat-kingdom-story-test--get space "S-1" :run) "S-1.2"))
       (should (rat-kingdom-story-test--queued-p space "S-2"))
@@ -1009,6 +1009,234 @@ Return what finish answered."
         (rat-kingdom-reaction-run space)
         (should (equal (rat-kingdom-story-test--get space "S-2" :run) "S-2.1"))
         (should (eql (rat-kingdom-story-test--get space "S-2" :attempt) 1)))
+      (should-not (rat-kingdom-reaction-failures space)))))
+
+;;;; Setup
+
+(defun rat-kingdom-story-test--set-up (space id)
+  "Run reactions in SPACE until the setup of the story ID has come out."
+  (rat-kingdom-reaction-run space)
+  (let ((tries 0))
+    (while (and (rat-kingdom-space-rd space (list 'story :identity id
+                                                  :awaiting "setup"))
+                (not (rat-kingdom-space-rd space (list 'setup :identity id)))
+                (< (cl-incf tries) 200))
+      (accept-process-output nil 0.05)))
+  (rat-kingdom-reaction-run space))
+
+(defun rat-kingdom-story-test--lines (file)
+  "Return the lines of FILE, or nil if it does not exist."
+  (and (file-exists-p file)
+       (split-string (with-temp-buffer
+                       (insert-file-contents file)
+                       (buffer-string))
+                     "\n" t)))
+
+(ert-deftest rat-kingdom-story-test-setup-runs-before-the-worker ()
+  (rat-kingdom-story-test-with-repo (space path)
+    (let* ((log (expand-file-name "../setup.log" path))
+           (worktree (expand-file-name "worktrees/demo/S-1"
+                                       rat-kingdom-directory))
+           (marker (expand-file-name "marker" worktree))
+           (start (plist-get rat-kingdom-run-backend :start))
+           marker-at-start
+           (rat-kingdom-run-backend
+            (plist-put (copy-sequence rat-kingdom-run-backend) :start
+                       (lambda (run prompt)
+                         (push (file-exists-p marker) marker-at-start)
+                         (funcall start run prompt)))))
+      (rat-kingdom-repo-add
+       space path :check '("sh" "-c" "test -f wanted.txt")
+       :setup (list "sh" "-c" (format "echo ok > marker; pwd >> %s"
+                                      (shell-quote-argument log))))
+      (rat-kingdom-story-start space "demo" "Add the wanted file" nil "S-1")
+      (rat-kingdom-reaction-run space)
+      ;; The worktree is made and set up; no worker yet, and no attempt.
+      (should (equal (rat-kingdom-story-test--get space "S-1" :awaiting)
+                     "setup"))
+      (should (eql (rat-kingdom-story-test--get space "S-1" :attempt) 0))
+      (should (string-search "(waiting for setup)"
+                             (rat-kingdom-king--story-line
+                              space (rat-kingdom-story-get space "S-1"))))
+      (rat-kingdom-story-test--set-up space "S-1")
+      (should (equal marker-at-start '(t)))
+      (should (equal (rat-kingdom-story-test--get space "S-1" :awaiting)
+                     "worker"))
+      (should (equal (rat-kingdom-story-test--get space "S-1" :worktree)
+                     worktree))
+      (should (eql (rat-kingdom-story-test--get space "S-1" :attempt) 1))
+      (should-not (string-search "worked on before"
+                                 (rat-kingdom-story-test--prompt "S-1.1")))
+      (should (equal (rat-kingdom-story-test--lines log) (list worktree)))
+      ;; The check fails; the replacement worker in the same worktree is
+      ;; not set up again, though setup runs in the candidate.
+      (delete-file marker)
+      (rat-kingdom-story-test--work space "S-1" "other.txt")
+      (rat-kingdom-story-test--settle space "S-1")
+      (should (equal (rat-kingdom-story-test--get space "S-1" :run) "S-1.2"))
+      (should (equal marker-at-start '(nil t)))
+      (should-not (file-exists-p marker))
+      (should (equal (rat-kingdom-story-test--lines log)
+                     (list worktree
+                           (expand-file-name "candidates/demo/S-1"
+                                             rat-kingdom-directory))))
+      (should (string-search "check failed"
+                             (rat-kingdom-story-test--prompt "S-1.2")))
+      (should-not (rat-kingdom-reaction-failures space)))))
+
+(ert-deftest rat-kingdom-story-test-failed-setup-stops-the-story ()
+  (rat-kingdom-story-test-with-repo (space path)
+    (rat-kingdom-repo-add space path
+                          :setup '("sh" "-c" "echo no network; exit 3"))
+    (rat-kingdom-story-start space "demo" "Add a file" nil "S-1")
+    (rat-kingdom-story-test--set-up space "S-1")
+    ;; Parked with the command, its exit and its output; no worker was
+    ;; started and no attempt used.
+    (let ((reason (rat-kingdom-story-test--get space "S-1" :reason)))
+      (should (equal (rat-kingdom-story-test--place space "S-1") "blocked"))
+      (should (equal (rat-kingdom-story-test--get space "S-1" :phase) "parked"))
+      (should (string-search "setup failed" reason))
+      (should (string-search "sh -c \"echo no network; exit 3\"" reason))
+      (should (string-search "exited with 3" reason))
+      (should (string-search "no network" reason)))
+    (should (eql (rat-kingdom-story-test--get space "S-1" :attempt) 0))
+    (should-not rat-kingdom-story-test--started)
+    (should (equal (car rat-kingdom-story-test--events) '(parked . "S-1")))
+    ;; Once setup is put right, moving the story back runs it again in
+    ;; the worktree it failed in, and the worker starts.
+    (rat-kingdom-repo-add space path :setup '("sh" "-c" "echo ok > marker"))
+    (rat-kingdom-story-move space "S-1" 'ready)
+    (rat-kingdom-story-test--set-up space "S-1")
+    (should (equal (rat-kingdom-story-test--get space "S-1" :run) "S-1.1"))
+    (should (file-exists-p (expand-file-name
+                            "marker"
+                            (rat-kingdom-story-test--get space "S-1" :worktree))))
+    (should-not (rat-kingdom-reaction-failures space))))
+
+(ert-deftest rat-kingdom-story-test-setup-runs-before-the-check ()
+  (rat-kingdom-story-test-with-repo (space path)
+    (let ((log (shell-quote-argument (expand-file-name "../setup.log" path))))
+      (rat-kingdom-repo-add
+       space path
+       :setup (list "sh" "-c" (format "echo setup >> %s" log))
+       :check (list "sh" "-c" (format "echo check >> %s" log)))
+      (rat-kingdom-story-start space "demo" "Add a file" nil "S-1")
+      (rat-kingdom-story-test--set-up space "S-1")
+      (rat-kingdom-story-test--work space "S-1" "one.txt")
+      (rat-kingdom-story-test--settle space "S-1")
+      (should-not (rat-kingdom-story-get space "S-1"))
+      (should (equal (rat-kingdom-story-test--lines
+                      (expand-file-name "../setup.log" path))
+                     '("setup" "setup" "check")))
+      ;; A setup that fails in the candidate fails the check, which then
+      ;; never runs, and the worker is told it was the setup.
+      (rat-kingdom-repo-add
+       space path
+       :setup '("sh" "-c" "case $(pwd) in */candidates/*) echo no disk; \
+exit 4;; esac")
+       :check (list "sh" "-c" (format "echo check >> %s" log)))
+      (rat-kingdom-story-start space "demo" "Add another file" nil "S-2")
+      (rat-kingdom-story-test--set-up space "S-2")
+      (rat-kingdom-story-test--work space "S-2" "two.txt")
+      (rat-kingdom-story-test--settle space "S-2")
+      (let ((checked (plist-get (rat-kingdom-space-rd
+                                 space '(checked :identity "S-2"))
+                                :payload))
+            (prompt (rat-kingdom-story-test--prompt "S-2.2")))
+        (should (equal (plist-get checked :value) "fail"))
+        (should (equal (plist-get checked :reason) "setup failed"))
+        (should (string-search "did not run because the repository's setup \
+failed" prompt))
+        (should (string-search "exited with 4" prompt))
+        (should (string-search "no disk" prompt)))
+      (should (equal (rat-kingdom-story-test--get space "S-2" :at) "ready"))
+      (should (equal (rat-kingdom-story-test--lines
+                      (expand-file-name "../setup.log" path))
+                     '("setup" "setup" "check")))
+      (should-not (rat-kingdom-reaction-failures space)))))
+
+(ert-deftest rat-kingdom-story-test-setup-is-watched-and-recovered ()
+  (rat-kingdom-story-test-with-repo (space path)
+    (setq rat-kingdom-story-test--now 1000.0)
+    (rat-kingdom-repo-add space path :setup '("sleep" "30"))
+    (rat-kingdom-story-start space "demo" "Add a file" nil "S-1")
+    (rat-kingdom-reaction-run space)
+    (should (process-live-p (gethash "S-1" rat-kingdom-story--checks)))
+    ;; A running setup is left alone, until it runs past a check's time.
+    (should (equal (rat-kingdom-story-reconcile space)
+                   '(:runs nil :checks nil :setups nil)))
+    (setq rat-kingdom-story-test--now (+ 1000.0 1700))
+    (should (zerop (rat-kingdom-story-watch space)))
+    (setq rat-kingdom-story-test--now (+ 1000.0 1900))
+    (should (eql (rat-kingdom-story-watch space) 1))
+    (should (string-search "Its setup has taken 31 minutes"
+                           (plist-get (plist-get (rat-kingdom-space-rd
+                                                  space '(stuck :identity "S-1"))
+                                                 :payload)
+                                      :reason)))
+    ;; Moving the story kills its setup, which runs again from the start.
+    (let ((process (gethash "S-1" rat-kingdom-story--checks)))
+      (rat-kingdom-story-move space "S-1" 'ready)
+      (should-not (process-live-p process)))
+    (rat-kingdom-reaction-run space)
+    (should (equal (rat-kingdom-story-test--get space "S-1" :awaiting) "setup"))
+    ;; Emacs stops, taking the setup with it: the watchdog sees it.
+    (rat-kingdom-story--abandon-check "S-1")
+    (setq rat-kingdom-story-test--now (+ 1000.0 2000))
+    (should (eql (rat-kingdom-story-watch space) 1))
+    (should (equal (plist-get (plist-get (rat-kingdom-space-rd
+                                          space '(stuck :identity "S-1"))
+                                         :payload)
+                              :reason)
+                   "Its setup is not running."))
+    ;; Recovery runs it again.
+    (rat-kingdom-repo-add space path :setup '("sh" "-c" "echo ok > marker"))
+    (should (equal (rat-kingdom-story-reconcile space)
+                   '(:runs nil :checks nil :setups ("S-1"))))
+    (rat-kingdom-story-test--set-up space "S-1")
+    (should (equal (rat-kingdom-story-test--get space "S-1" :run) "S-1.1"))
+    (should (file-exists-p (expand-file-name
+                            "marker"
+                            (rat-kingdom-story-test--get space "S-1" :worktree))))
+    ;; Cancelling a story kills its setup too.
+    (rat-kingdom-repo-add space path :setup '("sleep" "30"))
+    (rat-kingdom-story-start space "demo" "Another" nil "S-2")
+    (rat-kingdom-reaction-run space)
+    (let ((process (gethash "S-2" rat-kingdom-story--checks)))
+      (should (process-live-p process))
+      (rat-kingdom-story-cancel space "S-2")
+      (should-not (process-live-p process)))
+    (should-not (rat-kingdom-reaction-failures space))))
+
+(ert-deftest rat-kingdom-story-test-setup-holds-a-worker-place ()
+  (rat-kingdom-story-test-with-repo (space path)
+    (let ((rat-kingdom-story-max-workers 1)
+          (go (expand-file-name "../go" path)))
+      (rat-kingdom-repo-add
+       space path
+       :setup (list "sh" "-c" (format "while [ ! -f %s ]; do sleep 0.05; done"
+                                      (shell-quote-argument go))))
+      (rat-kingdom-story-start space "demo" "First" nil "S-1")
+      (rat-kingdom-story-start space "demo" "Second" nil "S-2")
+      (rat-kingdom-reaction-run space)
+      ;; The first is being set up and holds the one place.
+      (should (equal (rat-kingdom-story-test--get space "S-1" :awaiting)
+                     "setup"))
+      (should (rat-kingdom-story-test--queued-p space "S-2"))
+      (should-not (rat-kingdom-story-dequeue space))
+      (with-temp-file go)
+      (rat-kingdom-story-test--set-up space "S-1")
+      (should (equal (rat-kingdom-story-test--get space "S-1" :run) "S-1.1"))
+      (should (rat-kingdom-story-test--queued-p space "S-2"))
+      (should (eql (length rat-kingdom-story-test--started) 1))
+      ;; When it finishes, the second is set up and then started.
+      (rat-kingdom-story-test--work space "S-1" "one.txt")
+      (rat-kingdom-reaction-run space)
+      (should (equal (rat-kingdom-story-test--get space "S-2" :awaiting)
+                     "setup"))
+      (rat-kingdom-story-test--set-up space "S-2")
+      (should (equal (rat-kingdom-story-test--get space "S-2" :run) "S-2.1"))
+      (should (eql (length rat-kingdom-story-test--started) 2))
       (should-not (rat-kingdom-reaction-failures space)))))
 
 (provide 'rat-kingdom-story-test)
