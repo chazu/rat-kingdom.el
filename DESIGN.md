@@ -130,6 +130,7 @@ is the audit trail and can be replayed.
 | `event` | affine | ingress, engine | something happened outside or inside |
 | `stuck` | persistent | watchdog | a token that cannot move |
 | `repo` | persistent | user | a registered repository: path, target branch, check, setup |
+| `published` | persistent | king `publish`, user | a push receipt: repo (scope), branch, remote and URL, old and new remote commit, actor, time |
 
 ### 5.5 The rule: agents write, rules read
 
@@ -406,7 +407,7 @@ go, and it lets a role be denied built-in tools as well.
 
 | Role | Lifetime | Tools |
 |---|---|---|
-| king | long-lived, global, no worktree | built: `status` (with the tracker tasks available), `repo_add`, `repo_sync`, `workflow_list`, `story_start` (optionally from a `task`), `story_show`, `story_diff`, `story_move`, `story_cancel`, `verdict`. Planned: `task_create`, `epic_create`, `tell`, `query`, `config_set`, `publish` |
+| king | long-lived, global, no worktree | built: `status` (with the tracker tasks available), `repo_add`, `repo_sync`, `workflow_list`, `story_start` (optionally from a `task`), `story_show`, `story_diff`, `story_move`, `story_cancel`, `verdict`, `publish`. Planned: `task_create`, `epic_create`, `tell`, `query`, `config_set` |
 | rat (worker) | one task | `finish`, `block`, `note_fact`, `inbox` |
 | researcher | one task | `finish_doc`, `note_fact`, `block` |
 | foreman | one epic, optional | `story_start`, `tell`, `verdict`, `query`, limited to its epic |
@@ -458,18 +459,55 @@ again. After a restart, a setup that was running is run again (8.4).
 Publication is a king tool that pushes one named branch to one named
 remote, only on the user's explicit request, and writes a receipt.
 
+**Built:** `publish` (repo, branch, remote defaulting to `origin`) runs
+`git push REMOTE COMMIT:refs/heads/BRANCH` in Emacs itself, from the
+repository's path, with the user's own configuration and credentials. It
+never forces; a rejected push returns Git's error. The receipt is a
+persistent `published` tuple scoped to the repository, with no owner, so
+it outlives every story. The king's instructions and the tool's
+description say it may be called only when the user has asked for that
+push in the conversation, and that approval does not carry over to the
+next push. `M-x rat-kingdom-publish` is the user's own way in.
+
 ## 12. Guards
 
 - Role-scoped tools replace rk2's role checks.
-- A session-only pre-push hook refuses pushes from managed sessions, as in
-  rk2.
+- No managed session can push. Built in three layers, for workers and the
+  king alike, all in rat-kingdom-agent-shell.el:
+  1. **Environment.** The agent's client is started with Git
+     configuration in its environment: `GIT_CONFIG_COUNT` and
+     `GIT_CONFIG_KEY_n`/`GIT_CONFIG_VALUE_n` pairs (Git 2.31 or later),
+     numbered after any the environment already has, setting
+     `url.rat-kingdom-refuses-to-push::<prefix>.pushInsteadOf` for every
+     prefix, the empty one included. Every push URL becomes one for a
+     remote helper that does not exist, so the push fails with that name,
+     `--no-verify` or not, while fetches still work. It is set through
+     the ACP client's own environment variables, so it applies whenever
+     the client's process starts. It works in every permission mode,
+     auto and bypass included. Nothing is written to `.git/config`, hooks
+     or the user's global configuration, so the user's own pushes are
+     unaffected. `GH_PROMPT_DISABLED=1` and `RAT_KINGDOM_RUN=<run id>` are
+     set too. Git does not rewrite a remote with an explicit `pushurl`,
+     and an agent that sets out to unset the variables can; the next two
+     layers stand in those cases.
+  2. **Claude's deny rules.** The session meta carries
+     `claudeCode.options.disallowedTools` with `Bash(git push:*)`,
+     `Bash(git -C * push:*)` and `Bash(gh:*)`. Claude's ACP adapter passes
+     them to Claude Code, which applies deny rules in every mode.
+  3. **Emacs.** rat-kingdom's permission responder refuses any request to
+     run a command that pushes (`git … push` or `send-pack`, after `&&`,
+     in a pipe, `$(…)` or `sh -c`) or runs `gh`, before the user's own
+     responder sees it. This applies only when the mode asks for
+     permission.
+
+  rk2's session-only pre-push hook is not used: `--no-verify` skips it.
 - ACP permission requests pass through Emacs, so a policy function can
   refuse a tool call before it runs. This applies only when the session
   mode asks for permission.
 
-**Open:** whether workers run in Claude's auto mode. In auto mode fewer
-permission requests reach Emacs, so the pre-push hook is the only push
-guard.
+Whether workers run in Claude's auto mode is no longer a question for
+pushing: the environment block holds in any mode. It remains one for
+other tool calls, which in auto mode do not reach Emacs.
 
 ## 13. Ingress and ambient agents
 
@@ -590,11 +628,13 @@ wait longer for review than for implementation.
 9. **Ingress** sidecar and ambient agents.
 
 Tests use scripted fake agents and disposable repositories, as rk2's
-acceptance suite does. No test calls a model or pushes.
+acceptance suite does. No test calls a model, and no test pushes anywhere
+but a disposable bare repository.
 
 ## 16. Open questions
 
-1. Do workers run in auto mode, and if so is the pre-push hook enough?
+1. Do workers run in auto mode? For pushing this is settled (section 12):
+   the environment block and the deny rules hold in any mode.
 2. Does a passing check on a `story-lite` story integrate with no review
    at all, or does the user confirm the first few per repo?
 3. When is a foreman worth starting, given that waves advance on their

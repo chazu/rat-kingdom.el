@@ -15,10 +15,16 @@
 ;; A registered repository is a `repo' tuple.  Registering one creates
 ;; its target branch, by default rk/integration, from HEAD.  Finished
 ;; work is merged into the target and nowhere else: the user's checkout,
-;; index, stash and hooks are never touched, and nothing here pushes.
+;; index, stash and hooks are never touched.
 ;;
-;; Everything here returns quickly.  A repository's own check, which may
-;; not, is run as a separate process by rat-kingdom-story.el.
+;; The one push is `rat-kingdom-git-publish', which the user, or the king
+;; on the user's explicit request, calls to push one branch to one
+;; remote.  It never forces, and it writes a `published' tuple as a
+;; receipt.
+;;
+;; Everything here returns quickly, except a push, which waits for the
+;; remote.  A repository's own check is run as a separate process by
+;; rat-kingdom-story.el.
 
 ;;; Code:
 
@@ -150,6 +156,86 @@ The record is a property list: `:name', `:path', `:target', `:check',
   "Forget the repository NAME in SPACE.  Its files are not touched."
   (rat-kingdom-space-retract space (list 'repo :scope name :identity name)
                              :actor "user"))
+
+;;;; Publishing
+
+(defun rat-kingdom-git--remote-commit (path remote branch)
+  "Return the commit BRANCH is at on REMOTE of the repository at PATH.
+Return nil if REMOTE has no such branch."
+  (when-let* ((line (car (split-string
+                          (rat-kingdom-git path "ls-remote" "--heads" remote
+                                           (concat "refs/heads/" branch))
+                          "\n" t))))
+    (car (split-string line))))
+
+(cl-defun rat-kingdom-git-publish (space name branch &key remote actor)
+  "Push BRANCH of the repository NAME in SPACE to REMOTE, and return a receipt.
+BRANCH is a local branch.  REMOTE is one of the repository's remotes,
+by default \"origin\".  The commit BRANCH is at is pushed to the
+branch of the same name on REMOTE.  The push is never forced: if Git
+refuses it, for example because it is not a fast-forward, Git's error
+is signalled as `rat-kingdom-git-error'.
+
+Git is run here, in Emacs, with the user's own configuration, hooks
+and credentials.  It waits for the remote.
+
+The receipt is a `published' tuple in SPACE, scoped to NAME, with
+`:remote', `:url', `:branch', `:old' (the commit the remote had, or nil
+if the branch is new there), `:new', `:actor' (ACTOR, by default
+\"user\") and `:time'."
+  (let* ((repo (or (rat-kingdom-repo-get space name)
+                   (error "There is no repository called %s" name)))
+         (path (plist-get repo :path))
+         (remote (or remote "origin"))
+         (actor (or actor "user"))
+         (ref (concat "refs/heads/" (or branch ""))))
+    (unless (and (stringp branch)
+                 (not (string-empty-p branch))
+                 (rat-kingdom-git-ok-p path "check-ref-format" ref))
+      (error "Not a branch name: %S" branch))
+    (unless (member remote (split-string (rat-kingdom-git path "remote") "\n" t))
+      (error "%s has no remote called %s" name remote))
+    (let ((new (if (rat-kingdom-git-ok-p path "rev-parse" "--verify" "--quiet" ref)
+                   (rat-kingdom-git-rev path ref)
+                 (error "%s has no branch %s" name branch)))
+          (old (rat-kingdom-git--remote-commit path remote branch)))
+      ;; The commit, not the branch, so that exactly what was looked at
+      ;; is pushed.  No `+', no --force.
+      (pcase-let ((`(,exit ,output ,errors)
+                   (rat-kingdom-git--run path (list "push" remote
+                                                    (concat new ":" ref)))))
+        (unless (eql exit 0)
+          (signal 'rat-kingdom-git-error
+                  (list (format "Pushing %s of %s to %s failed; nothing was \
+forced:\n%s"
+                                branch name remote
+                                (string-trim
+                                 (string-join (list errors output) "\n")))))))
+      (rat-kingdom-space-out
+       space 'published :scope name :identity branch
+       :payload (list :remote remote
+                      :url (ignore-errors
+                             (rat-kingdom-git path "remote" "get-url" "--push"
+                                              remote))
+                      :branch branch :old old :new new :actor actor
+                      :time (format-time-string "%FT%T%z"))
+       :actor actor))))
+
+(defun rat-kingdom-git-publish-describe (receipt)
+  "Return a line saying what the `published' tuple RECEIPT records."
+  (let ((payload (plist-get receipt :payload)))
+    (format "Pushed %s of %s to %s (%s): %s."
+            (plist-get payload :branch) (plist-get receipt :scope)
+            (plist-get payload :remote) (or (plist-get payload :url) "no URL")
+            (let ((old (plist-get payload :old))
+                  (new (plist-get payload :new)))
+              (cond ((null old)
+                     (format "new branch at %s" (substring new 0 12)))
+                    ((equal old new)
+                     (format "already at %s; nothing changed"
+                             (substring new 0 12)))
+                    (t (format "%s..%s" (substring old 0 12)
+                               (substring new 0 12))))))))
 
 (provide 'rat-kingdom-git)
 ;;; rat-kingdom-git.el ends here

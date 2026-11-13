@@ -61,10 +61,32 @@ output.
 Finished work lands on the target branch only. Your checkout is not
 touched and nothing is pushed. Merge or discard that branch yourself.
 
+### Pushing
+
+No agent rat-kingdom starts, worker or king, can push, whatever Claude
+Code's permission mode. Each agent's process is started with Git
+configuration in its environment (`GIT_CONFIG_COUNT`) that rewrites every
+push URL to a remote helper that does not exist, so `git push` fails with
+`rat-kingdom-refuses-to-push`, `--no-verify` or not. Its session is also
+started with Claude tool rules denying `git push` and `gh`, and Emacs
+refuses any permission request to run them. Nothing is written to your
+Git configuration or hooks, so your own pushes are unaffected. A remote
+with an explicit `pushurl` is not rewritten by Git; the other two layers
+cover it.
+
+The one way to push is the king's `publish` tool, which pushes one local
+branch to the branch of the same name on one remote. The king is told to
+use it only when you have asked for that push in the conversation. It runs
+Git in Emacs with your own credentials, never forces (a push that is not a
+fast-forward is refused and the error is reported), and writes a
+`published` tuple as a receipt. `M-x rat-kingdom-publish` does the same by
+hand.
+
 Everything the king does has a command, for when you would sooner do it
 by hand: `rat-kingdom-add-repo`, `rat-kingdom-start-story`,
 `rat-kingdom-move-story`, `rat-kingdom-review-story`,
-`rat-kingdom-cancel-story`. `M-x rat-kingdom-inspect` shows the space.
+`rat-kingdom-cancel-story`, `rat-kingdom-publish`. `M-x
+rat-kingdom-inspect` shows the space.
 
 ### After a restart
 

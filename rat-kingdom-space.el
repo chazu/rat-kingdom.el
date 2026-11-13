@@ -68,7 +68,8 @@
     (policy . persistent)
     (event . affine)
     (stuck . persistent)
-    (repo . persistent))
+    (repo . persistent)
+    (published . persistent))
   "Alist of the built-in tuple categories and their default modalities.
 `rat-kingdom-space-categories' holds the categories added to these.")
 

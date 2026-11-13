@@ -270,6 +270,39 @@ starts and before the check, such as one that installs dependencies."
   (interactive (list (rat-kingdom--read-story "Cancel story: ")))
   (message "%s" (rat-kingdom-story-cancel (rat-kingdom-space-default) story)))
 
+;;;###autoload
+(defun rat-kingdom-publish (repo branch &optional remote)
+  "Push BRANCH of the registered repository REPO to REMOTE, never forcing.
+REMOTE defaults to \"origin\".  A receipt is written to the space.
+See `rat-kingdom-git-publish'."
+  (interactive
+   (let* ((space (rat-kingdom-space-default))
+          (names (mapcar (lambda (repo) (plist-get repo :name))
+                         (rat-kingdom-repo-list space))))
+     (unless names
+       (user-error "Register a repository first: M-x rat-kingdom-add-repo"))
+     (let* ((repo (rat-kingdom-repo-get
+                   space (completing-read "Repository: " names nil t)))
+            (path (plist-get repo :path))
+            (branch (completing-read
+                     "Branch: "
+                     (split-string (rat-kingdom-git path "for-each-ref"
+                                                    "--format=%(refname:short)"
+                                                    "refs/heads")
+                                   "\n" t)
+                     nil t nil nil (plist-get repo :target)))
+            (remote (completing-read
+                     "Remote: " (split-string (rat-kingdom-git path "remote")
+                                              "\n" t)
+                     nil t nil nil "origin")))
+       (unless (yes-or-no-p (format "Push %s of %s to %s? " branch
+                                    (plist-get repo :name) remote))
+         (user-error "Not pushed"))
+       (list (plist-get repo :name) branch remote))))
+  (message "%s" (rat-kingdom-git-publish-describe
+                 (rat-kingdom-git-publish (rat-kingdom-space-default) repo branch
+                                          :remote remote :actor "user"))))
+
 ;;;; Reloading
 
 (defconst rat-kingdom--files
