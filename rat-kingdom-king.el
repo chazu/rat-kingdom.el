@@ -39,6 +39,7 @@
 (require 'rat-kingdom-run)
 (require 'rat-kingdom-workflow)
 (require 'rat-kingdom-story)
+(require 'rat-kingdom-task)
 
 (defconst rat-kingdom-king-id "king"
   "The id of the king's run.")
@@ -65,6 +66,10 @@ otherwise). Nothing is ever pushed and the user's checkout is never touched. \
 The user merges the target branch into their own branch when they choose.
 - Each story follows a workflow. `story` has a review by you before the \
 merge; `story-lite` has none. Use `workflow_list` to see them.
+- A repository may have a task tracker. `status` lists its ready tasks \
+under Available tasks. A story started for one of them should pass its id \
+as `task` to `story_start`, so that the task is claimed, closed when the \
+story is merged, and the tasks that depend on it become available.
 - A story that fails its check or your review goes back to a new worker in \
 the same worktree, with the reason. A story that cannot go on is parked at \
 `blocked` with a reason until you or the user move it.
@@ -142,8 +147,44 @@ pass, or fix with notes exact enough for a worker to act on.
                 "\n    STUCK; see story_show"
               ""))))
 
+(defun rat-kingdom-king--available (space repos)
+  "Return lines listing the tasks available in SPACE.
+REPOS are the records of the registered repositories."
+  (let ((tasks (sort (rat-kingdom-space-scan space '(available))
+                     (lambda (a b)
+                       (let ((pa (or (plist-get (plist-get a :payload)
+                                                :priority)
+                                     most-positive-fixnum))
+                             (pb (or (plist-get (plist-get b :payload)
+                                                :priority)
+                                     most-positive-fixnum)))
+                         (if (= pa pb)
+                             (string< (plist-get a :identity)
+                                      (plist-get b :identity))
+                           (< pa pb)))))))
+    (cond
+     (tasks
+      (mapconcat
+       (lambda (task)
+         (let ((payload (plist-get task :payload)))
+           (format "- %s [%s] P%s %s: %s"
+                   (plist-get task :identity) (plist-get task :scope)
+                   (or (plist-get payload :priority) "?")
+                   (or (plist-get payload :type) "task")
+                   (plist-get payload :title))))
+       tasks "\n"))
+     ((cl-some (lambda (repo)
+                 (rat-kingdom-task-adapter space (plist-get repo :name)))
+               repos)
+      "- none")
+     (t "- none (no repository has a task tracker)"))))
+
 (defun rat-kingdom-king-status (space)
-  "Return a text describing the repositories and stories in SPACE."
+  "Return a text describing the repositories, stories and tasks in SPACE.
+The ready tasks of every repository are projected first; a tracker
+that fails is reported and otherwise ignored."
+  (with-demoted-errors "rat-kingdom: projecting tasks: %S"
+    (rat-kingdom-task-project-all space))
   (let ((repos (rat-kingdom-repo-list space))
         (stories (rat-kingdom-story-list space))
         (failures (rat-kingdom-reaction-failures space)))
@@ -167,6 +208,8 @@ pass, or fix with notes exact enough for a worker to act on.
          (mapconcat (lambda (story) (rat-kingdom-king--story-line space story))
                     stories "\n")
        "- none")
+     "\n\nAvailable tasks:\n"
+     (rat-kingdom-king--available space repos)
      (if failures
          (concat "\n\nReactions that failed (tell the user):\n"
                  (mapconcat (lambda (failure)
@@ -444,8 +487,9 @@ function that returns an argument by name."
           ,@body)))))
 
 (rat-kingdom-king--deftool "status"
-    "Show the registered repositories and every story in progress: where \
-each is, what it waits for, and why any has stopped."
+    "Show the registered repositories, every story in progress (where \
+each is, what it waits for, and why any has stopped) and the tracker tasks \
+available to start stories from."
     nil
   (rat-kingdom-king-status space))
 
@@ -490,28 +534,69 @@ ever moves the target forward."
     '((:name "repo" :type string :description "The repository's name."))
   (rat-kingdom-story-sync space (arg 'repo)))
 
+(defun rat-kingdom-king--task (space repo id)
+  "Return the task ID of the repository REPO in SPACE, for a new story.
+The task is a property list with at least `:title' and `:description',
+taken from its `available' tuple or else from the tracker.  Signal an
+error if REPO has no tracker, the tracker has no such task, or a story
+already works on it."
+  (let ((adapter (or (rat-kingdom-task-adapter space repo)
+                     (error "The repository %s has no task tracker, so it \
+has no task %s; leave out task and give a title and description" repo id))))
+    (when-let* ((story (rat-kingdom-space-rd
+                        space (list 'story :scope repo :task id))))
+      (error "The story %s already works on the task %s; see story_show"
+             (plist-get story :identity) id))
+    (or (plist-get (rat-kingdom-space-rd
+                    space (list 'available :scope repo :identity id))
+                   :payload)
+        (condition-case err
+            (or (rat-kingdom-task-show adapter id)
+                (error "No such task"))
+          (error (error "The tracker of %s has no task %s (%s); see \
+Available tasks in status" repo id (error-message-string err)))))))
+
 (rat-kingdom-king--deftool "story_start"
     "Start a story: one task for one worker in one repository. The worker \
 starts at once in its own worktree. Returns the story's id and any warnings \
 the user should hear."
     '((:name "repo" :type string :description "The repository's name.")
-      (:name "title" :type string
-       :description "What to do, in one line.")
-      (:name "description" :type string
+      (:name "title" :type string :optional t
+       :description "What to do, in one line. Required unless task is \
+given.")
+      (:name "description" :type string :optional t
        :description "Everything the worker needs: what to change, where, \
 constraints, and how the result will be judged. The worker knows nothing \
-else.")
+else. Required unless task is given.")
+      (:name "task" :type string :optional t
+       :description "The id of a tracker task, as listed under Available \
+tasks in status. Title and description default to the task's.")
       (:name "workflow" :type string :optional t
        :description "The workflow to follow, if not the repository's own."))
-  (let* ((warnings (rat-kingdom-story-warnings space (arg 'repo)))
-         (id (rat-kingdom-story-start space (arg 'repo) (arg 'title)
-                                      (arg 'description) nil (arg 'workflow))))
+  (let* ((repo (arg 'repo))
+         (warnings (rat-kingdom-story-warnings space repo))
+         (task (arg 'task))
+         (found (and task (rat-kingdom-king--task space repo task)))
+         (title (or (arg 'title) (plist-get found :title)
+                    (error "Give a title, or a task to take it from")))
+         (description
+          (cond ((not task)
+                 (or (arg 'description)
+                     (error "Give a description, or a task to take it from")))
+                ((and (not (arg 'description)) (plist-get found :description)))
+                (t (concat (and (arg 'description)
+                                (concat (arg 'description) "\n\n"))
+                           (format "This story works on the tracker task \
+%s: %s" task (plist-get found :title))))))
+         (id (rat-kingdom-story-start space repo title description nil
+                                      (arg 'workflow) task)))
     (string-join
-     (cons (format "Started %s with the workflow %s. You will be told when \
+     (cons (format "Started %s%s with the workflow %s. You will be told when \
 it needs you or is merged."
-                   id (plist-get (plist-get (rat-kingdom-story-get space id)
-                                            :payload)
-                                 :workflow))
+                   id (if task (format " for the task %s" task) "")
+                   (plist-get (plist-get (rat-kingdom-story-get space id)
+                                         :payload)
+                              :workflow))
            warnings)
      "\nWarning: ")))
 

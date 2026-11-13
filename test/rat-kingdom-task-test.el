@@ -258,6 +258,12 @@ The adapter's workspace is a fresh directory.  Use
                        "closed")))))
    (rat-kingdom-task-test-fake-tasks fake)))
 
+(cl-defmethod rat-kingdom-task-show ((fake rat-kingdom-task-test-fake) id)
+  "Return the task ID of FAKE, or fail if it has none."
+  (rat-kingdom-task-test--call fake 'show id)
+  (or (rat-kingdom-task-test--task fake id)
+      (signal 'rat-kingdom-task-error (list (format "no task %s" id)))))
+
 (cl-defmethod rat-kingdom-task-close ((fake rat-kingdom-task-test-fake) id reason)
   "Close the task ID of FAKE, saying REASON."
   (rat-kingdom-task-test--call fake 'close id reason)
