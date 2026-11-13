@@ -2,7 +2,7 @@
 
 (eldev-use-package-archive 'gnu-elpa)
 
-(setf eldev-project-main-file "rk3.el")
+(setf eldev-project-main-file "rat-kingdom.el")
 
 (eldev-add-loading-roots 'test "test")
 

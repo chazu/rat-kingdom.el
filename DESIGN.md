@@ -1,9 +1,8 @@
-# rk3 design
+# rat-kingdom design
 
-Status: draft for discussion, 2026-11-12. Nothing is built yet. `rk3` is a
-working name.
+Status: draft, 2026-11-12. Section 15 says what is built.
 
-rk3 is an Emacs-native swarm orchestrator. It descends from imp
+rat-kingdom is an Emacs-native swarm orchestrator. It descends from imp
 (`~/.imp`), rk2 (`~/dev/go/rk2`) and procyon-park, and runs on the
 existing Emacs agent tooling: agent-shell, deathless, a2ui and the in-Emacs
 MCP endpoint.
@@ -46,7 +45,7 @@ MCP endpoint.
             user
              │
    ┌─────────┴──────────────────────────── Emacs ───────────────────────┐
-   │  king (agent-shell)      dashboard (deathless + rk3 views)         │
+   │  king (agent-shell)      dashboard (deathless + rat-kingdom views)         │
    │        │ tools                    ▲                                │
    │        ▼                          │ change hooks                   │
    │  ┌───────────┐   match    ┌───────┴──────┐   spawn   ┌───────────┐ │
@@ -139,24 +138,42 @@ The king is the exception: it has a `query` tool.
 
 ## 6. Reactions
 
-A reaction is a standing pattern with an elisp body. When a tuple matching
-the pattern appears, the body runs with the pattern's bindings.
+A reaction is a standing set of patterns with an elisp body. When tuples
+matching all of its patterns are in the space, the body runs with the
+patterns' variables bound.
 
 ```elisp
-(rk3-defreaction integrate-on-pass
-  :match (verdict :scope $repo :identity $story :value pass)
-  :take t                         ; consume the verdict
-  (rk3-story-move $story 'integrating))
+(rat-kingdom-defreaction integrate-on-pass
+  "Move a story on once its review passes."
+  :take (verdict :scope $repo :identity $story :value pass)
+  :read (story :identity $story :at review)
+  (rat-kingdom-story-move $story 'integrating))
 ```
 
-- A reaction may match more than one tuple (a join), as a Petri-net
-  transition does.
+- `:take` patterns consume what they match; `:read` patterns only require
+  it. Each takes one pattern or several. A variable shared between
+  patterns joins them, as the inputs of a Petri-net transition are joined.
+- **A firing is one transaction.** The tuples are taken, the body runs, and
+  what the body writes commits with the take. Nobody sees a half-done
+  transition.
+- **A failed body changes nothing.** The transaction rolls back, the tuples
+  stay, and the failure is recorded. Those tuples do not fire that
+  reaction again until someone retries it. Failures are listed for the
+  dashboard.
+- **Reactions fire on what is in the space, not on the act of writing.**
+  The space records which tuples each read-only reaction has fired on, so
+  each fires once per match. After a crash, a reaction fires on exactly
+  the tuples it had not handled.
+- A replaced tuple is a new tuple. Updating a run's state with `put` lets
+  reactions on that state fire again.
 - Reactions are elisp, written by the user, global or per repo.
-- A reaction's body must not block. Long work is a subprocess whose exit
-  writes a tuple.
-- Reactions fire after the writing transaction commits. Tuples written by
-  another process are noticed by polling SQLite's data version on a short
-  timer.
+- A body must not block. Long work is a subprocess whose exit writes a
+  tuple.
+- A write schedules a run for when Emacs is next idle; the writer is not
+  held up. One run follows the whole chain of consequences, and stops
+  with a warning after 1000 firings.
+- Tuples written by another process are noticed by polling SQLite's data
+  version every two seconds. The same poll archives expired tuples.
 
 A new role is a new pattern. Adding one changes no existing prompt.
 
@@ -208,7 +225,7 @@ Most specific wins: global → repo → epic → task.
 
 | Layer | Where | Who edits |
 |---|---|---|
-| global | `~/.rk3/config.eld`, `~/.rk3/workflows/` | user, or king through a tool |
+| global | `~/.emacs.d/rat-kingdom/config.eld`, `~/.emacs.d/rat-kingdom/workflows/` | user, or king through a tool |
 | repo | `<repo>/.rk/config.eld`, `<repo>/.rk/workflows/` | same; versioned with the code |
 | epic, task | `policy` tuples owned by the epic or task | king |
 
@@ -364,10 +381,10 @@ space, reactions and workflows do not change.
 deathless stays the per-session view. a2ui surfaces show the factory: the
 stories, the space and the rules. They come in two kinds.
 
-- **Engine-drawn**: rk3 renders the surface from elisp and binds its data
+- **Engine-drawn**: rat-kingdom renders the surface from elisp and binds its data
   model to queries of the space. A change hook updates only the data paths
   that changed. No model is involved and no tokens are spent. A button
-  press writes a tuple or calls an rk3 command directly.
+  press writes a tuple or calls an rat-kingdom command directly.
 - **King-drawn**: the king draws a surface when it wants a decision from
   the user, with the a2ui tools it already has.
 
@@ -409,11 +426,13 @@ wait longer for review than for implementation.
 
 ## 15. Build order
 
-1. **Space**: SQLite schema, `out`/`in`/`rd`/`scan`, patterns, modalities,
-   owner sweep to archive, operations log. Tested without agents. A plain
-   space inspector (surface 8) comes with it.
-2. **Reactions**: registration, joins, fire after commit, external-write
-   polling.
+1. **Space** (built: `rat-kingdom-space.el`): SQLite schema,
+   `out`/`in`/`rd`/`scan`, patterns, modalities, owner sweep to archive,
+   operations log. Tested without agents. A plain space inspector
+   (surface 8) is still to do.
+2. **Reactions** (built: `rat-kingdom-reaction.el`): definition, joins,
+   one transaction per firing, recorded failures, once-per-match memory,
+   scheduling after commit, external-write polling.
 3. **One story, by hand**: worktree, one rat through agent-shell with
    `finish` and `block`, integration with a check. No workflow engine yet;
    the steps are hand-written reactions.
@@ -441,4 +460,4 @@ acceptance suite does. No test calls a model or pushes.
 4. Where do design docs live: in the repo, or in the project's org-roam
    hub?
 5. Does the king see every `fact`, or only those a reaction promotes?
-6. The package layout and name.
+6. The package layout.

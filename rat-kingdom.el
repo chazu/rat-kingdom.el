@@ -1,4 +1,4 @@
-;;; rk3.el --- Swarm orchestration for coding agents -*- lexical-binding: t; -*-
+;;; rat-kingdom.el --- Swarm orchestration for coding agents -*- lexical-binding: t; -*-
 
 ;; Copyright (C) 2026 Chaz Straney
 
@@ -27,20 +27,22 @@
 
 ;;; Commentary:
 
-;; rk3 runs a swarm of coding agents from inside Emacs: a king the user
+;; rat-kingdom runs a swarm of coding agents from inside Emacs: a king the user
 ;; talks to, workers in their own Git worktrees, and a tuplespace they
 ;; coordinate through.  DESIGN.md describes the whole system.
 ;;
-;; So far only the tuplespace exists; see rk3-space.el.
+;; So far the tuplespace (rat-kingdom-space.el) and reactions
+;; (rat-kingdom-reaction.el) exist.
 
 ;;; Code:
 
-(require 'rk3-space)
+(require 'rat-kingdom-space)
+(require 'rat-kingdom-reaction)
 
-(defgroup rk3 nil
+(defgroup rat-kingdom nil
   "Swarm orchestration for coding agents."
   :group 'tools
-  :prefix "rk3-")
+  :prefix "rat-kingdom-")
 
-(provide 'rk3)
-;;; rk3.el ends here
+(provide 'rat-kingdom)
+;;; rat-kingdom.el ends here
