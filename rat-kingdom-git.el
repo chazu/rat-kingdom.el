@@ -96,13 +96,15 @@ Signal `rat-kingdom-git-error' if it fails."
 
 ;;;; Repositories
 
-(cl-defun rat-kingdom-repo-add (space path &key name target check)
+(cl-defun rat-kingdom-repo-add (space path &key name target check workflow)
   "Register the repository at PATH in SPACE and return its record.
 NAME defaults to the directory's name.  TARGET is the branch finished
 work is merged into, by default `rat-kingdom-git-default-target'; it
 is created from HEAD if it does not exist.  CHECK is the command, a
 list of strings, that must succeed before work is merged; it is run
-without a shell.  Registering a name again replaces its record."
+without a shell.  WORKFLOW names the workflow its stories follow
+unless they say otherwise.  Registering a name again replaces its
+record."
   (let* ((top (rat-kingdom-git path "rev-parse" "--show-toplevel"))
          (name (or name (file-name-nondirectory (directory-file-name top))))
          (target (or target rat-kingdom-git-default-target)))
@@ -117,13 +119,16 @@ without a shell.  Registering a name again replaces its record."
       (rat-kingdom-git top "branch" target "HEAD"))
     (rat-kingdom-space-put space 'repo :scope name :identity name
                            :payload (list :path top :target target
-                                          :check check)
+                                          :check check
+                                          :workflow (and workflow
+                                                         (format "%s" workflow)))
                            :actor "user")
     (rat-kingdom-repo-get space name)))
 
 (defun rat-kingdom-repo-get (space name)
   "Return the record of the repository NAME in SPACE, or nil.
-The record is a property list: `:name', `:path', `:target', `:check'."
+The record is a property list: `:name', `:path', `:target', `:check'
+and `:workflow'."
   (when-let* ((tuple (rat-kingdom-space-rd
                       space (list 'repo :scope name :identity name))))
     (append (list :name (plist-get tuple :identity))

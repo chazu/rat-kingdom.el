@@ -182,8 +182,38 @@ A new role is a new pattern. Adding one changes no existing prompt.
 
 ### 7.1 Model
 
-A workflow is data. A fixed engine compiles it into reactions. Each story
-has exactly one token, and the token's place is the story's state.
+A workflow is data. A fixed engine reads it each time it moves a token, so
+a changed workflow applies from the next move. Each story has exactly one
+token, and the token's place is the story's state.
+
+**Built** (`rat-kingdom-workflow.el`, `rat-kingdom-story.el`), in a first
+form that differs from the sketch below in three ways. The engine is a
+fixed set of reactions that interpret the workflow, not reactions compiled
+from it: one begins the step of a token that has arrived at a place, and
+the others each join a waiting token with the tuple that ends its step.
+The step kinds are `:spawn`, `:check`, `:review` and `:merge`, each with
+named outcomes that lead to places; an outcome left out leads to the
+workflow's failure place. And there are no mixins or aspects yet. The two
+workflows that exist are `story` and `story-lite`.
+
+```elisp
+(rat-kingdom-workflow-define 'story
+  :places '(ready checking review integrating done blocked)
+  :start 'ready
+  :final '(done)
+  :steps '((implement :from ready :spawn rat :to checking)
+           (check :from checking :check t :pass review :fail ready)
+           (review :from review :review king :pass integrating :fix ready)
+           (integrate :from integrating :merge t :to done :stale checking)))
+```
+
+A failed check, a merge conflict and a review that asks for changes all
+lead back to `ready`, where a new worker is started in the same worktree
+with the reason. A story is given at most five workers before it is
+parked. A target branch that moved after the check leads back to
+`checking`; a commit that was already reviewed is not reviewed again.
+
+The sketch this grew from, kept for the parts not yet built:
 
 ```elisp
 (workflow story
@@ -214,11 +244,21 @@ doc, no code), `epic` (dispatches child stories in dependency order).
 ### 7.2 Not getting stuck
 
 - State is one token, never derived from several tuples.
-- Every place has a timeout.
-- A watchdog writes `stuck` for any token with no enabled step and no live
-  run, and the dashboard shows it.
-- The user or king can move any token to any place by hand. Each move is
-  logged.
+- A step that cannot be begun sends the token to the failure place with
+  the reason. An error never leaves a token half moved or waiting on a
+  failed reaction.
+- Steps have timeouts: by default two hours for a worker and thirty
+  minutes for a check, and none for a review.
+- A watchdog, once a minute, writes `stuck` for a token whose step has run
+  past its time, whose check is not running, whose worker's record is
+  gone, or which no reaction has picked up. The king is told.
+- The user or king can move any token to any place by hand. Its worker is
+  stopped, a running check is abandoned, and no file is touched. Each move
+  is logged with who made it.
+- A story can be cancelled: it is archived, and its worktree and branch
+  are kept.
+
+All of this is built.
 
 ### 7.3 Configuration layers
 
@@ -248,7 +288,9 @@ A run is one agent session doing one job: an agent-shell buffer over ACP, a
 worktree, a branch, and a `run` tuple. A worker does one task per lifetime.
 
 Run states, kept distinct as in rk2: `starting`, `working`, `ready`,
-`blocked`, `stopped`, `exited`, `integrated`, `cleaned`, `discarded`.
+`blocked`, `stopped`, `exited` (its session ended before it reported) and
+`interrupted` (Emacs stopped while it worked). A run that cannot be
+started is `exited` with the error.
 
 The process state comes from agent-shell's events (session ready, turn
 ended with its stop reason, tool call, permission request, error, process
@@ -259,8 +301,15 @@ about whether the task is done.
 ### 8.2 Messages
 
 A `message` tuple is delivered as the run's next prompt when its turn ends.
-If the run is idle it is delivered at once. Delivery is recorded before it
-is attempted, so a crash neither loses nor repeats it.
+If the run is idle it is delivered at once.
+
+**Built for the king only.** Messages waiting for the king are given to it
+together, as one prompt, when it is between turns and the user has nothing
+typed but unsent in its buffer. Otherwise another try is made twenty
+seconds later and at the end of its next turn. A message is removed after
+it is sent, so a crash between the two repeats it and never loses it.
+Messages to workers are not built; a worker hears from the king only
+through the reason a story carries to its next worker.
 
 ### 8.3 The brief
 
@@ -270,6 +319,18 @@ policy in that task's repo and epic. This is how a research worker's
 findings reach a worker started days later.
 
 ### 8.4 Recovery
+
+**Built** (`rat-kingdom-story-reconcile`, run when `rat-kingdom-mode` is
+turned on and by `M-x rat-kingdom-reconcile`), and tested by closing the
+space and discarding everything held in memory, not yet by killing a real
+Emacs. A run recorded as `working` with no agent in this Emacs becomes
+`interrupted`, and a reaction gives its story a new worker in the same
+worktree, with a fresh session and a prompt that says what happened. A
+check that was running is run again. The king takes up its earlier
+session by its id. Sessions that end while Emacs is exiting are not
+recorded as ended, so they are found interrupted on the next start.
+
+The plan this came from:
 
 On Emacs startup, and on demand, reconcile:
 
@@ -321,7 +382,7 @@ go, and it lets a role be denied built-in tools as well.
 
 | Role | Lifetime | Tools |
 |---|---|---|
-| king | long-lived, global, no worktree | `task_create`, `epic_create`, `story_start`, `story_move`, `tell`, `verdict`, `query`, `config_set`, `publish` |
+| king | long-lived, global, no worktree | built: `status`, `repo_add`, `repo_sync`, `workflow_list`, `story_start`, `story_show`, `story_diff`, `story_move`, `story_cancel`, `verdict`. Planned: `task_create`, `epic_create`, `tell`, `query`, `config_set`, `publish` |
 | rat (worker) | one task | `finish`, `block`, `note_fact`, `inbox` |
 | researcher | one task | `finish_doc`, `note_fact`, `block` |
 | foreman | one epic, optional | `story_start`, `tell`, `verdict`, `query`, limited to its epic |
@@ -464,20 +525,24 @@ wait longer for review than for implementation.
 2. **Reactions** (built: `rat-kingdom-reaction.el`): definition, joins,
    one transaction per firing, recorded failures, once-per-match memory,
    scheduling after commit, external-write polling.
-3. **One story, by hand** (built, not yet run with a real agent:
+3. **One story, by hand** (built, and run once with a real agent:
    `rat-kingdom-git.el`, `rat-kingdom-mcp.el`, `rat-kingdom-run.el`,
    `rat-kingdom-agent-shell.el`, `rat-kingdom-story.el`): repositories as
    `repo` tuples, a worktree per story, one rat through agent-shell with
    `finish` and `block`, the tool endpoint with a token per run, and
-   integration with a check. Five hand-written reactions move the token.
-   There is no review step yet: a story whose check passes is merged into
-   the target branch. Tested with real Git and a backend that starts no
-   agent.
-4. **Workflow engine**: compile `story` from data; tokens, timeouts,
-   watchdog, manual move.
-5. **Recovery**: reconcile and resume, tested by killing Emacs mid-run.
-6. **King and tasks**: king role and tools, `br` adapter, `available`
-   projection, epic waves. The epic plan surface (4) comes with it.
+   integration with a check. Tested with real Git and a backend that
+   starts no agent. Its hand-written reactions were replaced in step 4.
+4. **Workflow engine** (built: `rat-kingdom-workflow.el`,
+   `rat-kingdom-story.el`): workflows as validated data, `story` and
+   `story-lite`, one token per story, review as a step, loops back to a
+   worker, timeouts, a watchdog, moving and cancelling by hand.
+5. **Recovery** (built, tested without killing a real Emacs): reconcile on
+   startup; an interrupted worker is replaced in the same worktree, an
+   interrupted check is run again, the king's session is taken up again.
+6. **King and tasks** (the king is built, not yet run with a real agent:
+   `rat-kingdom-king.el`; tasks are not): king role and tools, news
+   delivered between turns. Still to come: `br` adapter, `available`
+   projection, epic waves, and the epic plan surface (4).
 7. **Configuration**: layers, mixins, aspects, validated `config_set`.
 8. **Dashboard** additions with the factory floor, attention queue and
    review card (surfaces 1 to 3), then the **research** workflow, docs and

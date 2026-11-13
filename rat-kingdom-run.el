@@ -18,7 +18,8 @@
 ;;   working    its agent has been started
 ;;   ready      the agent called `finish'; a result is recorded
 ;;   blocked    the agent called `block'
-;;   exited     the agent's process went away before it reported
+;;   exited     the agent's session ended before it reported
+;;   interrupted  Emacs stopped while the agent was working
 ;;   stopped    stopped on purpose
 ;;
 ;; The state says what the agent reported, never what its process did:
@@ -33,6 +34,9 @@
 ;; backend that starts nothing.
 ;;
 ;; Two tools are offered to a worker: `finish' and `block'.
+;;
+;; A run need not belong to a story.  The king is a run too; see
+;; rat-kingdom-king.el.
 
 ;;; Code:
 
@@ -45,15 +49,25 @@
 
 (autoload 'rat-kingdom-agent-shell-start "rat-kingdom-agent-shell")
 (autoload 'rat-kingdom-agent-shell-stop "rat-kingdom-agent-shell")
+(autoload 'rat-kingdom-agent-shell-send "rat-kingdom-agent-shell")
 
 (defvar rat-kingdom-run-backend
   (list :start #'rat-kingdom-agent-shell-start
-        :stop #'rat-kingdom-agent-shell-stop)
+        :stop #'rat-kingdom-agent-shell-stop
+        :send #'rat-kingdom-agent-shell-send)
   "How agents are started and stopped, as a property list of functions.
 `:start' is called with the run's record and its prompt.  It starts an
 agent in the run's worktree, sends it the prompt, and returns a handle.
-It should arrange for `rat-kingdom-run-exited' to be called if the
-agent's process goes away.  `:stop' is called with the handle.")
+If the record has `:resume', a session id, it should take that session
+up again instead of starting a new one.  It should arrange for
+`rat-kingdom-run-exited' to be called if the agent's session ends, and
+for `rat-kingdom-run-idle-functions' to run when the agent ends a turn.
+`:stop' is called with the handle.  `:send' is called with the handle
+and a text; it gives the agent the text as its next prompt and returns
+non-nil, or returns nil if the agent cannot take one now.")
+
+(defvar rat-kingdom-run-idle-functions nil
+  "Functions called with a run's id when its agent has ended a turn.")
 
 (defcustom rat-kingdom-run-rat-instructions
   "You are a worker in a rat-kingdom swarm. You have one task. Do it and \
@@ -96,21 +110,32 @@ A record is the tuple's payload with `:id', `:repo' and `:story'."
           (rat-kingdom-space-scan
            space (if story (list 'run :owner story) '(run)))))
 
-(cl-defun rat-kingdom-run-create (space &key id repo story role worktree
-                                        branch target prompt)
+(cl-defun rat-kingdom-run-create (space &key id (repo "system") story role
+                                        worktree branch target prompt resume)
   "Record a new run in SPACE, to be started by `rat-kingdom-run-launch'.
 ID names the run.  It belongs to STORY in REPO, plays ROLE, and works
 in WORKTREE on BRANCH, which was cut from TARGET.  PROMPT is what its
-agent is told.  Return the record."
-  (when (rat-kingdom-run-get space id)
-    (error "There is already a run called %s" id))
+agent is told.  RESUME is the id of an agent session to take up again.
+A run of that name that is over is replaced.  Return the record."
+  (when-let* ((old (rat-kingdom-run-get space id)))
+    (when (or (rat-kingdom-run-live-p id)
+              (equal (plist-get old :state) "starting"))
+      (error "There is already a run called %s" id)))
   (rat-kingdom-space-put
    space 'run :scope repo :identity id :owner story
    :payload (list :state "starting" :role (format "%s" role)
                   :worktree worktree :branch branch :target target
-                  :prompt prompt)
+                  :prompt prompt :resume resume)
    :actor "engine")
   (rat-kingdom-run-get space id))
+
+(defun rat-kingdom-run-live-p (id)
+  "Return non-nil if the run ID has an agent started in this Emacs."
+  (and (gethash id rat-kingdom-run--handles) t))
+
+(defun rat-kingdom-run-handle (id)
+  "Return what the backend returned when it started the run ID, or nil."
+  (gethash id rat-kingdom-run--handles))
 
 (defun rat-kingdom-run-update (space id &rest changes)
   "Change the record of the run ID in SPACE by the property list CHANGES.
@@ -127,13 +152,23 @@ Return the new record, or nil if there is no such run."
 ;;;; Starting and stopping
 
 (defun rat-kingdom-run--launch (space id)
-  "Start the agent of the run ID in SPACE and mark the run working."
+  "Start the agent of the run ID in SPACE and mark the run working.
+If it cannot be started, the run is marked exited, with the error."
   (let ((run (rat-kingdom-run-get space id)))
-    (puthash id
-             (funcall (plist-get rat-kingdom-run-backend :start)
-                      run (plist-get run :prompt))
-             rat-kingdom-run--handles)
-    (rat-kingdom-run-update space id :state "working")))
+    (condition-case err
+        (progn
+          (puthash id
+                   (funcall (plist-get rat-kingdom-run-backend :start)
+                            run (plist-get run :prompt))
+                   rat-kingdom-run--handles)
+          (rat-kingdom-run-update space id :state "working"))
+      (error
+       (remhash id rat-kingdom-run--handles)
+       (rat-kingdom-mcp-revoke id)
+       (message "rat-kingdom: could not start %s: %s" id
+                (error-message-string err))
+       (rat-kingdom-run-update space id :state "exited"
+                               :error (error-message-string err))))))
 
 (rat-kingdom-defreaction rat-kingdom-run-launch
   "Start the agent of a run that has been recorded but not started."
@@ -150,18 +185,48 @@ its state."
       (funcall (plist-get rat-kingdom-run-backend :stop) handle)))
   (rat-kingdom-mcp-revoke id)
   (when-let* ((run (rat-kingdom-run-get space id))
-              ((member (plist-get run :state) '("starting" "working" "exited"))))
+              ((member (plist-get run :state)
+                       '("starting" "working" "exited" "interrupted"))))
     (rat-kingdom-run-update space id :state "stopped")))
 
+(defun rat-kingdom-run-send (id text)
+  "Give the agent of the run ID TEXT as its next prompt.
+Return non-nil if it took it, and nil if the run has no agent in this
+Emacs or the agent cannot take a prompt now."
+  (when-let* ((handle (gethash id rat-kingdom-run--handles))
+              (send (plist-get rat-kingdom-run-backend :send)))
+    (funcall send handle text)))
+
+(defvar rat-kingdom-run--dying nil
+  "Non-nil once Emacs has begun to exit.
+Sessions that end from then on were interrupted, not ended.")
+
+(add-hook 'kill-emacs-hook (lambda () (setq rat-kingdom-run--dying t)))
+
 (defun rat-kingdom-run-exited (id)
-  "Note that the agent process of the run ID has gone away.
-A run that had not reported becomes `exited'.  Backends call this."
-  (remhash id rat-kingdom-run--handles)
-  (rat-kingdom-mcp-revoke id)
-  (let ((space (rat-kingdom-space-default)))
-    (when-let* ((run (rat-kingdom-run-get space id))
-                ((member (plist-get run :state) '("starting" "working"))))
-      (rat-kingdom-run-update space id :state "exited"))))
+  "Note that the agent session of the run ID has ended.
+A run that had not reported becomes `exited'.  Backends call this.
+While Emacs is exiting nothing is recorded, so that the run is found
+interrupted when Emacs next starts."
+  (unless rat-kingdom-run--dying
+    (remhash id rat-kingdom-run--handles)
+    (rat-kingdom-mcp-revoke id)
+    (let ((space (rat-kingdom-space-default)))
+      (when-let* ((run (rat-kingdom-run-get space id))
+                  ((member (plist-get run :state) '("starting" "working"))))
+        (rat-kingdom-run-update space id :state "exited")))))
+
+(defun rat-kingdom-run-reconcile (space)
+  "Mark interrupted every run in SPACE whose agent is not in this Emacs.
+Only runs recorded as working are touched.  Return their ids."
+  (let (ids)
+    (dolist (run (rat-kingdom-run-list space))
+      (when (and (equal (plist-get run :state) "working")
+                 (not (rat-kingdom-run-live-p (plist-get run :id))))
+        (rat-kingdom-run-update space (plist-get run :id)
+                                :state "interrupted")
+        (push (plist-get run :id) ids)))
+    (nreverse ids)))
 
 ;;;; The worker's tools
 
@@ -176,7 +241,8 @@ A run that had not reported becomes `exited'.  Backends call this."
 (defun rat-kingdom-run--story-waiting-p (space run)
   "Return non-nil if RUN's story in SPACE still waits for its work."
   (rat-kingdom-space-rd space (list 'story :identity (plist-get run :story)
-                                    :at "implementing")))
+                                    :awaiting "worker"
+                                    :run (plist-get run :id))))
 
 (defun rat-kingdom-run--finish (context arguments)
   "Record that the calling run's work is done.

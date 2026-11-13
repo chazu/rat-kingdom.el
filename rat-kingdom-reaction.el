@@ -206,6 +206,7 @@ STATUS is `done' or `failed'; ERROR is the failure's text."
   "Return the failed firings recorded in SPACE, oldest first.
 Each is a property list: `:reaction', `:tuples' (a list of tuple ids),
 `:error' and `:at'."
+  (rat-kingdom-reaction--ensure-table space)
   (mapcar
    (pcase-lambda (`(,reaction ,tuples ,error ,at))
      (list :reaction (intern reaction)

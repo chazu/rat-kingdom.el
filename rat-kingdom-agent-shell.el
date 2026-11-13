@@ -37,10 +37,12 @@
 (declare-function agent-shell--start "agent-shell")
 (declare-function agent-shell-insert "agent-shell")
 (declare-function agent-shell-subscribe-to "agent-shell")
+(declare-function shell-maker-busy "shell-maker")
 (declare-function agent-shell-anthropic-make-claude-code-config
                   "agent-shell-anthropic")
 (declare-function rat-kingdom-run-exited "rat-kingdom-run")
 (declare-function rat-kingdom-run-update "rat-kingdom-run")
+(defvar rat-kingdom-run-idle-functions)
 
 (defun rat-kingdom-agent-shell--servers (token)
   "Return the MCP servers for a run holding TOKEN.
@@ -66,8 +68,15 @@ Return non-nil if it was answered."
         (funcall (map-elt permission :respond) (map-elt choice :option-id))
         t))))
 
+(defun rat-kingdom-agent-shell--buffer-name (run)
+  "Return the name for the shell buffer of RUN."
+  (if (equal (plist-get run :role) "rat")
+      (format "rat %s" (plist-get run :id))
+    (plist-get run :id)))
+
 (defun rat-kingdom-agent-shell-start (run prompt)
-  "Start an agent-shell for RUN, send it PROMPT and return its buffer."
+  "Start an agent-shell for RUN, send it PROMPT and return its buffer.
+If RUN has `:resume', take that session up again."
   (unless (require 'agent-shell nil t)
     (error "Starting an agent needs the agent-shell package"))
   (require 'agent-shell-anthropic)
@@ -75,16 +84,21 @@ Return non-nil if it was answered."
          (worktree (file-name-as-directory (plist-get run :worktree)))
          (token (rat-kingdom-mcp-grant id (intern (plist-get run :role))))
          (config (append
-                  (list (cons :buffer-name (format "rat %s" id))
+                  (list (cons :buffer-name
+                              (rat-kingdom-agent-shell--buffer-name run))
                         (cons :mcp-servers
                               (rat-kingdom-agent-shell--servers token)))
                   (agent-shell-anthropic-make-claude-code-config)))
          (buffer (with-temp-buffer
                    (setq default-directory worktree)
                    (let ((agent-shell-cwd-function (lambda () worktree)))
-                     (agent-shell--start :config config :no-focus t
-                                         :new-session t
-                                         :session-strategy 'new))))
+                     (if-let* ((session (plist-get run :resume)))
+                         (agent-shell--start :config config :no-focus t
+                                             :new-session t
+                                             :session-id session)
+                       (agent-shell--start :config config :no-focus t
+                                           :new-session t
+                                           :session-strategy 'new)))))
          (sent nil))
     (with-current-buffer buffer
       (let ((previous (bound-and-true-p
@@ -110,9 +124,38 @@ Return non-nil if it was answered."
                (agent-shell-insert :text prompt :submit t :no-focus t
                                    :shell-buffer buffer)))))))
     (agent-shell-subscribe-to
+     :shell-buffer buffer :event 'turn-complete
+     :on-event (lambda (_event)
+                 ;; Not from inside agent-shell's own handling of the turn.
+                 (run-at-time 0 nil #'run-hook-with-args
+                              'rat-kingdom-run-idle-functions id)))
+    (agent-shell-subscribe-to
      :shell-buffer buffer :event 'clean-up
      :on-event (lambda (_event) (rat-kingdom-run-exited id)))
     buffer))
+
+(defun rat-kingdom-agent-shell--input-pending-p ()
+  "Return non-nil if the current shell has text typed but not sent."
+  (when-let* ((process (get-buffer-process (current-buffer)))
+              (mark (process-mark process))
+              ((marker-position mark)))
+    (not (string-blank-p
+          (buffer-substring-no-properties mark (point-max))))))
+
+(defun rat-kingdom-agent-shell-send (buffer text)
+  "Give the agent in BUFFER TEXT as its next prompt.
+Return non-nil if it was sent.  Nothing is sent, and nil is returned,
+while the agent is in a turn, has no session yet, or the user has
+typed something there that is not yet sent."
+  (when (buffer-live-p buffer)
+    (with-current-buffer buffer
+      (when (and (map-nested-elt agent-shell--state '(:session :id))
+                 (not (ignore-errors (shell-maker-busy)))
+                 (not (rat-kingdom-agent-shell--input-pending-p)))
+        (let ((agent-shell-prefer-viewport-interaction nil))
+          (agent-shell-insert :text text :submit t :no-focus t
+                              :shell-buffer buffer))
+        t))))
 
 (defun rat-kingdom-agent-shell-stop (buffer)
   "Stop the agent in BUFFER by killing the buffer."

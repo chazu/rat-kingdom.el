@@ -32,18 +32,28 @@
 ;; tuplespace they coordinate through.  DESIGN.md describes the whole
 ;; system and says how much of it is built.
 ;;
-;; To try what there is:
+;; To use it:
+;;
+;;   M-x rat-kingdom-king         start the king, or show it; then tell
+;;                                it what you want done and where
+;;   M-x rat-kingdom-inspect      watch the space
+;;
+;; Everything the king does can also be done by hand:
 ;;
 ;;   M-x rat-kingdom-mode         start reacting to the space
 ;;   M-x rat-kingdom-add-repo     register a repository
 ;;   M-x rat-kingdom-start-story  give a worker one task there
-;;   M-x rat-kingdom-inspect      watch the space
+;;   M-x rat-kingdom-move-story   put a story at another place
+;;   M-x rat-kingdom-review-story give a verdict on a story in review
+;;   M-x rat-kingdom-cancel-story end a story
+;;   M-x rat-kingdom-reconcile    recover work an Emacs restart cut off
 ;;
 ;; A worker is a Claude Code session in an agent-shell buffer, in its own
 ;; worktree.  When it reports that it is done, its commit is merged in a
-;; candidate worktree, the repository's check runs, and the repository's
-;; target branch (rk/integration unless you say otherwise) is moved.
-;; Your checkout is never touched and nothing is pushed.
+;; candidate worktree, the repository's check runs, the king reviews it
+;; if the workflow says so, and the repository's target branch
+;; (rk/integration unless you say otherwise) is moved.  Your checkout is
+;; never touched and nothing is pushed.
 
 ;;; Code:
 
@@ -53,29 +63,122 @@
 (require 'rat-kingdom-git)
 (require 'rat-kingdom-mcp)
 (require 'rat-kingdom-run)
+(require 'rat-kingdom-workflow)
 (require 'rat-kingdom-story)
+(require 'rat-kingdom-king)
 
 (defgroup rat-kingdom nil
   "Swarm orchestration for coding agents."
   :group 'tools
   :prefix "rat-kingdom-")
 
+;;;; Recovery
+
+(defvar rat-kingdom-mode)
+
+(defvar rat-kingdom--watch-timer nil
+  "The timer that looks for stuck stories while the mode is on.")
+
+;;;###autoload
+(defun rat-kingdom-reconcile ()
+  "Recover the work that was in flight when Emacs last stopped.
+A worker that was cut off is replaced by a new one in the same
+worktree, and a check that was running is run again.  Turning on
+`rat-kingdom-mode' does this, so it is seldom needed by hand."
+  (interactive)
+  (let* ((space (rat-kingdom-space-default))
+         (found (rat-kingdom-story-reconcile space))
+         (runs (plist-get found :runs))
+         (checks (plist-get found :checks)))
+    (when (and rat-kingdom-mode (or runs checks))
+      (rat-kingdom-reaction-run space))
+    (if (or runs checks)
+        (message "rat-kingdom: recovering: %d interrupted (%s), %d to check \
+again (%s)"
+                 (length runs) (string-join runs ", ")
+                 (length checks) (string-join checks ", "))
+      (when (called-interactively-p 'interactive)
+        (message "rat-kingdom: nothing was interrupted")))
+    found))
+
+(defun rat-kingdom--watch ()
+  "Look for stuck stories in the default space."
+  (let ((space (rat-kingdom-space-default)))
+    (when (rat-kingdom-space-db space)
+      (rat-kingdom-story-watch space))))
+
 ;;;###autoload
 (define-minor-mode rat-kingdom-mode
   "React to what is written to the rat-kingdom space.
 While this is on, stories move: workers are started, their results
-checked and merged."
+checked, reviewed and merged.  Turning it on first recovers whatever
+an earlier Emacs left in flight."
   :global t
   :group 'rat-kingdom
+  (when (timerp rat-kingdom--watch-timer)
+    (cancel-timer rat-kingdom--watch-timer)
+    (setq rat-kingdom--watch-timer nil))
   (if rat-kingdom-mode
-      (rat-kingdom-reaction-attach (rat-kingdom-space-default))
+      (let ((space (rat-kingdom-space-default)))
+        (rat-kingdom-reaction--ensure-table space)
+        (rat-kingdom-reconcile)
+        (rat-kingdom-reaction-attach space)
+        (setq rat-kingdom--watch-timer
+              (run-at-time rat-kingdom-story-watch-interval
+                           rat-kingdom-story-watch-interval
+                           #'rat-kingdom--watch)))
     (rat-kingdom-reaction-detach (rat-kingdom-space-default))
     (rat-kingdom-mcp-stop)))
+
+;;;; The king
+
+;;;###autoload
+(defun rat-kingdom-king (&optional fresh)
+  "Show the king, starting it if it is not running.
+If the king's earlier session ended, take it up again, so that it keeps
+what it knew.  With a prefix argument FRESH, start a new session, after
+stopping the king if it is running."
+  (interactive "P")
+  (unless rat-kingdom-mode
+    (rat-kingdom-mode 1))
+  (let ((space (rat-kingdom-space-default)))
+    (when (and fresh (rat-kingdom-run-live-p rat-kingdom-king-id)
+               (yes-or-no-p "Stop the king and start a new session? "))
+      (rat-kingdom-run-stop space rat-kingdom-king-id))
+    (unless (rat-kingdom-run-live-p rat-kingdom-king-id)
+      (rat-kingdom-king-start space fresh)
+      (rat-kingdom-reaction-run space))
+    (let ((buffer (rat-kingdom-run-handle rat-kingdom-king-id)))
+      (if (buffer-live-p buffer)
+          (pop-to-buffer buffer)
+        (error "The king could not be started: %s"
+               (or (plist-get (rat-kingdom-run-get space rat-kingdom-king-id)
+                              :error)
+                   "no reason was recorded"))))))
+
+;;;; By hand
 
 (defun rat-kingdom--read-command (prompt)
   "Read a command with PROMPT and return it as a list of strings, or nil."
   (let ((text (read-string prompt)))
     (and (not (string-blank-p text)) (split-string-and-unquote text))))
+
+(defun rat-kingdom--read-story (prompt &optional pattern)
+  "Read the id of a story in progress with PROMPT.
+PATTERN, if given, is a story pattern the story must match."
+  (let ((stories (rat-kingdom-space-scan (rat-kingdom-space-default)
+                                         (or pattern '(story)))))
+    (unless stories
+      (user-error "No story fits"))
+    (car (split-string
+          (completing-read
+           prompt
+           (mapcar (lambda (story)
+                     (format "%s  %s: %s" (plist-get story :identity)
+                             (plist-get (plist-get story :payload) :at)
+                             (plist-get (plist-get story :payload) :title)))
+                   stories)
+           nil t)))))
 
 ;;;###autoload
 (defun rat-kingdom-add-repo (path &optional check)
@@ -104,10 +207,49 @@ candidate worktree; work is merged only if it succeeds."
            (read-string "Acceptance criteria: "))))
   (unless rat-kingdom-mode
     (rat-kingdom-mode 1))
-  (message "Started %s"
-           (rat-kingdom-story-start (rat-kingdom-space-default) repo title
-                                    (and (not (string-blank-p description))
-                                         description))))
+  (let* ((space (rat-kingdom-space-default))
+         (warnings (rat-kingdom-story-warnings space repo)))
+    (when (and warnings (called-interactively-p 'interactive)
+               (not (yes-or-no-p (concat (string-join warnings "\n")
+                                         "\nStart the story anyway? "))))
+      (user-error "Not started"))
+    (message "Started %s"
+             (rat-kingdom-story-start space repo title
+                                      (and (not (string-blank-p description))
+                                           description)))))
+
+;;;###autoload
+(defun rat-kingdom-move-story (story place &optional note)
+  "Put STORY at PLACE of its workflow, with NOTE saying why."
+  (interactive
+   (let* ((story (rat-kingdom--read-story "Move story: "))
+          (workflow (rat-kingdom-story--workflow
+                     (rat-kingdom-story-get (rat-kingdom-space-default)
+                                            story))))
+     (list story
+           (completing-read "To: " (plist-get workflow :places) nil t)
+           (read-string "Note for the next worker (may be empty): "))))
+  (rat-kingdom-story-move (rat-kingdom-space-default) story place
+                          (and note (not (string-blank-p note)) note))
+  (message "%s is now at %s" story place))
+
+;;;###autoload
+(defun rat-kingdom-review-story (story value &optional notes)
+  "Give the verdict VALUE, pass or fix, on STORY, with NOTES for a fix."
+  (interactive
+   (let* ((story (rat-kingdom--read-story "Review story: "
+                                          '(story :awaiting review)))
+          (value (completing-read "Verdict: " '("pass" "fix") nil t)))
+     (list story value
+           (and (equal value "fix") (read-string "What to change: ")))))
+  (rat-kingdom-story-verdict (rat-kingdom-space-default) story value notes)
+  (message "Recorded %s for %s" value story))
+
+;;;###autoload
+(defun rat-kingdom-cancel-story (story)
+  "End STORY for good, keeping its worktree and branch."
+  (interactive (list (rat-kingdom--read-story "Cancel story: ")))
+  (message "%s" (rat-kingdom-story-cancel (rat-kingdom-space-default) story)))
 
 (provide 'rat-kingdom)
 ;;; rat-kingdom.el ends here

@@ -11,12 +11,25 @@
 (require 'ert)
 (require 'url)
 (require 'rat-kingdom-story)
+(require 'rat-kingdom-king)
 
 (defvar rat-kingdom-story-test--started nil
   "The runs the fake backend started, newest first, as (RUN PROMPT TOKEN).")
 
 (defvar rat-kingdom-story-test--stopped nil
   "The handles the fake backend stopped.")
+
+(defvar rat-kingdom-story-test--sent nil
+  "The texts the fake backend was asked to send, newest first, as (HANDLE . TEXT).")
+
+(defvar rat-kingdom-story-test--busy nil
+  "Non-nil makes the fake backend refuse to send.")
+
+(defvar rat-kingdom-story-test--events nil
+  "The story events seen, newest first, as (EVENT . ID).")
+
+(defvar rat-kingdom-story-test--now nil
+  "If non-nil, the time the space is told it is.")
 
 (defun rat-kingdom-story-test--git (directory &rest args)
   "Run Git with ARGS in DIRECTORY."
@@ -32,7 +45,8 @@
 (defmacro rat-kingdom-story-test-with-repo (vars &rest body)
   "Run BODY with a fresh space and repository.
 VARS is (SPACE PATH): the space and the repository's directory.  The
-repository is registered as \"demo\" with no check."
+repository is registered as \"demo\" with no check.  Stories follow
+the workflow story-lite unless they say otherwise."
   (declare (indent 1) (debug t))
   (let ((root (make-symbol "root")))
     `(let* ((,root (file-name-as-directory
@@ -42,17 +56,37 @@ repository is registered as \"demo\" with no check."
             (rat-kingdom-reaction--attachments nil)
             (rat-kingdom-run--handles (make-hash-table :test #'equal))
             (rat-kingdom-mcp--grants (make-hash-table :test #'equal))
+            (rat-kingdom-story--checks (make-hash-table :test #'equal))
+            (rat-kingdom-story-default-workflow "story-lite")
+            (rat-kingdom-king--retry nil)
             (rat-kingdom-story-test--started nil)
             (rat-kingdom-story-test--stopped nil)
+            (rat-kingdom-story-test--sent nil)
+            (rat-kingdom-story-test--busy nil)
+            (rat-kingdom-story-test--events nil)
+            (rat-kingdom-story-test--now nil)
+            (rat-kingdom-space-now-function
+             (lambda () (or rat-kingdom-story-test--now (float-time))))
+            (rat-kingdom-story-event-functions
+             (list (lambda (_space event story)
+                     (push (cons event (plist-get story :identity))
+                           rat-kingdom-story-test--events))
+                   #'rat-kingdom-king--news))
             (rat-kingdom-run-backend
              (list :start (lambda (run prompt)
                             (let ((token (rat-kingdom-mcp-grant
-                                          (plist-get run :id) 'rat)))
+                                          (plist-get run :id)
+                                          (intern (plist-get run :role)))))
                               (push (list run prompt token)
                                     rat-kingdom-story-test--started)
                               (plist-get run :id)))
                    :stop (lambda (handle)
-                           (push handle rat-kingdom-story-test--stopped))))
+                           (push handle rat-kingdom-story-test--stopped))
+                   :send (lambda (handle text)
+                           (unless rat-kingdom-story-test--busy
+                             (push (cons handle text)
+                                   rat-kingdom-story-test--sent)
+                             t))))
             (inhibit-message t)
             (,(cadr vars) (expand-file-name "demo/" ,root))
             (,(car vars) (rat-kingdom-space-open
@@ -69,6 +103,10 @@ repository is registered as \"demo\" with no check."
                                              "Initial commit")
              (rat-kingdom-repo-add ,(car vars) ,(cadr vars))
              ,@body)
+         (when (timerp rat-kingdom-king--retry)
+           (cancel-timer rat-kingdom-king--retry))
+         (maphash (lambda (id _process) (rat-kingdom-story--abandon-check id))
+                  (copy-hash-table rat-kingdom-story--checks))
          (rat-kingdom-space-close ,(car vars))
          (delete-directory ,root t)))))
 
@@ -90,6 +128,16 @@ Return (TEXT . FAILED)."
   "Return where the story ID is in SPACE, or nil if it is gone."
   (plist-get (plist-get (rat-kingdom-story-get space id) :payload) :at))
 
+(defun rat-kingdom-story-test--get (space id key)
+  "Return what the token of the story ID in SPACE has under KEY."
+  (plist-get (plist-get (rat-kingdom-story-get space id) :payload) key))
+
+(defun rat-kingdom-story-test--prompt (run-id)
+  "Return the prompt the run RUN-ID was started with."
+  (nth 1 (cl-find run-id rat-kingdom-story-test--started
+                  :key (lambda (entry) (plist-get (car entry) :id))
+                  :test #'equal)))
+
 (defun rat-kingdom-story-test--work (space id file)
   "Play the worker of the story ID in SPACE: commit FILE and call finish.
 Return what finish answered."
@@ -104,7 +152,8 @@ Return what finish answered."
   "Run reactions in SPACE until the check of the story ID has come out."
   (rat-kingdom-reaction-run space)
   (let ((tries 0))
-    (while (and (equal (rat-kingdom-story-test--place space id) "checking")
+    (while (and (rat-kingdom-space-rd space (list 'story :identity id
+                                                  :awaiting "check"))
                 (not (rat-kingdom-space-rd space (list 'checked :identity id)))
                 (< (cl-incf tries) 200))
       (accept-process-output nil 0.05)))
@@ -117,14 +166,17 @@ Return what finish answered."
     (let ((repo (rat-kingdom-repo-get space "demo")))
       (should (equal (plist-get repo :path) (directory-file-name path)))
       (should (equal (plist-get repo :target) "rk/integration"))
-      (should-not (plist-get repo :check)))
+      (should-not (plist-get repo :check))
+      (should-not (plist-get repo :workflow)))
     (should (equal (rat-kingdom-git-rev path "rk/integration")
                    (rat-kingdom-git-rev path "main")))
     ;; Registering again replaces the record and keeps the branch.
     (rat-kingdom-story-test--commit path "more" "more\n" "More")
-    (rat-kingdom-repo-add space path :check '("make" "check"))
+    (rat-kingdom-repo-add space path :check '("make" "check") :workflow 'story)
     (should (equal (plist-get (rat-kingdom-repo-get space "demo") :check)
                    '("make" "check")))
+    (should (equal (plist-get (rat-kingdom-repo-get space "demo") :workflow)
+                   "story"))
     (should-not (equal (rat-kingdom-git-rev path "rk/integration")
                        (rat-kingdom-git-rev path "main")))
     (should (eql (length (rat-kingdom-repo-list space)) 1))
@@ -135,7 +187,50 @@ Return what finish answered."
       (make-directory empty)
       (rat-kingdom-story-test--git empty "init" "-q")
       (should-error (rat-kingdom-repo-add space empty)))
-    (should-error (rat-kingdom-story-start space "nowhere" "Task"))))
+    (should-error (rat-kingdom-story-start space "nowhere" "Task"))
+    ;; A story follows its own workflow, else the repository's.
+    (should-error (rat-kingdom-story-start space "demo" "Task" nil "S-0"
+                                           "no-such-workflow"))
+    (rat-kingdom-story-start space "demo" "Task" nil "S-1")
+    (rat-kingdom-story-start space "demo" "Task" nil "S-2" 'story-lite)
+    (should (equal (rat-kingdom-story-test--get space "S-1" :workflow) "story"))
+    (should (equal (rat-kingdom-story-test--get space "S-2" :workflow)
+                   "story-lite"))))
+
+(ert-deftest rat-kingdom-story-test-warnings-and-sync ()
+  (rat-kingdom-story-test-with-repo (space path)
+    (should-not (rat-kingdom-story-warnings space "demo"))
+    (should (string-search "already" (rat-kingdom-story-sync space "demo")))
+    ;; Uncommitted changes in the checkout.
+    (with-temp-file (expand-file-name "scratch" path) (insert "x"))
+    (let ((warnings (rat-kingdom-story-warnings space "demo")))
+      (should (eql (length warnings) 1))
+      (should (string-search "uncommitted changes" (car warnings))))
+    ;; Commits the target lacks.
+    (rat-kingdom-story-test--commit path "scratch" "x\n" "Scratch")
+    (let ((warnings (rat-kingdom-story-warnings space "demo")))
+      (should (eql (length warnings) 1))
+      (should (string-search "has 1 commits that rk/integration lacks"
+                             (car warnings)))
+      (should (string-search "Syncing" (car warnings))))
+    (should (string-search "Moved rk/integration forward"
+                           (rat-kingdom-story-sync space "demo")))
+    (should (equal (rat-kingdom-git-rev path "rk/integration")
+                   (rat-kingdom-git-rev path "main")))
+    (should-not (rat-kingdom-story-warnings space "demo"))
+    ;; A target that is ahead is left alone; one that diverged is reported.
+    (rat-kingdom-story-test--git path "checkout" "-q" "-b" "side")
+    (rat-kingdom-story-test--commit path "side" "x\n" "Side")
+    (rat-kingdom-story-test--git path "branch" "-f" "rk/integration" "side")
+    (rat-kingdom-story-test--git path "checkout" "-q" "main")
+    (should (string-search "1 commits ahead"
+                           (rat-kingdom-story-sync space "demo")))
+    (rat-kingdom-story-test--commit path "mine" "x\n" "Mine")
+    (should (string-search "diverged" (rat-kingdom-story-sync space "demo")))
+    (should (string-search "diverged"
+                           (car (rat-kingdom-story-warnings space "demo"))))
+    (should (equal (rat-kingdom-git-rev path "rk/integration")
+                   (rat-kingdom-git-rev path "side")))))
 
 ;;;; The whole way
 
@@ -153,8 +248,12 @@ Return what finish answered."
              (worktree (plist-get story :worktree))
              (run (rat-kingdom-run-get space "S-1.1"))
              (started (car rat-kingdom-story-test--started)))
-        (should (equal (plist-get story :at) "implementing"))
+        (should (equal (plist-get story :at) "ready"))
+        (should (equal (plist-get story :phase) "wait"))
+        (should (equal (plist-get story :step) "implement"))
+        (should (equal (plist-get story :awaiting) "worker"))
         (should (equal (plist-get story :run) "S-1.1"))
+        (should (eql (plist-get story :attempt) 1))
         (should (equal (plist-get run :state) "working"))
         (should (equal (plist-get run :role) "rat"))
         (should (equal (plist-get run :story) "S-1"))
@@ -166,6 +265,7 @@ Return what finish answered."
         (should (string-search "Add the feature file" (nth 1 started)))
         (should (string-search "It must be called feature.txt." (nth 1 started)))
         (should (string-search worktree (nth 1 started)))
+        (should-not (string-search "worked on before" (nth 1 started)))
         ;; The worker does the work and reports.
         (let ((answer (rat-kingdom-story-test--work space "S-1" "feature.txt")))
           (should-not (cdr answer))
@@ -186,19 +286,21 @@ Return what finish answered."
         (should-not (file-exists-p worktree))
         (should-not (rat-kingdom-git-ok-p path "rev-parse" "--verify" "--quiet"
                                           "refs/heads/rats/S-1"))
-        (should-not (directory-files
-                     (expand-file-name "candidates/demo" rat-kingdom-directory)
-                     nil "S-1"))
-        (should (equal rat-kingdom-story-test--stopped '("S-1.1")))
-        ;; The archive has the story at done and its result.
-        (let ((archived (rat-kingdom-space-archived space "S-1")))
-          (should (equal (plist-get
-                          (plist-get (cl-find 'story archived
-                                              :key (lambda (tuple)
-                                                     (plist-get tuple :category)))
-                                     :payload)
-                          :at)
-                         "done"))
+        (should-not (file-exists-p
+                     (expand-file-name "candidates/demo/S-1"
+                                       rat-kingdom-directory)))
+        (should (member "S-1.1" rat-kingdom-story-test--stopped))
+        (should (equal rat-kingdom-story-test--events '((done . "S-1"))))
+        ;; The archive has the story at done, with the worker's report.
+        (let* ((archived (rat-kingdom-space-archived space "S-1"))
+               (story (plist-get (cl-find 'story archived
+                                          :key (lambda (tuple)
+                                                 (plist-get tuple :category)))
+                                 :payload)))
+          (should (equal (plist-get story :at) "done"))
+          (should (equal (plist-get story :summary) "Added the file."))
+          (should (equal (plist-get story :integrated)
+                         (rat-kingdom-git-rev path "rk/integration")))
           (should (cl-find 'result archived
                            :key (lambda (tuple) (plist-get tuple :category)))))
         ;; The user's checkout was not touched.
@@ -211,51 +313,83 @@ Return what finish answered."
         (should-not (file-exists-p (expand-file-name "feature.txt" path)))
         (should-not (rat-kingdom-reaction-failures space))))))
 
-(ert-deftest rat-kingdom-story-test-check-must-pass ()
+(ert-deftest rat-kingdom-story-test-failed-check-goes-back-to-a-worker ()
   (rat-kingdom-story-test-with-repo (space path)
     (rat-kingdom-repo-add space path
                           :check '("sh" "-c" "echo checking; test -f wanted.txt"))
     (let ((before (rat-kingdom-git-rev path "rk/integration")))
-      ;; A story whose merge fails the check stops, with everything kept.
-      (rat-kingdom-story-start space "demo" "Wrong file" nil "S-1")
+      (rat-kingdom-story-start space "demo" "Add the wanted file" nil "S-1")
       (rat-kingdom-reaction-run space)
       (rat-kingdom-story-test--work space "S-1" "other.txt")
       (rat-kingdom-story-test--settle space "S-1")
+      ;; The check failed, so a second worker has the story, in the same
+      ;; worktree, and is told why.
       (let ((story (plist-get (rat-kingdom-story-get space "S-1") :payload))
-            (checked (plist-get (rat-kingdom-space-rd
-                                 space '(checked :identity "S-1"))
-                                :payload)))
-        (should (equal (plist-get story :at) "blocked"))
-        (should (equal (plist-get story :reason) "check failed"))
-        (should (equal (plist-get checked :value) "fail"))
-        (should (eql (plist-get checked :exit) 1))
-        (should (equal (plist-get checked :output) "checking\n"))
-        (should (equal (plist-get checked :check)
-                       '("sh" "-c" "echo checking; test -f wanted.txt")))
-        (should (file-directory-p (plist-get story :worktree)))
+            (prompt (rat-kingdom-story-test--prompt "S-1.2")))
+        (should (equal (plist-get story :at) "ready"))
+        (should (equal (plist-get story :awaiting) "worker"))
+        (should (equal (plist-get story :run) "S-1.2"))
+        (should (eql (plist-get story :attempt) 2))
         (should (file-exists-p (expand-file-name "other.txt"
-                                                 (plist-get story :candidate))))
-        (should (equal (rat-kingdom-git-rev path "rk/integration") before))
-        (should-not rat-kingdom-story-test--stopped))
-      ;; One that passes is merged.
-      (rat-kingdom-story-start space "demo" "Right file" nil "S-2")
-      (rat-kingdom-reaction-run space)
-      (rat-kingdom-story-test--work space "S-2" "wanted.txt")
-      (rat-kingdom-story-test--settle space "S-2")
-      (should-not (rat-kingdom-story-get space "S-2"))
+                                                 (plist-get story :worktree))))
+        (should (string-search "worked on before" prompt))
+        (should (string-search "check failed" prompt))
+        (should (string-search "exited with 1" prompt))
+        (should (string-search "checking" prompt)))
+      (should (equal (plist-get (rat-kingdom-run-get space "S-1.1") :state)
+                     "ready"))
+      (should (member "S-1.1" rat-kingdom-story-test--stopped))
+      (should (equal (rat-kingdom-git-rev path "rk/integration") before))
+      ;; The first worker can no longer report.
+      (should (cdr (rat-kingdom-story-test--call
+                    "S-1.1" "finish" '(summary . "s") '(checks . "c"))))
+      ;; The second puts it right, and the story is merged.
+      (rat-kingdom-story-test--work space "S-1" "wanted.txt")
+      (rat-kingdom-story-test--settle space "S-1")
+      (should-not (rat-kingdom-story-get space "S-1"))
       (should (equal (rat-kingdom-story-test--git
                       path "show" "rk/integration:wanted.txt")
                      "work"))
       (should (equal (plist-get
                       (plist-get (cl-find 'checked
-                                          (rat-kingdom-space-archived space "S-2")
+                                          (rat-kingdom-space-archived space "S-1")
                                           :key (lambda (tuple)
                                                  (plist-get tuple :category)))
                                  :payload)
                       :value)
                      "pass")))))
 
-(ert-deftest rat-kingdom-story-test-merge-conflict-blocks ()
+(ert-deftest rat-kingdom-story-test-gives-up-after-enough-workers ()
+  (rat-kingdom-story-test-with-repo (space path)
+    (rat-kingdom-repo-add space path :check '("false"))
+    (let ((rat-kingdom-story-attempts 2)
+          (before (rat-kingdom-git-rev path "rk/integration")))
+      (rat-kingdom-story-start space "demo" "Add a file" nil "S-1")
+      (rat-kingdom-reaction-run space)
+      (rat-kingdom-story-test--work space "S-1" "one.txt")
+      (rat-kingdom-story-test--settle space "S-1")
+      (rat-kingdom-story-test--work space "S-1" "two.txt")
+      (rat-kingdom-story-test--settle space "S-1")
+      (let ((story (plist-get (rat-kingdom-story-get space "S-1") :payload)))
+        (should (equal (plist-get story :at) "blocked"))
+        (should (equal (plist-get story :phase) "parked"))
+        (should (string-search "Gave up after 2 workers"
+                               (plist-get story :reason)))
+        (should (string-search "check failed" (plist-get story :reason)))
+        (should (file-directory-p (plist-get story :worktree))))
+      (should (eql (length rat-kingdom-story-test--started) 2))
+      (should (equal (car rat-kingdom-story-test--events) '(parked . "S-1")))
+      (should (equal (rat-kingdom-git-rev path "rk/integration") before))
+      ;; Moved by hand, it gets a full count of workers again.
+      (rat-kingdom-repo-add space path :check '("true"))
+      (rat-kingdom-story-move space "S-1" "checking")
+      (rat-kingdom-story-test--settle space "S-1")
+      (should-not (rat-kingdom-story-get space "S-1"))
+      (should (equal (rat-kingdom-story-test--git
+                      path "show" "rk/integration:two.txt")
+                     "work")))))
+
+(ert-deftest rat-kingdom-story-test-merge-conflict-goes-back-to-a-worker ()
   (rat-kingdom-story-test-with-repo (space path)
     (rat-kingdom-story-start space "demo" "Edit the readme" nil "S-1")
     (rat-kingdom-reaction-run space)
@@ -265,14 +399,25 @@ Return what finish answered."
     (let ((target (rat-kingdom-git-rev path "rk/integration")))
       (rat-kingdom-story-test--work space "S-1" "README")
       (rat-kingdom-story-test--settle space "S-1")
-      (let ((story (plist-get (rat-kingdom-story-get space "S-1") :payload)))
-        (should (equal (plist-get story :at) "blocked"))
-        (should (equal (plist-get story :reason) "merge conflict"))
-        (should (file-directory-p (plist-get story :candidate)))
-        (should (file-directory-p (plist-get story :worktree))))
-      (should (equal (rat-kingdom-git-rev path "rk/integration") target)))))
+      (let ((prompt (rat-kingdom-story-test--prompt "S-1.2"))
+            (worktree (rat-kingdom-story-test--get space "S-1" :worktree)))
+        (should (equal (rat-kingdom-story-test--get space "S-1" :run) "S-1.2"))
+        (should (string-search "merge conflict" prompt))
+        (should (string-search "README" prompt))
+        (should (equal (rat-kingdom-git-rev path "rk/integration") target))
+        ;; The second worker merges the target in and reports.
+        (rat-kingdom-story-test--git worktree "merge" "-q" "-X" "ours"
+                                     "rk/integration")
+        (should-not (cdr (rat-kingdom-story-test--call
+                          "S-1.2" "finish" '(summary . "Merged.")
+                          '(checks . "none"))))
+        (rat-kingdom-story-test--settle space "S-1")
+        (should-not (rat-kingdom-story-get space "S-1"))
+        (should (equal (rat-kingdom-story-test--git
+                        path "show" "rk/integration:README")
+                       "work"))))))
 
-(ert-deftest rat-kingdom-story-test-target-that-moved-is-not-overwritten ()
+(ert-deftest rat-kingdom-story-test-target-that-moved-is-checked-again ()
   (rat-kingdom-story-test-with-repo (space path)
     (rat-kingdom-repo-add space path :check '("true"))
     (rat-kingdom-story-start space "demo" "Add a file" nil "S-1")
@@ -289,19 +434,21 @@ Return what finish answered."
     (rat-kingdom-story-test--commit path "elsewhere" "x\n" "Elsewhere")
     (rat-kingdom-story-test--git path "branch" "-f" "rk/integration" "main")
     (let ((moved (rat-kingdom-git-rev path "rk/integration")))
-      (rat-kingdom-reaction-run space)
-      (should (equal (rat-kingdom-git-rev path "rk/integration") moved))
-      (should (equal (rat-kingdom-story-test--place space "S-1") "checking"))
-      (let ((failures (rat-kingdom-reaction-failures space)))
-        (should (eql (length failures) 1))
-        (should (eq (plist-get (car failures) :reaction)
-                    'rat-kingdom-story-integrate)))
-      (should (file-directory-p
-               (plist-get (plist-get (rat-kingdom-story-get space "S-1")
-                                     :payload)
-                          :worktree))))))
+      (rat-kingdom-story-test--settle space "S-1")
+      ;; Nothing was overwritten: the work was merged onto what was there.
+      (should-not (rat-kingdom-story-get space "S-1"))
+      (should (rat-kingdom-git-ancestor-p path moved "rk/integration"))
+      (should (equal (rat-kingdom-story-test--git
+                      path "show" "rk/integration:feature.txt")
+                     "work"))
+      (should (equal (rat-kingdom-story-test--git
+                      path "show" "rk/integration:elsewhere")
+                     "x"))
+      ;; No second worker was needed.
+      (should (eql (length rat-kingdom-story-test--started) 1))
+      (should-not (rat-kingdom-reaction-failures space)))))
 
-(ert-deftest rat-kingdom-story-test-checked-out-target-is-refused ()
+(ert-deftest rat-kingdom-story-test-checked-out-target-stops-the-story ()
   (rat-kingdom-story-test-with-repo (space path)
     (rat-kingdom-story-start space "demo" "Add a file" nil "S-1")
     (rat-kingdom-reaction-run space)
@@ -310,17 +457,81 @@ Return what finish answered."
       (rat-kingdom-story-test--work space "S-1" "feature.txt")
       (rat-kingdom-story-test--settle space "S-1")
       (should (equal (rat-kingdom-git-rev path "rk/integration") before))
-      (should (equal (rat-kingdom-story-test--place space "S-1") "checking"))
-      (should (string-search
-               "checked out"
-               (plist-get (car (rat-kingdom-reaction-failures space)) :error)))
-      ;; Once it is free, a retry lands the merge.
+      (should (equal (rat-kingdom-story-test--place space "S-1") "blocked"))
+      (should (string-search "checked out"
+                             (rat-kingdom-story-test--get space "S-1" :reason)))
+      (should-not (rat-kingdom-reaction-failures space))
+      ;; Once it is free, moving the story back lands the merge.
       (rat-kingdom-story-test--git path "checkout" "-q" "main")
-      (rat-kingdom-reaction-retry space)
+      (rat-kingdom-story-move space "S-1" "integrating")
+      (rat-kingdom-reaction-run space)
       (should-not (rat-kingdom-story-get space "S-1"))
       (should (equal (rat-kingdom-story-test--git
                       path "show" "rk/integration:feature.txt")
                      "work")))))
+
+;;;; Review
+
+(ert-deftest rat-kingdom-story-test-review-passes-or-sends-back ()
+  (rat-kingdom-story-test-with-repo (space path)
+    (rat-kingdom-story-start space "demo" "Add a file" nil "S-1" 'story)
+    (rat-kingdom-reaction-run space)
+    (should-error (rat-kingdom-story-verdict space "S-1" "pass"))
+    (rat-kingdom-story-test--work space "S-1" "feature.txt")
+    (rat-kingdom-story-test--settle space "S-1")
+    ;; Checked, and now it waits for a verdict; nothing is merged.
+    (should (equal (rat-kingdom-story-test--place space "S-1") "review"))
+    (should (equal (rat-kingdom-story-test--get space "S-1" :awaiting) "review"))
+    (should (equal (plist-get (plist-get (rat-kingdom-space-rd
+                                          space '(review :identity "S-1"))
+                                         :payload)
+                              :by)
+                   "king"))
+    (should (equal (car rat-kingdom-story-test--events) '(review . "S-1")))
+    (should (equal (rat-kingdom-git-rev path "rk/integration")
+                   (rat-kingdom-git-rev path "main")))
+    (should-error (rat-kingdom-story-verdict space "S-1" "maybe"))
+    (should-error (rat-kingdom-story-verdict space "S-1" "fix"))
+    ;; A fix goes back to a worker with the notes.
+    (rat-kingdom-story-verdict space "S-1" "fix" "Call it wanted.txt instead.")
+    (rat-kingdom-reaction-run space)
+    (should (equal (rat-kingdom-story-test--get space "S-1" :run) "S-1.2"))
+    (should (string-search "Call it wanted.txt instead."
+                           (rat-kingdom-story-test--prompt "S-1.2")))
+    (should-not (rat-kingdom-space-rd space '(review :identity "S-1")))
+    (should-not (rat-kingdom-space-rd space '(verdict :identity "S-1")))
+    (rat-kingdom-story-test--work space "S-1" "wanted.txt")
+    (rat-kingdom-story-test--settle space "S-1")
+    (should (equal (rat-kingdom-story-test--place space "S-1") "review"))
+    ;; A pass lets it be merged.
+    (rat-kingdom-story-verdict space "S-1" 'pass)
+    (rat-kingdom-story-test--settle space "S-1")
+    (should-not (rat-kingdom-story-get space "S-1"))
+    (should (equal (rat-kingdom-story-test--git
+                    path "show" "rk/integration:wanted.txt")
+                   "work"))))
+
+(ert-deftest rat-kingdom-story-test-reviewed-commit-is-not-reviewed-twice ()
+  (rat-kingdom-story-test-with-repo (space path)
+    (rat-kingdom-story-start space "demo" "Add a file" nil "S-1" 'story)
+    (rat-kingdom-reaction-run space)
+    (rat-kingdom-story-test--work space "S-1" "feature.txt")
+    (rat-kingdom-story-test--settle space "S-1")
+    ;; The target moves while the story waits for its review.
+    (rat-kingdom-story-test--commit path "elsewhere" "x\n" "Elsewhere")
+    (rat-kingdom-story-test--git path "branch" "-f" "rk/integration" "main")
+    (rat-kingdom-story-verdict space "S-1" "pass")
+    (rat-kingdom-story-test--settle space "S-1")
+    ;; It was checked again on the new target and merged with no new review.
+    (should-not (rat-kingdom-story-get space "S-1"))
+    (should (eql (cl-count 'review rat-kingdom-story-test--events :key #'car)
+                 1))
+    (should (equal (rat-kingdom-story-test--git
+                    path "show" "rk/integration:feature.txt")
+                   "work"))
+    (should (equal (rat-kingdom-story-test--git
+                    path "show" "rk/integration:elsewhere")
+                   "x"))))
 
 ;;;; The worker's tools
 
@@ -328,9 +539,7 @@ Return what finish answered."
   (rat-kingdom-story-test-with-repo (space _path)
     (rat-kingdom-story-start space "demo" "Add a file" nil "S-1")
     (rat-kingdom-reaction-run space)
-    (let ((worktree (plist-get (plist-get (rat-kingdom-story-get space "S-1")
-                                          :payload)
-                               :worktree)))
+    (let ((worktree (rat-kingdom-story-test--get space "S-1" :worktree)))
       (cl-flet ((finish ()
                   (rat-kingdom-story-test--call
                    "S-1.1" "finish" '(summary . "s") '(checks . "c"))))
@@ -354,7 +563,7 @@ Return what finish answered."
         (should-not (rat-kingdom-space-rd space '(result)))
         (should (equal (plist-get (rat-kingdom-run-get space "S-1.1") :state)
                        "working"))
-        ;; Done properly, it is recorded; done twice, it is refused.
+        ;; Done properly, it is recorded.
         (rat-kingdom-story-test--commit worktree "f" "x\n" "Add f")
         (should-not (cdr (finish)))
         (let ((result (plist-get (rat-kingdom-space-rd
@@ -383,12 +592,26 @@ Return what finish answered."
     (rat-kingdom-reaction-run space)
     (let ((story (plist-get (rat-kingdom-story-get space "S-1") :payload)))
       (should (equal (plist-get story :at) "blocked"))
-      (should (equal (plist-get story :reason) "Need to know the file's name."))
+      (should (equal (plist-get story :phase) "parked"))
+      (should (string-search "Need to know the file's name."
+                             (plist-get story :reason)))
       (should (file-directory-p (plist-get story :worktree))))
+    (should (equal (car rat-kingdom-story-test--events) '(parked . "S-1")))
     (should (equal (rat-kingdom-git-rev path "rk/integration")
                    (rat-kingdom-git-rev path "main")))
     (should (cdr (rat-kingdom-story-test--call "S-1.1" "block"
-                                               '(summary . "Again"))))))
+                                               '(summary . "Again"))))
+    ;; Moved back with an answer, it gets a new worker who is told it.
+    (should-error (rat-kingdom-story-move space "S-1" "nowhere"))
+    (should-error (rat-kingdom-story-move space "S-9" "ready"))
+    (rat-kingdom-story-move space "S-1" 'ready "Call it feature.txt.")
+    (rat-kingdom-reaction-run space)
+    (should (equal (rat-kingdom-story-test--get space "S-1" :run) "S-1.2"))
+    (should (eql (rat-kingdom-story-test--get space "S-1" :attempt) 1))
+    (should (string-search "Call it feature.txt."
+                           (rat-kingdom-story-test--prompt "S-1.2")))
+    (should (string-search "worked on before"
+                           (rat-kingdom-story-test--prompt "S-1.2")))))
 
 (ert-deftest rat-kingdom-story-test-tools-are-offered-by-role ()
   (rat-kingdom-story-test-with-repo (_space _path)
@@ -402,10 +625,14 @@ Return what finish answered."
                           :result)
                          :tools))))
       (should (equal (names 'rat) '("finish" "block")))
-      (should-not (names 'king)))
+      (should (member "story_start" (names 'king)))
+      (should-not (member "finish" (names 'king)))
+      (should-not (names 'nobody)))
     ;; A tool outside the caller's role does not exist for it.
     (should (equal (rat-kingdom-mcp-call '(:run "x" :role king) "finish" nil)
                    '("Error: unknown tool finish" . t)))
+    (should (equal (rat-kingdom-mcp-call '(:run "x" :role rat) "status" nil)
+                   '("Error: unknown tool status" . t)))
     ;; A notification gets no reply; an unknown method gets an error.
     (should-not (rat-kingdom-mcp--rpc
                  '(:run "x" :role rat)
@@ -457,40 +684,197 @@ Return what finish answered."
 
 ;;;; Runs
 
-(ert-deftest rat-kingdom-story-test-failed-start-leaves-no-worktree ()
+(ert-deftest rat-kingdom-story-test-failed-start-stops-the-story ()
   (rat-kingdom-story-test-with-repo (space path)
     ;; The branch the story would use already exists.
     (rat-kingdom-story-test--git path "branch" "rats/S-1" "main")
     (rat-kingdom-story-start space "demo" "Add a file" nil "S-1")
     (rat-kingdom-reaction-run space)
-    (should (equal (rat-kingdom-story-test--place space "S-1") "ready"))
+    (should (equal (rat-kingdom-story-test--place space "S-1") "blocked"))
+    (should (string-search "Step implement could not be begun"
+                           (rat-kingdom-story-test--get space "S-1" :reason)))
     (should-not (rat-kingdom-run-list space))
     (should-not rat-kingdom-story-test--started)
-    (should (eq (plist-get (car (rat-kingdom-reaction-failures space)) :reaction)
-                'rat-kingdom-story-implement))
+    (should-not (rat-kingdom-reaction-failures space))
     (should-not (file-exists-p
                  (expand-file-name "worktrees/demo/S-1" rat-kingdom-directory)))
-    ;; With the branch out of the way, a retry starts the worker.
+    ;; With the branch out of the way, moving it back starts the worker.
     (rat-kingdom-story-test--git path "branch" "-D" "rats/S-1")
-    (rat-kingdom-reaction-retry space)
-    (should (equal (rat-kingdom-story-test--place space "S-1") "implementing"))
+    (rat-kingdom-story-move space "S-1" "ready")
+    (rat-kingdom-reaction-run space)
+    (should (equal (rat-kingdom-story-test--get space "S-1" :awaiting) "worker"))
     (should (eql (length rat-kingdom-story-test--started) 1))))
 
-(ert-deftest rat-kingdom-story-test-run-that-exits-is-marked ()
+(ert-deftest rat-kingdom-story-test-agent-that-cannot-start-stops-the-story ()
+  (rat-kingdom-story-test-with-repo (space _path)
+    (let ((rat-kingdom-run-backend
+           (list :start (lambda (_run _prompt) (error "No agent here"))
+                 :stop #'ignore)))
+      (rat-kingdom-story-start space "demo" "Add a file" nil "S-1")
+      (rat-kingdom-reaction-run space)
+      (should (equal (plist-get (rat-kingdom-run-get space "S-1.1") :state)
+                     "exited"))
+      (should (equal (rat-kingdom-story-test--place space "S-1") "blocked"))
+      (should (string-search "No agent here"
+                             (rat-kingdom-story-test--get space "S-1" :reason)))
+      (should-not (rat-kingdom-reaction-failures space)))))
+
+(ert-deftest rat-kingdom-story-test-run-that-exits-stops-the-story ()
   (rat-kingdom-story-test-with-repo (space _path)
     (rat-kingdom-story-start space "demo" "Add a file" nil "S-1")
     (rat-kingdom-reaction-run space)
     (rat-kingdom-run-exited "S-1.1")
     (should (equal (plist-get (rat-kingdom-run-get space "S-1.1") :state)
                    "exited"))
-    ;; Its token no longer works, and the story waits where it was.
+    ;; Its token no longer works, and the story is stopped with the reason.
     (should (zerop (hash-table-count rat-kingdom-mcp--grants)))
-    (should (equal (rat-kingdom-story-test--place space "S-1") "implementing"))
+    (rat-kingdom-reaction-run space)
+    (should (equal (rat-kingdom-story-test--place space "S-1") "blocked"))
+    (should (string-search "ended before it reported"
+                           (rat-kingdom-story-test--get space "S-1" :reason)))
+    (should (file-directory-p (rat-kingdom-story-test--get space "S-1" :worktree)))
     ;; A run that had reported keeps what it reported.
     (rat-kingdom-run-update space "S-1.1" :state "ready")
     (rat-kingdom-run-exited "S-1.1")
     (should (equal (plist-get (rat-kingdom-run-get space "S-1.1") :state)
-                   "ready"))))
+                   "ready"))
+    ;; While Emacs is exiting, nothing is recorded.
+    (rat-kingdom-run-update space "S-1.1" :state "working")
+    (let ((rat-kingdom-run--dying t))
+      (rat-kingdom-run-exited "S-1.1"))
+    (should (equal (plist-get (rat-kingdom-run-get space "S-1.1") :state)
+                   "working"))))
+
+;;;; Cancelling, watching, recovering
+
+(ert-deftest rat-kingdom-story-test-cancel-keeps-the-work ()
+  (rat-kingdom-story-test-with-repo (space path)
+    (rat-kingdom-story-start space "demo" "Add a file" nil "S-1")
+    (rat-kingdom-reaction-run space)
+    (let ((worktree (rat-kingdom-story-test--get space "S-1" :worktree)))
+      (should (string-search worktree (rat-kingdom-story-cancel space "S-1")))
+      (should-not (rat-kingdom-story-get space "S-1"))
+      (should-not (rat-kingdom-space-scan space '(_ :owner "S-1")))
+      (should (member "S-1.1" rat-kingdom-story-test--stopped))
+      (should (file-directory-p worktree))
+      (should (rat-kingdom-git-ok-p path "rev-parse" "--verify" "--quiet"
+                                    "refs/heads/rats/S-1"))
+      (should (equal (plist-get
+                      (plist-get (cl-find 'story
+                                          (rat-kingdom-space-archived space "S-1")
+                                          :key (lambda (tuple)
+                                                 (plist-get tuple :category)))
+                                 :payload)
+                      :phase)
+                     "cancelled"))
+      (should-error (rat-kingdom-story-cancel space "S-1"))
+      (rat-kingdom-reaction-run space)
+      (should (eql (length rat-kingdom-story-test--started) 1)))))
+
+(ert-deftest rat-kingdom-story-test-watch-reports-stuck-stories ()
+  (rat-kingdom-story-test-with-repo (space _path)
+    (setq rat-kingdom-story-test--now 1000.0)
+    (rat-kingdom-story-start space "demo" "Add a file" nil "S-1")
+    ;; Nothing has picked it up yet.
+    (should (zerop (rat-kingdom-story-watch space)))
+    (setq rat-kingdom-story-test--now 1100.0)
+    (should (eql (rat-kingdom-story-watch space) 1))
+    (should (string-search "no step has begun"
+                           (plist-get (plist-get (rat-kingdom-space-rd
+                                                  space '(stuck :identity "S-1"))
+                                                 :payload)
+                                      :reason)))
+    (should (equal (car rat-kingdom-story-test--events) '(stuck . "S-1")))
+    ;; Reported once, and withdrawn when the story moves.
+    (should (zerop (rat-kingdom-story-watch space)))
+    (rat-kingdom-reaction-run space)
+    (should-not (rat-kingdom-space-rd space '(stuck :identity "S-1")))
+    ;; A worker that takes too long.
+    (setq rat-kingdom-story-test--now (+ 1100.0 7000))
+    (should (zerop (rat-kingdom-story-watch space)))
+    (setq rat-kingdom-story-test--now (+ 1100.0 7300))
+    (should (eql (rat-kingdom-story-watch space) 1))
+    (should (string-search "Step implement has taken"
+                           (plist-get (plist-get (rat-kingdom-space-rd
+                                                  space '(stuck :identity "S-1"))
+                                                 :payload)
+                                      :reason)))
+    ;; A stuck story still finishes if its worker reports.
+    (rat-kingdom-story-test--work space "S-1" "feature.txt")
+    (rat-kingdom-story-test--settle space "S-1")
+    (should-not (rat-kingdom-story-get space "S-1"))
+    (should-not (rat-kingdom-space-rd space '(stuck)))))
+
+(ert-deftest rat-kingdom-story-test-recovers-an-interrupted-worker ()
+  (rat-kingdom-story-test-with-repo (space path)
+    (rat-kingdom-story-start space "demo" "Add a file" nil "S-1")
+    (rat-kingdom-reaction-run space)
+    (let ((worktree (rat-kingdom-story-test--get space "S-1" :worktree))
+          (file (expand-file-name "space.db" rat-kingdom-directory)))
+      ;; The worker leaves something uncommitted, and Emacs stops: the
+      ;; space is closed, and nothing held in memory survives.
+      (with-temp-file (expand-file-name "half" worktree) (insert "half\n"))
+      (rat-kingdom-space-close space)
+      (setq space (rat-kingdom-space-open file)
+            rat-kingdom-space--default space)
+      (clrhash rat-kingdom-run--handles)
+      (clrhash rat-kingdom-mcp--grants)
+      (should (equal (plist-get (rat-kingdom-run-get space "S-1.1") :state)
+                     "working"))
+      ;; Recovery finds the run, and the story gets a new worker in the
+      ;; same worktree, told what happened.
+      (should (equal (rat-kingdom-story-reconcile space)
+                     '(:runs ("S-1.1") :checks nil)))
+      (should (equal (plist-get (rat-kingdom-run-get space "S-1.1") :state)
+                     "interrupted"))
+      (rat-kingdom-reaction-run space)
+      (let ((story (plist-get (rat-kingdom-story-get space "S-1") :payload)))
+        (should (equal (plist-get story :run) "S-1.2"))
+        (should (equal (plist-get story :worktree) worktree))
+        (should (eql (plist-get story :attempt) 2)))
+      (should (equal (plist-get (rat-kingdom-run-get space "S-1.1") :state)
+                     "stopped"))
+      (should (file-exists-p (expand-file-name "half" worktree)))
+      (should (string-search "was cut off when Emacs stopped"
+                             (rat-kingdom-story-test--prompt "S-1.2")))
+      (should (string-search "worked on before"
+                             (rat-kingdom-story-test--prompt "S-1.2")))
+      ;; Nothing more to recover; the new worker finishes the story.
+      (should (equal (rat-kingdom-story-reconcile space)
+                     '(:runs nil :checks nil)))
+      (delete-file (expand-file-name "half" worktree))
+      (rat-kingdom-story-test--work space "S-1" "feature.txt")
+      (rat-kingdom-story-test--settle space "S-1")
+      (should-not (rat-kingdom-story-get space "S-1"))
+      (should (equal (rat-kingdom-story-test--git
+                      path "show" "rk/integration:feature.txt")
+                     "work")))))
+
+(ert-deftest rat-kingdom-story-test-recovers-an-interrupted-check ()
+  (rat-kingdom-story-test-with-repo (space path)
+    (rat-kingdom-repo-add space path :check '("sleep" "30"))
+    (rat-kingdom-story-start space "demo" "Add a file" nil "S-1")
+    (rat-kingdom-reaction-run space)
+    (rat-kingdom-story-test--work space "S-1" "feature.txt")
+    (rat-kingdom-reaction-run space)
+    (should (equal (rat-kingdom-story-test--get space "S-1" :awaiting) "check"))
+    (should (process-live-p (gethash "S-1" rat-kingdom-story--checks)))
+    ;; A running check is not disturbed.
+    (should (equal (rat-kingdom-story-reconcile space)
+                   '(:runs nil :checks nil)))
+    ;; Emacs stops, taking the check with it.
+    (rat-kingdom-story--abandon-check "S-1")
+    (should-not (rat-kingdom-space-rd space '(checked :identity "S-1")))
+    (should (eql (rat-kingdom-story-watch space) 0))
+    (rat-kingdom-repo-add space path :check '("true"))
+    (should (equal (rat-kingdom-story-reconcile space)
+                   '(:runs nil :checks ("S-1"))))
+    (rat-kingdom-story-test--settle space "S-1")
+    (should-not (rat-kingdom-story-get space "S-1"))
+    (should (equal (rat-kingdom-story-test--git
+                    path "show" "rk/integration:feature.txt")
+                   "work"))
+    (should (eql (length rat-kingdom-story-test--started) 1))))
 
 (provide 'rat-kingdom-story-test)
 ;;; rat-kingdom-story-test.el ends here
