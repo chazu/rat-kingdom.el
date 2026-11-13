@@ -1,0 +1,14 @@
+; -*- mode: emacs-lisp; lexical-binding: t -*-
+
+(eldev-use-package-archive 'gnu-elpa)
+
+(setf eldev-project-main-file "rk3.el")
+
+(eldev-add-loading-roots 'test "test")
+
+(setf eldev-lint-default '(package))
+
+;; Emacs 30 turned on checkdoc's experimental voice check; Emacs 31 turned
+;; it off.
+(with-eval-after-load 'checkdoc
+  (setf checkdoc-verb-check-experimental-flag nil))

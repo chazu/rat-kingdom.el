@@ -88,9 +88,10 @@ A tuple keeps imp's four parts plus bookkeeping:
 - `rd` returns one match without removing it.
 - `scan` returns all matches.
 
-A pattern fixes some fields and binds others: `(result :scope ?repo
-:identity ?story :commit ?c)`. Matching on category, scope and identity
-uses indexes; payload fields are matched after.
+A pattern fixes some fields and binds others: `(result :scope $repo
+:identity $story :commit $c)`. Matching on category, scope and identity
+uses indexes; payload fields are matched after. Variables start with `$`
+because the Emacs reader takes `?x` for a character.
 
 Blocking reads are not offered to agents. Inside Emacs a blocked read is a
 reaction (section 6).
@@ -143,9 +144,9 @@ the pattern appears, the body runs with the pattern's bindings.
 
 ```elisp
 (rk3-defreaction integrate-on-pass
-  :match (verdict :scope ?repo :identity ?story :value pass)
+  :match (verdict :scope $repo :identity $story :value pass)
   :take t                         ; consume the verdict
-  (rk3-story-move ?story 'integrating))
+  (rk3-story-move $story 'integrating))
 ```
 
 - A reaction may match more than one tuple (a join), as a Petri-net
