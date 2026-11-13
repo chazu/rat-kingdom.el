@@ -98,7 +98,9 @@ A run is everything that follows from one change to the space."
   "Define the reaction NAME, replacing any reaction of that name.
 TAKE and READ are each a pattern or a list of patterns.  FUNCTION is
 called with the alist of variable bindings.  DOC says what it is for.
-Return the reaction.  `rat-kingdom-defreaction' is the usual way in."
+Return the reaction.  `rat-kingdom-defreaction' is the usual way in.
+A replaced reaction keeps its state in this session: whether it is
+enabled and how often it has fired."
   (let ((take (rat-kingdom-reaction--patterns take))
         (read (rat-kingdom-reaction--patterns read)))
     (unless (or take read)
@@ -110,7 +112,18 @@ Return the reaction.  `rat-kingdom-defreaction' is the usual way in."
           (cell (cl-member name rat-kingdom-reaction--registry
                            :key #'rat-kingdom-reaction-name)))
       (if cell
-          (setcar cell reaction)
+          (let ((old (car cell)))
+            ;; Redefining, as reloading does, keeps what this session
+            ;; knows about the reaction.
+            (setf (rat-kingdom-reaction-enabled reaction)
+                  (rat-kingdom-reaction-enabled old)
+                  (rat-kingdom-reaction-fired reaction)
+                  (rat-kingdom-reaction-fired old)
+                  (rat-kingdom-reaction-last-fired reaction)
+                  (rat-kingdom-reaction-last-fired old)
+                  (rat-kingdom-reaction-last-error reaction)
+                  (rat-kingdom-reaction-last-error old))
+            (setcar cell reaction))
         (setq rat-kingdom-reaction--registry
               (append rat-kingdom-reaction--registry (list reaction))))
       reaction)))

@@ -52,7 +52,7 @@
 
 ;;;; Vocabulary
 
-(defvar rat-kingdom-space-categories
+(defconst rat-kingdom-space-builtin-categories
   '((story . linear)
     (available . linear)
     (run . persistent)
@@ -68,9 +68,14 @@
     (event . affine)
     (stuck . persistent)
     (repo . persistent))
-  "Alist of tuple categories and the modality each one defaults to.
-Writing a tuple in a category that is not listed here is an error.
-Add to it with `rat-kingdom-space-define-category'.")
+  "Alist of the built-in tuple categories and their default modalities.
+`rat-kingdom-space-categories' holds the categories added to these.")
+
+(defvar rat-kingdom-space-categories nil
+  "Alist of tuple categories added to the built-in ones, with modalities.
+Writing a tuple in a category that is neither here nor in
+`rat-kingdom-space-builtin-categories' is an error.  Add to it with
+`rat-kingdom-space-define-category'.")
 
 (defconst rat-kingdom-space-modalities '(linear persistent affine)
   "The modalities a tuple can have.
@@ -86,6 +91,11 @@ An affine tuple is consumed at most once and otherwise expires.")
   (unless (memq modality rat-kingdom-space-modalities)
     (error "Unknown modality: %S" modality))
   (setf (alist-get category rat-kingdom-space-categories) modality))
+
+(defun rat-kingdom-space-category-modality (category)
+  "Return the modality CATEGORY defaults to, or nil if it is unknown."
+  (or (alist-get category rat-kingdom-space-categories)
+      (alist-get category rat-kingdom-space-builtin-categories)))
 
 ;;;; The space
 
@@ -456,7 +466,7 @@ what the tuple is about.  PAYLOAD is a property list.  MODALITY
 defaults to the category's own.  OWNER is the story or epic whose
 lifetime the tuple shares.  TTL is how many seconds the tuple lives;
 an affine tuple must have one.  ACTOR is recorded in the log."
-  (let ((default (alist-get category rat-kingdom-space-categories)))
+  (let ((default (rat-kingdom-space-category-modality category)))
     (unless default
       (error "Unknown tuple category: %S" category))
     (setq modality (or modality default)))
