@@ -579,6 +579,65 @@ Return what finish answered."
         (should-not (rat-kingdom-story-get space "S-1"))
         (should (zerop (hash-table-count rat-kingdom-mcp--grants)))))))
 
+(ert-deftest rat-kingdom-story-test-finish-ignores-the-harness-transcript ()
+  (rat-kingdom-story-test-with-repo (space _path)
+    (rat-kingdom-story-start space "demo" "Add a file" nil "S-1")
+    (rat-kingdom-reaction-run space)
+    (let* ((worktree (rat-kingdom-story-test--get space "S-1" :worktree))
+           (transcripts (expand-file-name ".agent-shell/transcripts/" worktree)))
+      (rat-kingdom-story-test--commit worktree "feature.txt" "x\n" "Add feature")
+      ;; The backend writes the worker's transcript into the worktree, where
+      ;; the repository's ignore rules do not cover it.
+      (make-directory transcripts t)
+      (with-temp-file (expand-file-name "x.md" transcripts) (insert "chat"))
+      (should (equal (rat-kingdom-story-test--git worktree "status" "--porcelain")
+                     "?? .agent-shell/"))
+      (let ((answer (rat-kingdom-story-test--call
+                     "S-1.1" "finish" '(summary . "s") '(checks . "c"))))
+        (should-not (cdr answer))
+        (should (string-search "Recorded commit" (car answer))))
+      (should (equal (plist-get (rat-kingdom-run-get space "S-1.1") :state)
+                     "ready"))
+      (should (equal (plist-get (plist-get (rat-kingdom-space-rd
+                                            space '(result :identity "S-1"))
+                                           :payload)
+                                :commit)
+                     (rat-kingdom-git-rev worktree "HEAD"))))))
+
+(ert-deftest rat-kingdom-story-test-finish-names-the-stray-file ()
+  (rat-kingdom-story-test-with-repo (space _path)
+    (rat-kingdom-story-start space "demo" "Add a file" nil "S-1")
+    (rat-kingdom-reaction-run space)
+    (let ((worktree (rat-kingdom-story-test--get space "S-1" :worktree)))
+      (rat-kingdom-story-test--commit worktree "feature.txt" "x\n" "Add feature")
+      (with-temp-file (expand-file-name "stray.txt" worktree) (insert "x"))
+      (let ((answer (rat-kingdom-story-test--call
+                     "S-1.1" "finish" '(summary . "s") '(checks . "c"))))
+        (should (cdr answer))
+        (should (string-search "uncommitted or untracked" (car answer)))
+        (should (string-search "stray.txt" (car answer))))
+      (should-not (rat-kingdom-space-rd space '(result)))
+      (should (equal (plist-get (rat-kingdom-run-get space "S-1.1") :state)
+                     "working")))))
+
+(ert-deftest rat-kingdom-story-test-dirty-paths ()
+  (rat-kingdom-story-test-with-repo (_space path)
+    (should-not (rat-kingdom-run--dirty-paths path))
+    (rat-kingdom-story-test--commit path "old.txt" "same\n" "Add old")
+    ;; A modified file, an untracked file, a renamed file and a file under
+    ;; an ignored prefix.
+    (with-temp-file (expand-file-name "README" path) (insert "changed\n"))
+    (with-temp-file (expand-file-name "untracked.txt" path) (insert "x"))
+    (rat-kingdom-story-test--git path "mv" "old.txt" "new.txt")
+    (make-directory (expand-file-name ".agent-shell/transcripts/" path) t)
+    (with-temp-file (expand-file-name ".agent-shell/transcripts/x.md" path)
+      (insert "chat"))
+    (should (equal (sort (rat-kingdom-run--dirty-paths path) #'string<)
+                   '("README" "new.txt" "untracked.txt")))
+    ;; With nothing ignored, the transcript counts too.
+    (let ((rat-kingdom-run-ignored-paths nil))
+      (should (member ".agent-shell/" (rat-kingdom-run--dirty-paths path))))))
+
 (ert-deftest rat-kingdom-story-test-block-stops-the-story ()
   (rat-kingdom-story-test-with-repo (space path)
     (rat-kingdom-story-start space "demo" "Add a file" nil "S-1")

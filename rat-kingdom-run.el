@@ -111,6 +111,14 @@ must be clean.
   :type 'string
   :group 'rat-kingdom)
 
+(defcustom rat-kingdom-run-ignored-paths '(".agent-shell/")
+  "Paths in a worktree that the harness writes for itself.
+Each is a path prefix relative to the worktree.  `finish' does not count
+a file under one of them as uncommitted or untracked work.  The default
+is where the agent-shell backend keeps the worker's own transcript."
+  :type '(repeat string)
+  :group 'rat-kingdom)
+
 (defvar rat-kingdom-run--handles (make-hash-table :test #'equal)
   "Hash table from run id to the handle its backend returned.")
 
@@ -294,6 +302,38 @@ Only runs recorded as working are touched.  Return their ids."
                                     :awaiting "worker"
                                     :run (plist-get run :id))))
 
+(defun rat-kingdom-run--dirty-paths (worktree)
+  "Return the paths in WORKTREE that Git sees as changed or untracked.
+Paths under a prefix in `rat-kingdom-run-ignored-paths' are left out.
+Git's porcelain v2 format is read because its lines never start with a
+space, which `rat-kingdom-git' would trim off.  A renamed file is named
+by its new path."
+  (let (paths)
+    (dolist (line (split-string (rat-kingdom-git worktree "status"
+                                                 "--porcelain=v2")
+                                "\n" t))
+      (let ((path (cond
+                   ;; "? path" untracked, "! path" ignored.
+                   ((string-match "\\`[?!] \\(.*\\)\\'" line)
+                    (match-string 1 line))
+                   ;; "1 XY sub mH mI mW hH hI path" ordinary change.
+                   ((string-match "\\`1 \\(?:[^ ]+ \\)\\{7\\}\\(.*\\)\\'" line)
+                    (match-string 1 line))
+                   ;; "2 XY sub mH mI mW hH hI Xscore path\torig" rename.
+                   ((string-match "\\`2 \\(?:[^ ]+ \\)\\{8\\}\\([^\t]*\\)" line)
+                    (match-string 1 line))
+                   ;; "u XY sub m1 m2 m3 mW h1 h2 h3 path" unmerged.
+                   ((string-match "\\`u \\(?:[^ ]+ \\)\\{9\\}\\(.*\\)\\'" line)
+                    (match-string 1 line))
+                   ;; "# ..." headers are only printed with --branch.
+                   ((string-prefix-p "#" line) nil)
+                   (t line))))
+        (when (and path
+                   (not (cl-some (lambda (prefix) (string-prefix-p prefix path))
+                                 rat-kingdom-run-ignored-paths)))
+          (push path paths))))
+    (nreverse paths)))
+
 (defun rat-kingdom-run--finish (context arguments)
   "Record that the calling run's work is done.
 CONTEXT names the run; ARGUMENTS has `summary' and `checks'."
@@ -305,9 +345,11 @@ CONTEXT names the run; ARGUMENTS has `summary' and `checks'."
     (unless (equal (rat-kingdom-git worktree "rev-parse" "--abbrev-ref" "HEAD")
                    branch)
       (error "Your worktree is not on your branch %s; check it out" branch))
-    (unless (string-empty-p (rat-kingdom-git worktree "status" "--porcelain"))
-      (error "Your worktree has uncommitted or untracked files; \
-commit what belongs to the task and remove the rest"))
+    (let ((dirty (rat-kingdom-run--dirty-paths worktree)))
+      (when dirty
+        (error "Your worktree has uncommitted or untracked files; \
+commit what belongs to the task and remove the rest: %s"
+               (string-join dirty ", "))))
     (when (equal (rat-kingdom-git worktree "rev-list" "--count"
                                   (concat (plist-get run :target) "..HEAD"))
                  "0")
