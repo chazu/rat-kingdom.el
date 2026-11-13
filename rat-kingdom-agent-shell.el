@@ -36,6 +36,11 @@
 ;;
 ;; Pushing is left to the king's `publish' tool, which runs Git in Emacs
 ;; itself (rat-kingdom-git.el).
+;;
+;; Stopping an agent kills its buffer, and with it Claude Code's process,
+;; so Claude Code's own SessionEnd hooks never run for it.  In their
+;; place `rat-kingdom-agent-shell-session-end-command' is started,
+;; detached, with the session's transcript file.
 
 ;;; Code:
 
@@ -431,9 +436,83 @@ typed something there that is not yet sent."
                               :shell-buffer buffer))
         t))))
 
-(defun rat-kingdom-agent-shell-stop (buffer)
-  "Stop the agent in BUFFER by killing the buffer."
+;;;; The session's transcript
+
+(defcustom rat-kingdom-agent-shell-session-end-command
+  '("cm" "hook" "session-end" "--transcript")
+  "The command given a stopped agent's Claude Code transcript, or nil.
+A list of a program and its arguments; the transcript's path is
+appended as the last argument.  The command runs detached when an
+agent is stopped, in the user's home directory, and is not waited
+for.  It stands in for Claude Code's SessionEnd hooks, which do not
+run when the agent's process is killed with its buffer.  Nothing
+happens when the program is not found through the variable
+`exec-path', or when no transcript is found.  nil turns this off."
+  :type '(choice (const :tag "Off" nil)
+                 (repeat :tag "Program and arguments" string))
+  :group 'rat-kingdom)
+
+(defun rat-kingdom-agent-shell-project-slug (directory)
+  "Return the name Claude Code keeps DIRECTORY's transcripts under.
+That is DIRECTORY made absolute, without a trailing slash, with every
+character that is not a letter or a digit replaced by `-'."
+  (replace-regexp-in-string "[^a-zA-Z0-9]" "-"
+                            (directory-file-name
+                             (expand-file-name directory))))
+
+(defun rat-kingdom-agent-shell--transcript-root ()
+  "Return the directory Claude Code keeps every project's transcripts in."
+  (expand-file-name "projects"
+                    (or (getenv "CLAUDE_CONFIG_DIR") "~/.claude")))
+
+(defun rat-kingdom-agent-shell-transcript (buffer)
+  "Return the Claude Code transcript of the agent in BUFFER, or nil.
+The transcript is <session id>.jsonl under the project's slug in
+`CLAUDE_CONFIG_DIR', or ~/.claude, where the session id is the ACP
+session's and the project is BUFFER's directory.  Without a session id
+it is the most recently modified transcript there.  nil when BUFFER is
+dead or no such file exists."
   (when (buffer-live-p buffer)
+    (with-current-buffer buffer
+      (let* ((directory (expand-file-name
+                         (rat-kingdom-agent-shell-project-slug default-directory)
+                         (rat-kingdom-agent-shell--transcript-root)))
+             (session (map-nested-elt (bound-and-true-p agent-shell--state)
+                                      '(:session :id)))
+             (named (and session
+                         (expand-file-name (concat session ".jsonl")
+                                           directory))))
+        (cond ((and named (file-regular-p named)) named)
+              ((file-directory-p directory)
+               (seq-reduce (lambda (newest file)
+                             (if (or (null newest)
+                                     (file-newer-than-file-p file newest))
+                                 file
+                               newest))
+                           (directory-files directory t "\\.jsonl\\'" t)
+                           nil)))))))
+
+(defun rat-kingdom-agent-shell--end-session (buffer)
+  "Give the transcript of the agent in BUFFER to the session-end command.
+See `rat-kingdom-agent-shell-session-end-command'.  Nothing is run
+when it is nil, its program is not found or there is no transcript,
+and nothing that goes wrong is signalled, so that stopping the agent
+cannot be held up."
+  (condition-case err
+      (when-let* ((command rat-kingdom-agent-shell-session-end-command)
+                  ((executable-find (car command)))
+                  (transcript (rat-kingdom-agent-shell-transcript buffer)))
+        (let ((default-directory (expand-file-name "~/")))
+          (apply #'call-process (car command) nil 0 nil
+                 (append (cdr command) (list transcript)))))
+    (error (message "rat-kingdom: session-end command not run: %s"
+                    (error-message-string err)))))
+
+(defun rat-kingdom-agent-shell-stop (buffer)
+  "Stop the agent in BUFFER by killing the buffer.
+Its transcript is given to the session-end command first."
+  (when (buffer-live-p buffer)
+    (rat-kingdom-agent-shell--end-session buffer)
     (let ((kill-buffer-query-functions nil))
       (kill-buffer buffer))))
 
