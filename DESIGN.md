@@ -540,11 +540,15 @@ wait longer for review than for implementation.
    startup; an interrupted worker is replaced in the same worktree, an
    interrupted check is run again, the king's session is taken up again.
 6. **King and tasks** (the king is built, not yet run with a real agent:
-   `rat-kingdom-king.el`; the task adapter interface and its `br`
-   adapter are built: `rat-kingdom-task.el`): king role and tools, news
-   delivered between turns, tasks behind an adapter, tested with a fake
-   `br`. Still to come: the `available` projection, epic waves, and the
-   epic plan surface (4).
+   `rat-kingdom-king.el`; the task adapter interface, its `br` adapter
+   and the `available` projection are built: `rat-kingdom-task.el`):
+   king role and tools, news delivered between turns, tasks behind an
+   adapter, tested with a fake `br`. Ready tasks are projected as
+   `available` when `rat-kingdom-mode` starts and on
+   `rat-kingdom-tasks-refresh`; a story started from a task takes its
+   tuple and claims it, and merging closes it and projects its
+   dependents, tested with an in-memory adapter. Still to come: epic
+   waves and the epic plan surface (4).
 7. **Configuration**: layers, mixins, aspects, validated `config_set`.
 8. **Dashboard** additions with the factory floor, attention queue and
    review card (surfaces 1 to 3), then the **research** workflow, docs and

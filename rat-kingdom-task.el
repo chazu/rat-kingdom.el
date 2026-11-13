@@ -28,11 +28,20 @@
 ;; The first adapter is Rust Beads, the `br' program.  Its workspace is
 ;; a directory, by default the repository's own; br is run there,
 ;; synchronously and without a shell, with --json.
+;;
+;; `rat-kingdom-task-project' makes the space show a repository's ready
+;; tasks as `available' tuples.  A story started from a task takes its
+;; `available' tuple and claims the task.  When the story is merged the
+;; task is closed; when it ends otherwise the task is released.  Either
+;; way the repository is projected again, so dependents of a closed task
+;; become available.  A tracker that fails never stops a story.
 
 ;;; Code:
 
 (require 'cl-lib)
 (require 'subr-x)
+(require 'rat-kingdom-space)
+(require 'rat-kingdom-git)
 
 (defcustom rat-kingdom-task-br-program "br"
   "The Rust Beads executable."
@@ -168,6 +177,119 @@ It is unassigned and open again."
   "Add the comment TEXT to the task ID in ADAPTER's workspace."
   (rat-kingdom-task-br--run adapter "comments" "add" id (concat "--message=" text))
   nil)
+
+;;;; Tasks in the space
+
+(defun rat-kingdom-task-default-adapter (repo)
+  "Return a Rust Beads adapter for the repository record REPO, or nil.
+There is one if the repository has a .beads directory."
+  (when (file-directory-p (expand-file-name ".beads" (plist-get repo :path)))
+    (rat-kingdom-task-br repo)))
+
+(defcustom rat-kingdom-task-adapter-function #'rat-kingdom-task-default-adapter
+  "Function returning the task adapter of a repository, or nil.
+It is called with the repository's record.  A repository with no
+adapter has no tasks."
+  :type 'function
+  :group 'rat-kingdom)
+
+(defun rat-kingdom-task-adapter (space repo)
+  "Return the task adapter of the repository REPO in SPACE, or nil."
+  (when-let* ((record (rat-kingdom-repo-get space repo)))
+    (funcall rat-kingdom-task-adapter-function record)))
+
+(defun rat-kingdom-task-project (space repo)
+  "Make the `available' tuples of REPO in SPACE match its ready tasks.
+A ready task gets one unless it has one or a story is working on it;
+a tuple whose task is no longer ready is retracted.  Return how many
+tasks are available, or nil if REPO has no adapter or its tracker
+failed, in which case SPACE is not touched."
+  (when-let* ((adapter (rat-kingdom-task-adapter space repo)))
+    (condition-case result
+        (rat-kingdom-task-ready adapter)
+      (rat-kingdom-task-error
+       (message "rat-kingdom: tasks of %s: %s"
+                repo (error-message-string result))
+       nil)
+      (:success (rat-kingdom-task--project space repo result)))))
+
+(defun rat-kingdom-task--project (space repo ready)
+  "Make the `available' tuples of REPO in SPACE match the tasks READY.
+Return how many there are."
+  (rat-kingdom-space-with-transaction space
+    (let ((ids (mapcar (lambda (task) (plist-get task :id)) ready)))
+      (dolist (tuple (rat-kingdom-space-scan space (list 'available :scope repo)))
+        (unless (member (plist-get tuple :identity) ids)
+          (rat-kingdom-space-retract
+           space (list 'available :id (plist-get tuple :id)) :actor "tasks"))))
+    (dolist (task ready)
+      (let ((id (plist-get task :id)))
+        (unless (or (rat-kingdom-space-rd
+                     space (list 'available :scope repo :identity id))
+                    (rat-kingdom-space-rd
+                     space (list 'story :scope repo :task id)))
+          (rat-kingdom-space-out
+           space 'available :scope repo :identity id
+           :payload (list :title (plist-get task :title)
+                          :description (plist-get task :description)
+                          :priority (plist-get task :priority)
+                          :type (plist-get task :type))
+           :actor "tasks"))))
+    (length (rat-kingdom-space-scan space (list 'available :scope repo)))))
+
+(defun rat-kingdom-task-project-all (space)
+  "Project the ready tasks of every repository in SPACE.
+Return how many tasks are available in all."
+  (let ((count 0))
+    (dolist (repo (rat-kingdom-repo-list space))
+      (cl-incf count (or (rat-kingdom-task-project space (plist-get repo :name))
+                         0)))
+    count))
+
+;;;###autoload
+(defun rat-kingdom-tasks-refresh ()
+  "Show the ready tasks of every repository as `available' in the space."
+  (interactive)
+  (message "rat-kingdom: %d tasks available"
+           (rat-kingdom-task-project-all (rat-kingdom-space-default))))
+
+;;;; Stories working on tasks
+
+(defun rat-kingdom-task-claim-for-story (space repo task story)
+  "Claim TASK of REPO in SPACE for the story STORY.
+A tracker failure is reported and otherwise ignored."
+  (with-demoted-errors "rat-kingdom: claiming a task: %S"
+    (when-let* ((adapter (rat-kingdom-task-adapter space repo)))
+      (rat-kingdom-task-claim adapter task story))))
+
+(defun rat-kingdom-task--settle (space repo task reason)
+  "Close TASK of REPO in SPACE saying REASON, or release it if REASON is nil.
+Then project REPO again.  Errors are reported and otherwise ignored."
+  (with-demoted-errors "rat-kingdom: settling a task: %S"
+    (when (rat-kingdom-space-db space)
+      (when-let* ((adapter (rat-kingdom-task-adapter space repo)))
+        (if reason
+            (rat-kingdom-task-close adapter task reason)
+          (rat-kingdom-task-release adapter task))
+        (rat-kingdom-task-project space repo)))))
+
+(defun rat-kingdom-task-story-ended (space story)
+  "Settle the task of the token STORY in SPACE, which has ended.
+If it was merged, close the task; otherwise release it.  This is done
+from a timer, outside any transaction in progress."
+  (let ((payload (plist-get story :payload)))
+    (when-let* ((task (plist-get payload :task)))
+      (run-at-time 0 nil #'rat-kingdom-task--settle
+                   space (plist-get story :scope) task
+                   (when-let* ((head (plist-get payload :integrated)))
+                     (format "Merged into %s at %s" (plist-get payload :target)
+                             (substring head 0 (min 7 (length head)))))))))
+
+(defun rat-kingdom-task-story-event (space event story)
+  "Settle the task of the token STORY in SPACE if EVENT is `done'.
+For `rat-kingdom-story-event-functions'."
+  (when (eq event 'done)
+    (rat-kingdom-task-story-ended space story)))
 
 (provide 'rat-kingdom-task)
 ;;; rat-kingdom-task.el ends here
