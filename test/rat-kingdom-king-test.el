@@ -11,6 +11,7 @@
 (require 'ert)
 (require 'rat-kingdom-king)
 (require 'rat-kingdom-story-test)
+(require 'rat-kingdom-task-test)
 
 (defun rat-kingdom-king-test--start (space)
   "Start the king in SPACE with the fake backend."
@@ -283,6 +284,104 @@ Fail the test if the call failed."
                      "review"))
       (should-not (rat-kingdom-king-test--news space))
       (should (equal (car rat-kingdom-story-test--events) '(review . "S-1"))))))
+
+;;;; Tasks
+
+(ert-deftest rat-kingdom-king-test-status-lists-available-tasks ()
+  (rat-kingdom-task-test-with-tracker (space fake)
+    (rat-kingdom-king-test--start space)
+    (setf (rat-kingdom-task-test-fake-tasks fake)
+          (append (rat-kingdom-task-test-fake-tasks fake)
+                  (list (list :id "T-0" :title "Zeroth" :status "open"
+                              :priority 3 :type "task")
+                        (list :id "T-3" :title "Third" :status "open"
+                              :priority 1 :type "bug"))))
+    ;; Status projects the tracker's ready tasks and lists them by
+    ;; priority, then id.
+    (should (string-search "Stories in progress:\n- none\n\nAvailable tasks:
+- T-1 [demo] P1 task: First
+- T-3 [demo] P1 bug: Third
+- T-0 [demo] P3 task: Zeroth"
+                           (rat-kingdom-king-test--ok "status")))
+    ;; A tracker that fails does not stop status.
+    (setf (rat-kingdom-task-test-fake-fail fake) t)
+    (should (string-search "- T-0 [demo] P3 task: Zeroth"
+                           (rat-kingdom-king-test--ok "status")))
+    (setf (rat-kingdom-task-test-fake-fail fake) nil)
+    ;; Nothing ready.
+    (dolist (task (rat-kingdom-task-test-fake-tasks fake))
+      (plist-put task :status "closed"))
+    (let ((status (rat-kingdom-king-test--ok "status")))
+      (should (string-suffix-p "Available tasks:\n- none" status)))
+    ;; No tracker at all.
+    (let ((rat-kingdom-task-adapter-function #'ignore))
+      (should (string-suffix-p
+               "Available tasks:\n- none (no repository has a task tracker)"
+               (rat-kingdom-king-test--ok "status"))))))
+
+(ert-deftest rat-kingdom-king-test-starts-a-story-from-a-task ()
+  (rat-kingdom-task-test-with-tracker (space fake)
+    (rat-kingdom-king-test--start space)
+    (should (rat-kingdom-task-test--available space))
+    (let* ((answer (rat-kingdom-king-test--ok "story_start" '(repo . "demo")
+                                              '(task . "T-1")))
+           (id (progn (string-match "Started \\(S-[0-9a-f]+\\) for the task \
+T-1 with the workflow" answer)
+                      (match-string 1 answer))))
+      (should id)
+      (should (equal (rat-kingdom-story-test--get space id :task) "T-1"))
+      (should (equal (rat-kingdom-story-test--get space id :title) "First"))
+      (should (equal (rat-kingdom-story-test--get space id :description)
+                     "Do it"))
+      (should-not (rat-kingdom-task-test--available space))
+      (should (member (list 'claim "T-1" id)
+                      (rat-kingdom-task-test-fake-calls fake)))
+      ;; A task can have only one live story.
+      (let ((answer (rat-kingdom-king-test--call "story_start" '(repo . "demo")
+                                                 '(task . "T-1"))))
+        (should (cdr answer))
+        (should (string-search (format "The story %s already works on the \
+task T-1" id)
+                               (car answer)))))))
+
+(ert-deftest rat-kingdom-king-test-a-task-with-the-kings-description ()
+  (rat-kingdom-task-test-with-tracker (space fake)
+    (rat-kingdom-king-test--start space)
+    ;; T-2 is not ready, so it is looked up in the tracker.
+    (let* ((answer (rat-kingdom-king-test--ok
+                    "story_start" '(repo . "demo") '(task . "T-2")
+                    '(description . "Fix it this way.")))
+           (id (progn (string-match "Started \\(S-[0-9a-f]+\\)" answer)
+                      (match-string 1 answer))))
+      (should (member '(show "T-2") (rat-kingdom-task-test-fake-calls fake)))
+      (should (equal (rat-kingdom-story-test--get space id :title) "Second"))
+      (should (equal (rat-kingdom-story-test--get space id :description)
+                     "Fix it this way.\n\nThis story works on the tracker \
+task T-2: Second"))
+      (should (equal (rat-kingdom-story-test--get space id :task) "T-2")))))
+
+(ert-deftest rat-kingdom-king-test-story-start-errors-for-tasks ()
+  (rat-kingdom-task-test-with-tracker (space fake)
+    (rat-kingdom-king-test--start space)
+    (let ((answer (rat-kingdom-king-test--call "story_start" '(repo . "demo")
+                                               '(task . "T-9"))))
+      (should (cdr answer))
+      (should (string-search "The tracker of demo has no task T-9"
+                             (car answer))))
+    (let* ((rat-kingdom-task-adapter-function #'ignore)
+           (answer (rat-kingdom-king-test--call "story_start" '(repo . "demo")
+                                                '(task . "T-1"))))
+      (should (cdr answer))
+      (should (string-search "The repository demo has no task tracker"
+                             (car answer))))
+    ;; Without a task, a title and a description are needed.
+    (let ((answer (rat-kingdom-king-test--call "story_start" '(repo . "demo")
+                                               '(description . "D"))))
+      (should (cdr answer))
+      (should (string-search "Give a title" (car answer))))
+    (should (cdr (rat-kingdom-king-test--call "story_start" '(repo . "demo")
+                                              '(title . "T"))))
+    (should-not (rat-kingdom-story-list space))))
 
 (provide 'rat-kingdom-king-test)
 ;;; rat-kingdom-king-test.el ends here

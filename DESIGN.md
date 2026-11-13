@@ -382,7 +382,7 @@ go, and it lets a role be denied built-in tools as well.
 
 | Role | Lifetime | Tools |
 |---|---|---|
-| king | long-lived, global, no worktree | built: `status`, `repo_add`, `repo_sync`, `workflow_list`, `story_start`, `story_show`, `story_diff`, `story_move`, `story_cancel`, `verdict`. Planned: `task_create`, `epic_create`, `tell`, `query`, `config_set`, `publish` |
+| king | long-lived, global, no worktree | built: `status` (with the tracker tasks available), `repo_add`, `repo_sync`, `workflow_list`, `story_start` (optionally from a `task`), `story_show`, `story_diff`, `story_move`, `story_cancel`, `verdict`. Planned: `task_create`, `epic_create`, `tell`, `query`, `config_set`, `publish` |
 | rat (worker) | one task | `finish`, `block`, `note_fact`, `inbox` |
 | researcher | one task | `finish_doc`, `note_fact`, `block` |
 | foreman | one epic, optional | `story_start`, `tell`, `verdict`, `query`, limited to its epic |
@@ -547,7 +547,9 @@ wait longer for review than for implementation.
    `available` when `rat-kingdom-mode` starts and on
    `rat-kingdom-tasks-refresh`; a story started from a task takes its
    tuple and claims it, and merging closes it and projects its
-   dependents, tested with an in-memory adapter. Still to come: epic
+   dependents, tested with an in-memory adapter. The king's `status`
+   projects and lists the available tasks, and its `story_start` takes a
+   `task`, filling in the title and description from it. Still to come: epic
    waves and the epic plan surface (4).
 7. **Configuration**: layers, mixins, aspects, validated `config_set`.
 8. **Dashboard** additions with the factory floor, attention queue and
