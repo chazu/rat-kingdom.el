@@ -91,6 +91,16 @@ not exist as far as the caller can tell."
             (cons (funcall (plist-get tool :function) context arguments) nil))
         (error (cons (format "Error: %s" (error-message-string err)) t))))))
 
+(defun rat-kingdom-mcp-tool-list (role)
+  "Return the tools offered to ROLE as `tools/list' describes them.
+Each is a property list with `:name', `:description' and
+`:inputSchema'."
+  (mapcar (lambda (tool)
+            (list :name (plist-get tool :name)
+                  :description (plist-get tool :description)
+                  :inputSchema (rat-kingdom-mcp--schema (plist-get tool :args))))
+          (rat-kingdom-mcp--tools-for role)))
+
 ;;;; Who is calling
 
 (defvar rat-kingdom-mcp--grants (make-hash-table :test #'equal)
@@ -131,16 +141,8 @@ Return the reply as a property list, or nil for a notification."
                                            :version "0.1.0"))))
           ("ping" (result (make-hash-table)))
           ("tools/list"
-           (result
-            (list :tools
-                  (vconcat
-                   (mapcar (lambda (tool)
-                             (list :name (plist-get tool :name)
-                                   :description (plist-get tool :description)
-                                   :inputSchema (rat-kingdom-mcp--schema
-                                                 (plist-get tool :args))))
-                           (rat-kingdom-mcp--tools-for
-                            (plist-get context :role)))))))
+           (result (list :tools (vconcat (rat-kingdom-mcp-tool-list
+                                          (plist-get context :role))))))
           ("tools/call"
            (pcase-let ((`(,text . ,failed)
                         (rat-kingdom-mcp-call context (alist-get 'name params)

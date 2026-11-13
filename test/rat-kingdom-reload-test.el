@@ -86,6 +86,33 @@
       (should (eq rat-kingdom-run--handles handles))
       (should (eq (rat-kingdom-run-handle "S-1.1") 'handle)))))
 
+(ert-deftest rat-kingdom-reload-test-says-what-happened-to-the-king ()
+  (rat-kingdom-reload-test--isolated
+    (let (said)
+      (cl-letf (((symbol-function 'rat-kingdom--load-files) #'ignore)
+                ((symbol-function 'rat-kingdom-space-default) #'ignore)
+                ((symbol-function 'message)
+                 (lambda (format &rest args)
+                   (setq said (apply #'format format args)))))
+        ;; No king running: refresh is not even asked.
+        (cl-letf (((symbol-function 'rat-kingdom-king-refresh)
+                   (lambda (_space) (error "Not expected"))))
+          (rat-kingdom-reload)
+          (should (string-prefix-p "rat-kingdom: reloaded" said))
+          (should-not (string-search "the king" said)))
+        (puthash "king" 'handle rat-kingdom-run--handles)
+        (dolist (case '((nil . nil)
+                        (restarted . "its session was restarted in place")
+                        (deferred . "will be restarted in place when it \
+next ends a turn")
+                        (changed . "M-x rat-kingdom-king-restart gives them")))
+          (cl-letf (((symbol-function 'rat-kingdom-king-refresh)
+                     (lambda (_space) (car case))))
+            (rat-kingdom-reload)
+            (if (cdr case)
+                (should (string-search (cdr case) said))
+              (should-not (string-search "the king" said)))))))))
+
 (ert-deftest rat-kingdom-reload-test-keeps-a-custom-backend ()
   (rat-kingdom-reload-test--isolated
     (setq rat-kingdom-run-backend (list :start #'ignore :stop #'ignore))
