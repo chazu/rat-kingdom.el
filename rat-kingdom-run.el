@@ -92,7 +92,9 @@ nothing else.
 
 Rules:
 - Work only in your worktree, on your branch. They are yours alone.
-- Commit your work locally. Never push, and never touch another branch.
+- Commit your work locally. Never push, and never touch another branch. \
+Pushing is blocked in your environment: git push and gh fail. Do not try to \
+work around that.
 - Run the checks that apply before you report.
 - When the task is done and committed, call the `finish' tool of the \
 rat-kingdom server with a summary and the checks you ran. Your worktree \
