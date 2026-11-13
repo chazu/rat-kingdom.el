@@ -16,7 +16,8 @@
 ;;   :at      the place it is at
 ;;   :phase   enter    it has just arrived and its step is not yet begun
 ;;            wait     its step is in progress; `:step' names it and
-;;                     `:awaiting' says for what: worker, check or review
+;;                     `:awaiting' says for what: worker, check or review,
+;;                     or "a free worker" while it is queued
 ;;            parked   no step is taken from here; it waits to be moved
 ;;
 ;; The reactions here are the workflow engine.  One begins the step of
@@ -34,6 +35,12 @@
 ;; candidate worktree, the repository's check runs there, and only then
 ;; is the target branch moved, and only if it has not moved meanwhile.
 ;; If it has, the story is checked again.  Nothing is pushed.
+;;
+;; At most `rat-kingdom-story-max-workers' workers run at once.  A story
+;; whose worker would go over that waits for a free worker, and the
+;; queue is served oldest first whenever a worker's run leaves the
+;; running states, a story is archived, the watchdog looks, or Emacs
+;; reconciles.
 ;;
 ;; `rat-kingdom-story-reconcile' is the recovery after Emacs stopped
 ;; with work in flight (DESIGN.md, section 8.4): a worker that was cut
@@ -68,6 +75,21 @@ the count again."
 A step's `:timeout' overrides this.  A kind left out has no limit."
   :type '(alist :key-type symbol :value-type number)
   :group 'rat-kingdom)
+
+(defcustom rat-kingdom-story-max-workers 3
+  "Most workers that may run at once, or nil for no limit.
+A worker counts while its run is `starting' or `working', that is from
+when it is recorded until it reports, ends or is stopped.  A run that
+is `ready' or `blocked' has reported, and its agent sits idle until its
+story moves on; one that is `interrupted' has no agent in this Emacs.
+Only runs that belong to a story count, so the king does not.  A story
+whose worker would go over the limit waits for a free worker, and is
+given one, oldest first, as workers end."
+  :type '(choice (const :tag "No limit" nil) integer)
+  :group 'rat-kingdom)
+
+(defconst rat-kingdom-story-free-worker "a free worker"
+  "What a story queued for a worker is `:awaiting'.")
 
 (defcustom rat-kingdom-story-watch-interval 60
   "Seconds between looks for stuck stories while `rat-kingdom-mode' is on."
@@ -315,18 +337,36 @@ is in your worktree. Before you change anything, look at \
             (when-let* ((reason (plist-get payload :reason)))
               (concat "\nWhy the task has come to you:\n" reason "\n")))))
 
+(defun rat-kingdom-story--worker-free-p (space id)
+  "Return non-nil if the story ID in SPACE may start a worker now.
+See `rat-kingdom-story-max-workers'.  Runs of ID itself are not
+counted, since starting a new one stops the old."
+  (or (null rat-kingdom-story-max-workers)
+      (< (cl-count-if (lambda (run)
+                        (and (plist-get run :story)
+                             (not (equal (plist-get run :story) id))
+                             (member (plist-get run :state)
+                                     '("starting" "working"))))
+                      (rat-kingdom-run-list space))
+         rat-kingdom-story-max-workers)))
+
 (defun rat-kingdom-story--spawn (space story workflow step)
   "Begin STEP of WORKFLOW for the taken token STORY in SPACE.
-Give the story a worktree, unless it has one, and a new worker."
+Give the story a worktree, unless it has one, and a new worker.  If no
+worker is free, queue it instead; that is not an attempt."
   (let* ((id (plist-get story :identity))
          (payload (plist-get story :payload))
          (attempt (1+ (or (plist-get payload :attempt) 0)))
          (limit (or (plist-get step :attempts) rat-kingdom-story-attempts)))
-    (if (> attempt limit)
-        (rat-kingdom-story--goto
-         space story (plist-get workflow :failure)
-         :reason (format "Gave up after %d workers. The last reason: %s"
-                         limit (or (plist-get payload :reason) "none recorded")))
+    (cond
+     ((> attempt limit)
+      (rat-kingdom-story--goto
+       space story (plist-get workflow :failure)
+       :reason (format "Gave up after %d workers. The last reason: %s"
+                       limit (or (plist-get payload :reason) "none recorded"))))
+     ((not (rat-kingdom-story--worker-free-p space id))
+      (rat-kingdom-story--wait space story step rat-kingdom-story-free-worker))
+     (t
       (let* ((repo (rat-kingdom-story--repo space story))
              (path (plist-get repo :path))
              (target (plist-get repo :target))
@@ -369,7 +409,21 @@ Give the story a worktree, unless it has one, and a new worker."
              (ignore-errors
                (rat-kingdom-git path "worktree" "remove" "--force" worktree))
              (ignore-errors (rat-kingdom-git path "branch" "-D" branch)))
-           (signal (car err) (cdr err))))))))
+           (signal (car err) (cdr err)))))))))
+
+(defun rat-kingdom-story-dequeue (space)
+  "Give queued stories in SPACE workers, oldest first, while any is free.
+Return the ids of the stories whose step was begun again."
+  (let (started)
+    (dolist (story (rat-kingdom-space-scan
+                    space (list 'story :awaiting rat-kingdom-story-free-worker)))
+      (when (rat-kingdom-story--worker-free-p space (plist-get story :identity))
+        (rat-kingdom-space-with-transaction space
+          (when (rat-kingdom-space-in space (list 'story :id (plist-get story :id))
+                                      :actor "engine")
+            (rat-kingdom-story--enter space story)
+            (push (plist-get story :identity) started)))))
+    (nreverse started)))
 
 ;;;; Checking
 
@@ -599,7 +653,9 @@ another branch there, then move this story back to %s"
       (rat-kingdom-run-stop space run)))
   (rat-kingdom-story--event
    space 'done (rat-kingdom-story--put space story :phase "done"))
-  (rat-kingdom-space-sweep space (plist-get story :owner)))
+  (rat-kingdom-space-sweep space (plist-get story :owner))
+  ;; Its run is archived with it, which may free a worker.
+  (rat-kingdom-story-dequeue space))
 
 (defun rat-kingdom-story--enter (space story)
   "Begin the step of the taken token STORY, which has arrived at a place.
@@ -696,13 +752,19 @@ work so far is in %s."
   "Give a new worker to a story whose worker was cut off when Emacs stopped."
   :take (story :scope $repo :identity $story :awaiting worker :run $run)
   :read (run :identity $run :state interrupted)
-  (let ((story (car rat-kingdom-reaction-tuples)))
-    (rat-kingdom-story--goto
-     rat-kingdom-reaction-space story
-     (plist-get (plist-get story :payload) :at)
-     :reason (format "The worker before you, %s, was cut off when Emacs \
-stopped. It did not report, so its work may be unfinished or uncommitted."
-                     $run))))
+  (let* ((space rat-kingdom-reaction-space)
+         (story (car rat-kingdom-reaction-tuples))
+         (story (rat-kingdom-story--goto
+                 space story (plist-get (plist-get story :payload) :at)
+                 :reason (format "The worker before you, %s, was cut off \
+when Emacs stopped. It did not report, so its work may be unfinished or \
+uncommitted."
+                                 $run))))
+    ;; Begun here rather than by `rat-kingdom-story-enter', so that a
+    ;; queued story does not take the worker this one had.
+    (rat-kingdom-space-in space (list 'story :id (plist-get story :id))
+                          :actor "engine")
+    (rat-kingdom-story--enter space story)))
 
 (rat-kingdom-defreaction rat-kingdom-story-checked
   "Move on a story whose check has come out."
@@ -735,6 +797,11 @@ stopped. It did not report, so its work may be unfinished or uncommitted."
        space story :fix
        :reason (format "The review asked for changes:\n%s"
                        (plist-get verdict :notes))))))
+
+(rat-kingdom-defreaction rat-kingdom-story-worker-freed
+  "Give a queued story a worker, since a run's change may have freed one."
+  :read (run :identity $run)
+  (rat-kingdom-story-dequeue rat-kingdom-reaction-space))
 
 ;;;; Moving by hand
 
@@ -786,7 +853,8 @@ who cancelled it.  Return a sentence saying what is left."
         (error "%s moved on meanwhile; look again" id))
       (rat-kingdom-story--put space story :phase "cancelled" :step nil
                               :awaiting nil)
-      (rat-kingdom-space-sweep space (plist-get story :owner)))
+      (rat-kingdom-space-sweep space (plist-get story :owner))
+      (rat-kingdom-story-dequeue space))
     (rat-kingdom-task-story-ended space story)
     (if (plist-get payload :worktree)
         (format "Cancelled %s. Its worktree %s and branch %s are kept."
@@ -816,7 +884,9 @@ who cancelled it.  Return a sentence saying what is left."
   "Report as stuck each story in SPACE that will not move by itself.
 That is a story whose step has run past its time, whose check is not
 running, whose worker is gone, or which no reaction has picked up.
-Return how many were newly reported."
+A story queued for a free worker is not stuck; the queue is served
+first, in case a worker is free.  Return how many were newly reported."
+  (rat-kingdom-story-dequeue space)
   (let ((now (funcall rat-kingdom-space-now-function))
         (count 0))
     (dolist (story (rat-kingdom-story-list space))
@@ -836,6 +906,9 @@ Return how many were newly reported."
 has begun. Reactions may be off or failing." (plist-get payload :at) waited)))
                 ("wait"
                  (cond
+                  ((equal (plist-get payload :awaiting)
+                          rat-kingdom-story-free-worker)
+                   nil)
                   ((and (equal (plist-get payload :awaiting) "check")
                         (not (gethash id rat-kingdom-story--checks))
                         (not (rat-kingdom-space-rd
@@ -858,9 +931,13 @@ has begun. Reactions may be off or failing." (plist-get payload :at) waited)))
   "Put right in SPACE what an Emacs that stopped left in flight.
 A run recorded as working with no agent in this Emacs is marked
 interrupted; the story it worked for is then given a new worker in the
-same worktree.  A check that was running is run again.  Return a
+same worktree.  A check that was running is run again.  Stories queued
+for a free worker stay queued, and are given one if one is free.  Return a
 property list: `:runs', the ids of the interrupted runs, and
 `:checks', the ids of the stories checked again."
+  ;; Before runs are marked interrupted, so that their stories, whose
+  ;; workers are replaced, keep their places ahead of the queue.
+  (rat-kingdom-story-dequeue space)
   (let ((runs (rat-kingdom-run-reconcile space))
         checks)
     (dolist (story (rat-kingdom-space-scan space '(story :awaiting check)))

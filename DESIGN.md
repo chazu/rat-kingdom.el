@@ -212,6 +212,7 @@ lead back to `ready`, where a new worker is started in the same worktree
 with the reason. A story is given at most five workers before it is
 parked. A target branch that moved after the check leads back to
 `checking`; a commit that was already reviewed is not reviewed again.
+Workers are capped; the rest queue (section 7.2).
 
 The sketch this grew from, kept for the parts not yet built:
 
@@ -249,6 +250,12 @@ doc, no code), `epic` (dispatches child stories in dependency order).
   failed reaction.
 - Steps have timeouts: by default two hours for a worker and thirty
   minutes for a check, and none for a review.
+- At most `rat-kingdom-story-max-workers` workers (three by default) run
+  at once. A story whose worker would go over waits in its step for "a
+  free worker", with no worktree, run or attempt, and its step's time
+  starts only when the worker does. The queue is served oldest first by a
+  reaction on every change to a run, when a story is archived, by the
+  watchdog and by reconciling, so it cannot wait while a worker is free.
 - A watchdog, once a minute, writes `stuck` for a token whose step has run
   past its time, whose check is not running, whose worker's record is
   gone, or which no reaction has picked up. The king is told.
@@ -292,6 +299,11 @@ Run states, kept distinct as in rk2: `starting`, `working`, `ready`,
 `interrupted` (Emacs stopped while it worked). A run that cannot be
 started is `exited` with the error.
 
+A story's run counts against the worker limit (section 7.2) while it is
+`starting` or `working`. Once it reports, its agent sits idle until its
+story moves on; the king's run never counts. Stories beyond the limit
+queue and start in order as workers end.
+
 The process state comes from agent-shell's events (session ready, turn
 ended with its stop reason, tool call, permission request, error, process
 gone), the way deathless's store already reads them. The outcome comes only
@@ -325,7 +337,9 @@ turned on and by `M-x rat-kingdom-reconcile`), and tested by closing the
 space and discarding everything held in memory, not yet by killing a real
 Emacs. A run recorded as `working` with no agent in this Emacs becomes
 `interrupted`, and a reaction gives its story a new worker in the same
-worktree, with a fresh session and a prompt that says what happened. A
+worktree, with a fresh session and a prompt that says what happened. That
+worker takes its old place ahead of the queue for a free worker, which is
+kept and served once the replaced workers have started. A
 check that was running is run again. The king takes up its earlier
 session by its id. Sessions that end while Emacs is exiting are not
 recorded as ended, so they are found interrupted on the next start.
