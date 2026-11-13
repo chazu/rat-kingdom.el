@@ -45,6 +45,11 @@ the story back to a new worker in the same worktree, with the reason. A
 story that cannot go on is parked at `blocked` with a reason until the
 king or you move it.
 
+At most three workers run at once (`rat-kingdom-story-max-workers`; nil
+for no limit). A story started beyond that waits "for a free worker" and
+gets one, oldest first, as soon as another worker finishes, blocks, ends or
+is stopped. Waiting does not count as one of its workers.
+
 Finished work lands on the target branch only. Your checkout is not
 touched and nothing is pushed. Merge or discard that branch yourself.
 

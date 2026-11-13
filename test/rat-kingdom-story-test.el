@@ -876,5 +876,140 @@ Return what finish answered."
                    "work"))
     (should (eql (length rat-kingdom-story-test--started) 1))))
 
+;;;; The worker limit
+
+(defun rat-kingdom-story-test--queued-p (space id)
+  "Return non-nil if the story ID in SPACE is queued for a free worker."
+  (rat-kingdom-space-rd space (list 'story :identity id :phase "wait"
+                                    :awaiting "a free worker")))
+
+(ert-deftest rat-kingdom-story-test-workers-are-capped ()
+  (rat-kingdom-story-test-with-repo (space path)
+    (let ((rat-kingdom-story-max-workers 1))
+      (setq rat-kingdom-story-test--now 1000.0)
+      (rat-kingdom-story-start space "demo" "First" nil "S-1")
+      (rat-kingdom-story-start space "demo" "Second" nil "S-2")
+      (rat-kingdom-reaction-run space)
+      ;; One worker; the other story waits, with no worktree and no attempt.
+      (should (eql (length rat-kingdom-story-test--started) 1))
+      (should (equal (rat-kingdom-story-test--get space "S-1" :awaiting)
+                     "worker"))
+      (should (rat-kingdom-story-test--queued-p space "S-2"))
+      (should (equal (rat-kingdom-story-test--get space "S-2" :step)
+                     "implement"))
+      (should (eql (rat-kingdom-story-test--get space "S-2" :attempt) 0))
+      (should-not (rat-kingdom-story-test--get space "S-2" :run))
+      (should-not (rat-kingdom-run-list space "S-2"))
+      (should-not (file-exists-p (expand-file-name "worktrees/demo/S-2"
+                                                   rat-kingdom-directory)))
+      (should (string-search "(waiting for a free worker)"
+                             (rat-kingdom-king--story-line
+                              space (rat-kingdom-story-get space "S-2"))))
+      ;; Queued time is not counted against the step: only the running
+      ;; worker is reported stuck.
+      (setq rat-kingdom-story-test--now (+ 1000.0 8000))
+      (should (eql (rat-kingdom-story-watch space) 1))
+      (should (rat-kingdom-space-rd space '(stuck :identity "S-1")))
+      (should-not (rat-kingdom-space-rd space '(stuck :identity "S-2")))
+      (should (rat-kingdom-story-test--queued-p space "S-2"))
+      ;; When the first worker finishes, the second starts by itself, and
+      ;; its step's time starts then.
+      (setq rat-kingdom-story-test--now (+ 1000.0 9000))
+      (rat-kingdom-story-test--work space "S-1" "one.txt")
+      (rat-kingdom-reaction-run space)
+      (should (eql (length rat-kingdom-story-test--started) 2))
+      (should (equal (rat-kingdom-story-test--get space "S-2" :run) "S-2.1"))
+      (should (eql (rat-kingdom-story-test--get space "S-2" :attempt) 1))
+      (should (equal (rat-kingdom-story-test--get space "S-2" :entered)
+                     (+ 1000.0 9000)))
+      (should (zerop (rat-kingdom-story-watch space)))
+      (rat-kingdom-story-test--settle space "S-1")
+      (should-not (rat-kingdom-story-get space "S-1"))
+      (rat-kingdom-story-test--work space "S-2" "two.txt")
+      (rat-kingdom-story-test--settle space "S-2")
+      (should-not (rat-kingdom-story-get space "S-2"))
+      (should (equal (rat-kingdom-story-test--git
+                      path "show" "rk/integration:two.txt")
+                     "work"))
+      (should-not (rat-kingdom-reaction-failures space)))))
+
+(ert-deftest rat-kingdom-story-test-queue-is-served-in-order ()
+  (rat-kingdom-story-test-with-repo (space _path)
+    (let ((rat-kingdom-story-max-workers 1))
+      (dolist (id '("S-1" "S-2" "S-3" "S-4"))
+        (rat-kingdom-story-start space "demo" "Task" nil id))
+      (rat-kingdom-reaction-run space)
+      (should (eql (length rat-kingdom-story-test--started) 1))
+      ;; Cancelling the running story frees its worker for the oldest.
+      (rat-kingdom-story-cancel space "S-1")
+      (rat-kingdom-reaction-run space)
+      (should (equal (rat-kingdom-story-test--get space "S-2" :run) "S-2.1"))
+      (should (rat-kingdom-story-test--queued-p space "S-3"))
+      (should (rat-kingdom-story-test--queued-p space "S-4"))
+      ;; A queued story moved by hand joins the back of the queue.
+      (rat-kingdom-story-move space "S-3" 'ready "Again.")
+      (rat-kingdom-reaction-run space)
+      (should (rat-kingdom-story-test--queued-p space "S-3"))
+      (should (equal (rat-kingdom-story-test--get space "S-3" :reason)
+                     "Again."))
+      ;; A worker that blocks frees its place; S-4 now waited longest.
+      (rat-kingdom-story-test--call "S-2.1" "block" '(summary . "Stuck."))
+      (rat-kingdom-reaction-run space)
+      (should (equal (rat-kingdom-story-test--get space "S-2" :phase) "parked"))
+      (should (equal (rat-kingdom-story-test--get space "S-4" :run) "S-4.1"))
+      (should (rat-kingdom-story-test--queued-p space "S-3"))
+      ;; A queued story can be cancelled like any other.
+      (rat-kingdom-story-cancel space "S-3")
+      (should-not (rat-kingdom-story-get space "S-3"))
+      ;; Moving a running story to a final place frees its worker too.
+      (rat-kingdom-story-start space "demo" "Task" nil "S-5")
+      (rat-kingdom-reaction-run space)
+      (should (rat-kingdom-story-test--queued-p space "S-5"))
+      (rat-kingdom-story-move space "S-4" 'done)
+      (rat-kingdom-reaction-run space)
+      (should-not (rat-kingdom-story-get space "S-4"))
+      (should (equal (rat-kingdom-story-test--get space "S-5" :run) "S-5.1"))
+      (should (eql (length rat-kingdom-story-test--started) 4))
+      (should-not (rat-kingdom-reaction-failures space)))))
+
+(ert-deftest rat-kingdom-story-test-no-worker-limit ()
+  (rat-kingdom-story-test-with-repo (space _path)
+    (let ((rat-kingdom-story-max-workers nil))
+      (dotimes (n 5)
+        (rat-kingdom-story-start space "demo" "Task" nil (format "S-%d" n)))
+      (rat-kingdom-reaction-run space)
+      (should (eql (length rat-kingdom-story-test--started) 5))
+      (should-not (rat-kingdom-space-rd space '(story :awaiting
+                                                      "a free worker"))))))
+
+(ert-deftest rat-kingdom-story-test-queue-survives-a-restart ()
+  (rat-kingdom-story-test-with-repo (space _path)
+    (let ((rat-kingdom-story-max-workers 1)
+          (file (expand-file-name "space.db" rat-kingdom-directory)))
+      (rat-kingdom-story-start space "demo" "First" nil "S-1")
+      (rat-kingdom-story-start space "demo" "Second" nil "S-2")
+      (rat-kingdom-reaction-run space)
+      (should (rat-kingdom-story-test--queued-p space "S-2"))
+      ;; Emacs stops.
+      (rat-kingdom-space-close space)
+      (setq space (rat-kingdom-space-open file)
+            rat-kingdom-space--default space)
+      (clrhash rat-kingdom-run--handles)
+      (clrhash rat-kingdom-mcp--grants)
+      ;; The interrupted worker is replaced first; the queue keeps its place.
+      (should (equal (rat-kingdom-story-reconcile space)
+                     '(:runs ("S-1.1") :checks nil)))
+      (rat-kingdom-reaction-run space)
+      (should (equal (rat-kingdom-story-test--get space "S-1" :run) "S-1.2"))
+      (should (rat-kingdom-story-test--queued-p space "S-2"))
+      (should (eql (length rat-kingdom-story-test--started) 2))
+      ;; With room for another worker, reconciling starts the queue.
+      (let ((rat-kingdom-story-max-workers 2))
+        (rat-kingdom-story-reconcile space)
+        (rat-kingdom-reaction-run space)
+        (should (equal (rat-kingdom-story-test--get space "S-2" :run) "S-2.1"))
+        (should (eql (rat-kingdom-story-test--get space "S-2" :attempt) 1)))
+      (should-not (rat-kingdom-reaction-failures space)))))
+
 (provide 'rat-kingdom-story-test)
 ;;; rat-kingdom-story-test.el ends here
