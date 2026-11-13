@@ -1,0 +1,4 @@
+.agent-shell/
+*.elc
+.eldev/
+Eldev-local
