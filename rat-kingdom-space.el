@@ -66,7 +66,8 @@
     (fact . persistent)
     (policy . persistent)
     (event . affine)
-    (stuck . persistent))
+    (stuck . persistent)
+    (repo . persistent))
   "Alist of tuple categories and the modality each one defaults to.
 Writing a tuple in a category that is not listed here is an error.
 Add to it with `rat-kingdom-space-define-category'.")
@@ -223,8 +224,13 @@ announced.  A transaction inside another one joins it."
                file version rat-kingdom-space--schema-version))))
     space))
 
+(defcustom rat-kingdom-directory (locate-user-emacs-file "rat-kingdom/")
+  "Directory for rat-kingdom's own files: the space, worktrees, candidates."
+  :type 'directory
+  :group 'rat-kingdom)
+
 (defcustom rat-kingdom-space-default-file
-  (locate-user-emacs-file "rat-kingdom/space.db")
+  (expand-file-name "space.db" rat-kingdom-directory)
   "The file holding the space that rat-kingdom works in."
   :type 'file
   :group 'rat-kingdom)

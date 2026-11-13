@@ -128,6 +128,7 @@ is the audit trail and can be replayed.
 | `policy` | persistent | king | an epic or task override of configuration |
 | `event` | affine | ingress, engine | something happened outside or inside |
 | `stuck` | persistent | watchdog | a token that cannot move |
+| `repo` | persistent | user | a registered repository: path, target branch, check |
 
 ### 5.5 The rule: agents write, rules read
 
@@ -463,9 +464,15 @@ wait longer for review than for implementation.
 2. **Reactions** (built: `rat-kingdom-reaction.el`): definition, joins,
    one transaction per firing, recorded failures, once-per-match memory,
    scheduling after commit, external-write polling.
-3. **One story, by hand**: worktree, one rat through agent-shell with
-   `finish` and `block`, integration with a check. No workflow engine yet;
-   the steps are hand-written reactions.
+3. **One story, by hand** (built, not yet run with a real agent:
+   `rat-kingdom-git.el`, `rat-kingdom-mcp.el`, `rat-kingdom-run.el`,
+   `rat-kingdom-agent-shell.el`, `rat-kingdom-story.el`): repositories as
+   `repo` tuples, a worktree per story, one rat through agent-shell with
+   `finish` and `block`, the tool endpoint with a token per run, and
+   integration with a check. Five hand-written reactions move the token.
+   There is no review step yet: a story whose check passes is merged into
+   the target branch. Tested with real Git and a backend that starts no
+   agent.
 4. **Workflow engine**: compile `story` from data; tokens, timeouts,
    watchdog, manual move.
 5. **Recovery**: reconcile and resume, tested by killing Emacs mid-run.

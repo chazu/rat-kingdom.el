@@ -4,11 +4,38 @@ Swarm orchestration for coding agents, inside Emacs. A king you talk to,
 workers in their own Git worktrees, and a tuplespace they coordinate
 through. See [DESIGN.md](DESIGN.md).
 
-**Status:** early. The tuplespace, reactions and a space inspector exist. Nothing here starts an agent yet.
+**Status:** early. One story can go from a task to a merged commit: a
+worker in its own worktree, a check, a merge into an integration branch.
+There is no king, no review step and no workflow engine yet, and the path
+through a real agent has not been exercised.
+
+## Trying it
+
+You need [agent-shell](https://github.com/xenodium/agent-shell) set up for
+Claude Code.
+
+```elisp
+(add-to-list 'load-path "/path/to/rat-kingdom.el")
+(require 'rat-kingdom)
+```
+
+1. `M-x rat-kingdom-add-repo` registers a repository and, if you give one,
+   the command that must pass before work is merged. It creates the branch
+   `rk/integration` from `HEAD`.
+2. `M-x rat-kingdom-start-story` asks for a task. A Claude Code session
+   starts in the background, in a worktree under
+   `~/.emacs.d/rat-kingdom/worktrees/`, on a branch `rats/S-xxxx`.
+3. `M-x rat-kingdom-inspect` shows the story's token move: `implementing`,
+   `checking`, then gone, which means merged and archived (`A` shows the
+   archive). A story that stops is at `blocked` with a `:reason`.
+
+Finished work lands on `rk/integration` only. Your checkout is not touched
+and nothing is pushed. Merge or discard that branch yourself.
 
 ## Requirements
 
-Emacs 29.1 or later, built with SQLite support.
+Emacs 29.1 or later, built with SQLite support, and Git. Starting an
+agent needs agent-shell.
 
 ## The tuplespace
 
