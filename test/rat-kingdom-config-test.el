@@ -36,6 +36,7 @@ defaults come from have their standard values."
             (rat-kingdom-directory (expand-file-name "state/" ,root))
             (rat-kingdom-config--files (make-hash-table :test #'equal))
             (rat-kingdom-config--errors (make-hash-table :test #'equal))
+            (rat-kingdom-config--track-warnings (make-hash-table :test #'equal))
             (rat-kingdom-config-test--messages nil)
             (rat-kingdom-space-change-functions nil)
             (rat-kingdom-story-default-workflow "story")
@@ -467,6 +468,227 @@ branch of demo" p))
     ;; Nothing was written by trying.
     (should-not (rat-kingdom-config-policy-tuple space "demo" 'epic "E-1"))
     (should-not (rat-kingdom-config-validate-merged space "demo"))))
+
+;;;; :track
+
+(defun rat-kingdom-config-test--exclude-file (path)
+  "Return the info/exclude file of the checkout PATH's common Git directory."
+  (expand-file-name "info/exclude"
+                    (expand-file-name
+                     (rat-kingdom-git path "rev-parse" "--git-common-dir")
+                     path)))
+
+(defun rat-kingdom-config-test--bytes (file)
+  "Return the bytes of FILE, as a unibyte string, or nil if it is missing."
+  (and (file-exists-p file)
+       (with-temp-buffer
+         (set-buffer-multibyte nil)
+         (insert-file-contents-literally file)
+         (buffer-string))))
+
+(defun rat-kingdom-config-test--write-bytes (file bytes)
+  "Make FILE hold exactly BYTES, a unibyte string."
+  (make-directory (file-name-directory file) t)
+  (with-temp-buffer
+    (set-buffer-multibyte nil)
+    (insert bytes)
+    (let ((coding-system-for-write 'no-conversion))
+      (write-region nil nil file nil 'silent))))
+
+(defmacro rat-kingdom-config-test-with-warnings (var &rest body)
+  "Run BODY with VAR bound to the list of warnings displayed, newest first."
+  (declare (indent 1) (debug t))
+  `(let ((,var nil))
+     (cl-letf (((symbol-function 'display-warning)
+                (lambda (_type message &rest _)
+                  (push message ,var))))
+       ,@body)))
+
+(ert-deftest rat-kingdom-config-test-track-excludes-by-default ()
+  (rat-kingdom-config-test-with-repo (space path)
+    (let* ((file (rat-kingdom-config-test--exclude-file path))
+           (before (rat-kingdom-config-test--bytes file)))
+      ;; Git's own exclude file, with its comments.
+      (should (string-prefix-p "# git ls-files" before))
+      (should (equal (rat-kingdom-config-track-apply space "demo")
+                     '(:added ("/.rk/" "/.beads/") :removed nil :warnings nil)))
+      (should (equal (rat-kingdom-config-test--bytes file)
+                     (concat before "/.rk/\n/.beads/\n")))
+      ;; Idempotent: applied again, nothing changes.
+      (should (equal (rat-kingdom-config-track-apply space "demo")
+                     '(:added nil :removed nil :warnings nil)))
+      (should (equal (rat-kingdom-config-test--bytes file)
+                     (concat before "/.rk/\n/.beads/\n")))
+      ;; Applying :track never makes .rk, and writes no .gitignore.
+      (should-not (file-exists-p (expand-file-name ".rk" path)))
+      (should-not (file-exists-p (expand-file-name ".gitignore" path)))
+      ;; Untracked files in the directories kept out do not show.
+      (make-directory (expand-file-name ".beads" path))
+      (with-temp-file (expand-file-name ".beads/issues.jsonl" path))
+      (should (equal (rat-kingdom-git path "status" "--porcelain") "")))))
+
+(ert-deftest rat-kingdom-config-test-track-toggles-exactly-its-lines ()
+  (rat-kingdom-config-test-with-repo (space path)
+    (let* ((file (rat-kingdom-config-test--exclude-file path))
+           ;; CRLF, a byte that is not UTF-8, look-alike lines that are
+           ;; not exactly rat-kingdom's, and no final newline.
+           (original (concat "# mine\r\n*.log\n/.beads/x\n /.rk/\n"
+                             "/.beads/  \n\351t\351\n/.rk\nlast")))
+      (rat-kingdom-config-test--write-bytes file original)
+      (rat-kingdom-config-track-apply space "demo")
+      (should (equal (rat-kingdom-config-test--bytes file)
+                     (concat original "\n/.rk/\n/.beads/\n")))
+      ;; :track (:beads t) globally: only the .beads line goes.
+      (rat-kingdom-config-test--global "(:track (:beads t))" 10)
+      (should (equal (rat-kingdom-config-track-apply space "demo")
+                     '(:added nil :removed ("/.beads/") :warnings nil)))
+      (should (equal (rat-kingdom-config-test--bytes file)
+                     (concat original "\n/.rk/\n")))
+      ;; The repo layer wins sub-key by sub-key: :rk t there, :beads t
+      ;; still from the global file.
+      (rat-kingdom-config-test--repo-file path "(:track (:rk t))")
+      (should (equal (rat-kingdom-config-track-apply space "demo")
+                     '(:added nil :removed ("/.rk/") :warnings nil)))
+      (should (equal (rat-kingdom-config-test--bytes file)
+                     (concat original "\n")))
+      (should (equal (rat-kingdom-config-track-apply space "demo")
+                     '(:added nil :removed nil :warnings nil)))
+      ;; Back to the defaults: both lines again, at the end.
+      (rat-kingdom-config-test--global "(:workflow story)")
+      (rat-kingdom-config-test--repo-file path "(:attempts 2)" 10)
+      (rat-kingdom-config-track-apply space "demo")
+      (should (equal (rat-kingdom-config-test--bytes file)
+                     (concat original "\n/.rk/\n/.beads/\n")))
+      ;; A line rat-kingdom would have added, wherever it is and however
+      ;; often, goes, and nothing else does.
+      (rat-kingdom-config-test--write-bytes
+       file (concat "/.beads/\n" original "\n/.beads/\n/.rk/\n/.beads/"))
+      (rat-kingdom-config-test--global "(:track (:beads t :rk nil))" 20)
+      (should (equal (rat-kingdom-config-track-apply space "demo")
+                     '(:added nil :removed ("/.beads/") :warnings nil)))
+      (should (equal (rat-kingdom-config-test--bytes file)
+                     (concat original "\n/.rk/\n"))))))
+
+(ert-deftest rat-kingdom-config-test-track-makes-the-exclude-file ()
+  (rat-kingdom-config-test-with-repo (space path)
+    (let ((file (rat-kingdom-config-test--exclude-file path)))
+      (delete-directory (file-name-directory file) t)
+      ;; Tracked: nothing to remove, and no file made.
+      (rat-kingdom-config-test--global "(:track (:rk t :beads t))")
+      (rat-kingdom-config-track-apply space "demo")
+      (should-not (file-exists-p file))
+      (rat-kingdom-config-test--global "(:workflow story)" 10)
+      (rat-kingdom-config-track-apply space "demo")
+      (should (equal (rat-kingdom-config-test--bytes file)
+                     "/.rk/\n/.beads/\n")))))
+
+(ert-deftest rat-kingdom-config-test-track-linked-worktree-uses-common-dir ()
+  (rat-kingdom-config-test-with-repo (space path)
+    (let ((linked (expand-file-name "../linked/" path))
+          (file (rat-kingdom-config-test--exclude-file path)))
+      (rat-kingdom-git path "worktree" "add" "-q" "-b" "side" linked)
+      (rat-kingdom-space-put space 'repo :scope "linked" :identity "linked"
+                             :payload (list :path linked
+                                            :target "rk/integration"))
+      (should (equal (rat-kingdom-config-test--exclude-file linked) file))
+      (let ((before (rat-kingdom-config-test--bytes file)))
+        (rat-kingdom-config-track-apply space "linked")
+        (should (equal (rat-kingdom-config-test--bytes file)
+                       (concat before "/.rk/\n/.beads/\n"))))
+      (should-not (file-exists-p
+                   (expand-file-name ".git/worktrees/linked/info/exclude"
+                                     path)))
+      ;; The main checkout shares it: nothing more to add there.
+      (should (equal (rat-kingdom-config-track-apply space "demo")
+                     '(:added nil :removed nil :warnings nil)))
+      ;; The repo layer is the linked checkout's own .rk/config.eld.
+      (rat-kingdom-config-test--repo-file linked "(:track (:beads t))")
+      (should (equal (plist-get (rat-kingdom-config-track-apply space "linked")
+                                :removed)
+                     '("/.beads/"))))))
+
+(ert-deftest rat-kingdom-config-test-track-warns-of-tracked-files ()
+  (rat-kingdom-config-test-with-repo (space path)
+    (make-directory (expand-file-name ".beads" path))
+    (with-temp-file (expand-file-name ".beads/issues.jsonl" path)
+      (insert "{}\n"))
+    (with-temp-file (expand-file-name ".beads/config.yaml" path))
+    (rat-kingdom-git path "add" ".beads")
+    (rat-kingdom-git path "commit" "-q" "-m" "Track beads")
+    (let ((head (rat-kingdom-git path "rev-parse" "HEAD"))
+          (file (rat-kingdom-config-test--exclude-file path)))
+      (rat-kingdom-config-test-with-warnings warnings
+        (let ((result (rat-kingdom-config-track-apply space "demo")))
+          ;; The line is added anyway; the warning is returned and shown.
+          (should (equal (plist-get result :added) '("/.rk/" "/.beads/")))
+          (should (equal (length (plist-get result :warnings)) 1))
+          (should (string-match-p
+                   "Git already tracks 2 files in \\.beads of demo"
+                   (car (plist-get result :warnings))))
+          (should (string-search "git rm -r --cached .beads"
+                                 (car (plist-get result :warnings))))
+          (should (equal warnings (plist-get result :warnings)))
+          (should (equal (rat-kingdom-config-track-warnings "demo")
+                         (plist-get result :warnings))))
+        ;; Applied again: still returned, not shown again.
+        (should (plist-get (rat-kingdom-config-track-apply space "demo")
+                           :warnings))
+        (should (equal (length warnings) 1)))
+      ;; Nothing was removed from the index, and nothing committed.
+      (should (equal (rat-kingdom-git path "ls-files" "--" ".beads")
+                     ".beads/config.yaml\n.beads/issues.jsonl"))
+      (should (equal (rat-kingdom-git path "diff" "--cached" "--name-only") ""))
+      (should (equal (rat-kingdom-git path "rev-parse" "HEAD") head))
+      (should (equal (rat-kingdom-git path "status" "--porcelain") ""))
+      (should (eql (cl-count "/.beads/" (split-string
+                                         (rat-kingdom-config-test--bytes file)
+                                         "\n")
+                             :test #'equal)
+                   1))
+      ;; Tracking it is what the user wants: no warning then.
+      (rat-kingdom-config-test--global "(:track (:beads t))")
+      (rat-kingdom-config-test-with-warnings warnings
+        (should-not (plist-get (rat-kingdom-config-track-apply space "demo")
+                               :warnings))
+        (should-not warnings))
+      (should-not (rat-kingdom-config-track-warnings "demo"))
+      (should (equal (rat-kingdom-git path "ls-files" "--" ".beads")
+                     ".beads/config.yaml\n.beads/issues.jsonl")))))
+
+(ert-deftest rat-kingdom-config-test-track-apply-all ()
+  (rat-kingdom-config-test-with-repo (space path)
+    (rat-kingdom-space-put space 'repo :scope "gone" :identity "gone"
+                           :payload (list :path (expand-file-name "../gone/"
+                                                                  path)))
+    (rat-kingdom-config-test-with-warnings warnings
+      (should (equal (rat-kingdom-config-track-apply-all space)
+                     '(("demo" :added ("/.rk/" "/.beads/") :removed nil
+                        :warnings nil))))
+      ;; A checkout that is not there is skipped, without a warning.
+      (should-not warnings))))
+
+(ert-deftest rat-kingdom-config-test-repo-directory-applies-track-first ()
+  (rat-kingdom-config-test-with-repo (space path)
+    (let ((file (rat-kingdom-config-test--exclude-file path))
+          (rk (file-name-as-directory (expand-file-name ".rk" path)))
+          (seen nil))
+      (cl-letf* ((apply-track (symbol-function 'rat-kingdom-config-track-apply))
+                 ((symbol-function 'rat-kingdom-config-track-apply)
+                  (lambda (&rest arguments)
+                    (push (file-exists-p rk) seen)
+                    (apply apply-track arguments))))
+        (should (equal (rat-kingdom-config-repo-directory space "demo") rk))
+        ;; :track was applied before the directory was made.
+        (should (equal seen '(nil)))
+        (should (file-directory-p rk))
+        (should (member "/.rk/" (split-string
+                                 (rat-kingdom-config-test--bytes file) "\n")))
+        (with-temp-file (expand-file-name "config.eld" rk)
+          (insert "(:attempts 2)"))
+        (should (equal (rat-kingdom-git path "status" "--porcelain") ""))
+        ;; It is there: returned, and :track is not applied again.
+        (should (equal (rat-kingdom-config-repo-directory space "demo") rk))
+        (should (equal seen '(nil)))))))
 
 (provide 'rat-kingdom-config-test)
 ;;; rat-kingdom-config-test.el ends here
