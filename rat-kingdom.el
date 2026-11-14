@@ -71,6 +71,7 @@
 (require 'rat-kingdom-run)
 (require 'rat-kingdom-workflow)
 (require 'rat-kingdom-task)
+(require 'rat-kingdom-config)
 (require 'rat-kingdom-story)
 (require 'rat-kingdom-king)
 (require 'rat-kingdom-fact)
@@ -368,9 +369,9 @@ See `rat-kingdom-git-publish'."
   '("rat-kingdom-space" "rat-kingdom-reaction" "rat-kingdom-git"
     "rat-kingdom-mcp" "rat-kingdom-inspector" "rat-kingdom-agent-shell"
     "rat-kingdom-run" "rat-kingdom-workflow" "rat-kingdom-task"
-    "rat-kingdom-story" "rat-kingdom-king" "rat-kingdom-fact"
-    "rat-kingdom-message" "rat-kingdom-epic" "rat-kingdom-plan"
-    "rat-kingdom-foreman" "rat-kingdom")
+    "rat-kingdom-config" "rat-kingdom-story" "rat-kingdom-king"
+    "rat-kingdom-fact" "rat-kingdom-message" "rat-kingdom-epic"
+    "rat-kingdom-plan" "rat-kingdom-foreman" "rat-kingdom")
   "The package's files, each after the files it requires.")
 
 (defun rat-kingdom--directory ()
