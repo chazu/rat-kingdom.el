@@ -307,11 +307,11 @@ etc/a.conf, etc/b.conf\n" prompt))
     (let ((rat-kingdom-story-brief-functions
            (copy-sequence rat-kingdom-story-brief-functions)))
       (should (equal rat-kingdom-story-brief-functions
-                     '(rat-kingdom-fact-brief)))
+                     '(rat-kingdom-fact-brief rat-kingdom-message-brief)))
       (rat-kingdom-reload)
       (rat-kingdom-reload)
       (should (equal rat-kingdom-story-brief-functions
-                     '(rat-kingdom-fact-brief))))))
+                     '(rat-kingdom-fact-brief rat-kingdom-message-brief))))))
 
 (provide 'rat-kingdom-fact-test)
 ;;; rat-kingdom-fact-test.el ends here

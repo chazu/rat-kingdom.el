@@ -14,6 +14,7 @@
 (require 'rat-kingdom-king)
 (require 'rat-kingdom-task)
 (require 'rat-kingdom-fact)
+(require 'rat-kingdom-message)
 
 (defvar rat-kingdom-story-test--started nil
   "The runs the fake backend started, newest first, as (RUN PROMPT TOKEN).")
@@ -810,7 +811,7 @@ Return what finish answered."
                            '((jsonrpc . "2.0") (id . 7) (method . "tools/list")))
                           :result)
                          :tools))))
-      (should (equal (names 'rat) '("finish" "block" "note_fact")))
+      (should (equal (names 'rat) '("finish" "block" "note_fact" "inbox")))
       (should (member "story_start" (names 'king)))
       (should-not (member "finish" (names 'king)))
       (should-not (names 'nobody)))
@@ -857,7 +858,7 @@ Return what finish answered."
                                        (json-parse-string
                                         (cdr answer) :object-type 'alist
                                         :array-type 'list))))
-                             '("finish" "block" "note_fact"))))
+                             '("finish" "block" "note_fact" "inbox"))))
             (should (string-search
                      "404" (car (post (concat url "x") "{\"id\":1}"))))
             (should (string-search "400" (car (post url "not json"))))

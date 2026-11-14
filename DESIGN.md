@@ -124,7 +124,7 @@ is the audit trail and can be replayed.
 | `setup` | persistent | engine | how a new worktree's setup command came out |
 | `review` | linear | engine | a request for the king or user to judge |
 | `verdict` | linear | king or user | `pass` or `fix` with notes |
-| `message` | linear | anyone | text for one run, delivered at a turn boundary |
+| `message` | linear | engine, king `tell` | text for the king, or for a story's working run, delivered at a turn boundary |
 | `doc` | persistent | research worker | a design or research document and its status |
 | `fact` | persistent | workers | something learned about the repo |
 | `policy` | persistent | king | an epic or task override of configuration |
@@ -326,13 +326,50 @@ about whether the task is done.
 A `message` tuple is delivered as the run's next prompt when its turn ends.
 If the run is idle it is delivered at once.
 
-**Built for the king only.** Messages waiting for the king are given to it
-together, as one prompt, when it is between turns and the user has nothing
-typed but unsent in its buffer. Otherwise another try is made twenty
-seconds later and at the end of its next turn. A message is removed after
-it is sent, so a crash between the two repeats it and never loses it.
-Messages to workers are not built; a worker hears from the king only
-through the reason a story carries to its next worker.
+**Built for the king** (`rat-kingdom-king.el`). Messages waiting for the
+king are given to it together, as one prompt, when it is between turns and
+the user has nothing typed but unsent in its buffer. Otherwise another try
+is made twenty seconds later and at the end of its next turn. A message is
+removed after it is sent, so a crash between the two repeats it and never
+loses it.
+
+**Built for workers** (`rat-kingdom-message.el`). The king's `tell`
+writes a linear `message` tuple scoped to the story's repo, owned by the
+story so that it is archived with it, with the payload `:to-story STORY
+:from FROM :text TEXT`. FROM is `king`; `rat-kingdom-message-tell` takes
+another, for the foreman to come. Telling an unknown or finished story,
+or with blank text, is an error. A message is addressed to the story, not
+to a run, and is given only to the story's current run while that run is
+`working`: never to one that has reported with `finish` or `block`, and
+never to the king's. It is tried at once, when it is written (from a
+space change hook, soon after), and whenever the run ends a turn
+(`rat-kingdom-run-idle-functions`). All the story's waiting messages go
+in one prompt, oldest first, each headed `[rat-kingdom] Message from the
+king:` (or from FROM). `rat-kingdom-run-send` refuses while the agent is
+in a turn; a run that is between turns but refuses is tried again after
+`rat-kingdom-message-retry-interval` (20) seconds. Each message is
+retracted only after the send succeeded. A worker can also take its
+messages in the middle of a turn with `inbox`, which returns them oldest
+first with their senders and retracts them, or says `No messages.`; it
+refuses a run that is not its story's working run. `tell` answers which
+of these happened: delivered now, waiting for the run's turn to end (or
+its first turn, while it starts), or no worker right now, saying where
+the story is. A message sent while the story is at its check or review
+is read only if the story goes back to a worker.
+
+A story with no working run keeps its messages for its next worker: they
+are a section of its brief (8.3), under "Messages for this task from the
+king (oldest first):". They are retracted only when that run becomes
+`working`, that is when its backend has started the agent with the
+prompt, and only if the run's recorded prompt holds that section. A run
+that fails to start leaves them for the next. Which messages went into
+which brief is kept in memory, so if Emacs stops between the brief and
+the start, they stay in the space and are given again as a prompt once
+the restarted run is working: repeated, not lost. Since messages are
+tuples, a restart keeps them, and the worker that replaces one cut off
+by a restart (8.4) gets them in its brief. `status` shows "N messages
+waiting" on a story's line and `story_show` lists each one's sender and
+first line, through `rat-kingdom-king-story-note-functions`.
 
 ### 8.3 The brief
 
@@ -353,7 +390,8 @@ story's token and the run's id. rat-kingdom-fact.el puts one there: the
 repo's facts, newest first, with topic and files, capped at
 `rat-kingdom-fact-brief-max-count` (40) facts and
 `rat-kingdom-fact-brief-max-chars` (8000) characters, saying how many
-older ones are left out. A repo with no facts adds no section. Docs and
+older ones are left out. A repo with no facts adds no section. rat-kingdom-message.el adds
+another after it: the story's waiting messages (8.2). Docs and
 policy are not in the brief yet.
 
 ### 8.4 Recovery
@@ -481,8 +519,8 @@ go, and it lets a role be denied built-in tools as well.
 
 | Role | Lifetime | Tools |
 |---|---|---|
-| king | long-lived, global, no worktree | built: `status` (with the tracker tasks available, each with its epic and agent), `repo_add`, `repo_sync`, `workflow_list`, `story_start` (optionally from a `task`, with an `agent`; a task's `rk-agent:` and `rk-workflow:` labels are the defaults), `story_show`, `story_diff`, `story_move`, `story_cancel`, `verdict`, `publish`, `query`, `fact_forget`, `task_create`, `epic_create` (section 10). Planned: `tell`, `config_set` |
-| rat (worker) | one task | built: `finish`, `block`, `note_fact`. Planned: `inbox` |
+| king | long-lived, global, no worktree | built: `status` (with the tracker tasks available, each with its epic and agent), `repo_add`, `repo_sync`, `workflow_list`, `story_start` (optionally from a `task`, with an `agent`; a task's `rk-agent:` and `rk-workflow:` labels are the defaults), `story_show`, `story_diff`, `story_move`, `story_cancel`, `verdict`, `publish`, `query`, `fact_forget`, `task_create`, `epic_create` (section 10), `tell`. Planned: `config_set` |
+| rat (worker) | one task | built: `finish`, `block`, `note_fact`, `inbox` |
 | researcher | one task | `finish_doc`, `note_fact`, `block` |
 | foreman | one epic, optional | `story_start`, `tell`, `verdict`, `query`, limited to its epic |
 | ambient | one event | set by the reaction that starts it |
