@@ -67,7 +67,8 @@
 ;; warning.  `rat-kingdom-config-repo-directory' makes .rk, applying
 ;; :track first.
 ;;
-;; Nothing here changes how the engine reads its settings yet.
+;; The engine reads its settings through `rat-kingdom-config-get' and,
+;; for :setup and :check, `rat-kingdom-story-commands'.
 
 ;;; Code:
 

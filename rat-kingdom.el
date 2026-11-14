@@ -265,7 +265,9 @@ repository's name): ")))
                                     :check check :setup setup
                                     :task-prefix task-prefix)))
     (message "Registered %s; finished work is merged into %s%s%s"
-             (plist-get repo :name) (plist-get repo :target)
+             (plist-get repo :name)
+             (rat-kingdom-story-repo-target (rat-kingdom-space-default)
+                                            (plist-get repo :name))
              (if (plist-get repo :task-initialized)
                  (format "; created its br workspace, prefix %s, %s"
                          (rat-kingdom-task-br-prefix repo)
@@ -363,7 +365,8 @@ See `rat-kingdom-git-publish'."
                                                     "--format=%(refname:short)"
                                                     "refs/heads")
                                    "\n" t)
-                     nil t nil nil (plist-get repo :target)))
+                     nil t nil nil (rat-kingdom-story-repo-target
+                                    space (plist-get repo :name))))
             (remote (completing-read
                      "Remote: " (split-string (rat-kingdom-git path "remote")
                                               "\n" t)
