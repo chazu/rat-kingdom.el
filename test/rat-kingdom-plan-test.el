@@ -287,10 +287,24 @@ for an option, and its new value."
       (should (member "story-lite"
                       (mapcar (lambda (o) (gethash "value" o))
                               (gethash "workflows" data))))
-      ;; Options: not started by default, no limit.
+      ;; Options: not started by default, no feature branch, no limit.
       (should (eq (gethash "start" (gethash "options" data)) :false))
+      (should (eq (gethash "featureBranch" (gethash "options" data)) :false))
       (should (equal (gethash "maxParallel" (gethash "options" data)) ""))
       (should (equal (bound (component "start") "value") "/options/start"))
+      (should (equal (append (gethash "children" (component "options-column"))
+                             nil)
+                     '("start" "feature-branch" "feature-branch-note"
+                       "max-parallel")))
+      (should (equal (gethash "component" (component "feature-branch"))
+                     "CheckBox"))
+      (should (equal (gethash "label" (component "feature-branch"))
+                     "Feature branch: land the epic as one unit"))
+      (should (equal (bound (component "feature-branch") "value")
+                     "/options/featureBranch"))
+      (should (string-prefix-p "Applies when the epic is started"
+                               (gethash "text"
+                                        (component "feature-branch-note"))))
       ;; Approve sends the stories and options; Send back the notes.
       (let ((event (gethash "event" (gethash "action" (component "approve")))))
         (should (equal (gethash "name" event) "approve"))
@@ -465,7 +479,7 @@ number")
            "approve" (rat-kingdom-plan-test--context
                       '("start") t '("maxParallel") " 1 "))
         (advice-remove 'rat-kingdom-epic-start 'rat-kingdom-plan-test))
-      (should (equal started `((,space "demo" "T-1" 1)))))
+      (should (equal started `((,space "demo" "T-1" 1 nil)))))
     (should (eql (length (rat-kingdom-plan-test--creates fake)) 5))
     (let ((record (rat-kingdom-epic-record space "T-1" "demo")))
       (should (equal (plist-get (plist-get record :payload) :state) "running"))
@@ -482,7 +496,66 @@ now: S-" result)))
       (should (string-prefix-p "The user approved the epic plan Plan in the \
 plan surface: created epic T-1 with 4 tasks; started: yes." news))
       (should (string-search "The user started it from the plan surface, \
-with at most 1 stories at once, so do not ask again" news)))))
+with at most 1 stories at once, so do not ask again" news))
+      (should (string-search "It has no feature branch" news)))
+    (should-not (plist-get (plist-get (rat-kingdom-epic-record space "T-1"
+                                                               "demo")
+                                      :payload)
+                           :branch))))
+
+(ert-deftest rat-kingdom-plan-test-approve-and-start-with-a-feature-branch ()
+  (rat-kingdom-plan-test-with-stubs (space fake)
+    (should-not (cdr (rat-kingdom-plan-test--propose)))
+    (let ((path (plist-get (rat-kingdom-repo-get space "demo") :path))
+          (started nil))
+      (advice-add 'rat-kingdom-epic-start :before
+                  (lambda (&rest args) (push args started))
+                  '((name . rat-kingdom-plan-test)))
+      (unwind-protect
+          (rat-kingdom-plan-test--press
+           "approve" (rat-kingdom-plan-test--context
+                      '("start") t '("featureBranch") t))
+        (advice-remove 'rat-kingdom-epic-start 'rat-kingdom-plan-test))
+      (should (equal started `((,space "demo" "T-1" nil t))))
+      (let ((payload (plist-get (rat-kingdom-epic-record space "T-1" "demo")
+                                :payload)))
+        (should (equal (plist-get payload :state) "running"))
+        (should (equal (plist-get payload :branch) "rk/epic/T-1")))
+      (should (equal (rat-kingdom-git-rev path "rk/epic/T-1")
+                     (rat-kingdom-git-rev path "rk/integration"))))
+    (should (string-search "Started on its feature branch rk/epic/T-1"
+                           (rat-kingdom-plan-test--value "/result")))
+    (let ((news (car (rat-kingdom-king-test--news space))))
+      (should (string-search "started: yes." news))
+      (should (string-search "so do not ask again" news))
+      (should (string-search "It has a feature branch, rk/epic/T-1: its \
+stories merge into it, and it lands on the target after one check and \
+your epic_verdict." news))
+      (should-not (string-search "pass feature_branch" news)))))
+
+(ert-deftest rat-kingdom-plan-test-approve-feature-branch-without-start ()
+  (rat-kingdom-plan-test-with-stubs (space fake)
+    (should-not (cdr (rat-kingdom-plan-test--propose)))
+    (let ((path (plist-get (rat-kingdom-repo-get space "demo") :path))
+          (started nil))
+      (advice-add 'rat-kingdom-epic-start :before
+                  (lambda (&rest args) (push args started))
+                  '((name . rat-kingdom-plan-test)))
+      (unwind-protect
+          (rat-kingdom-plan-test--press
+           "approve" (rat-kingdom-plan-test--context '("featureBranch") t))
+        (advice-remove 'rat-kingdom-epic-start 'rat-kingdom-plan-test))
+      ;; Created, not started, and no branch made.
+      (should-not started)
+      (should (eql (length (rat-kingdom-plan-test--creates fake)) 5))
+      (should-not (ignore-errors (rat-kingdom-git-rev path "rk/epic/T-1"))))
+    (should (string-search "it is told to give it a feature branch"
+                           (rat-kingdom-plan-test--value "/result")))
+    (let ((news (car (rat-kingdom-king-test--news space))))
+      (should (string-search "started: no." news))
+      (should (string-search "Ask the user before you call epic_start. The \
+user wants a feature branch: pass feature_branch to epic_start when you \
+start it." news)))))
 
 ;;;; Send back and Cancel
 
