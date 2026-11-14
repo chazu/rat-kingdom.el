@@ -117,10 +117,12 @@ given one, oldest first, as workers end."
 (defvar rat-kingdom-story-event-functions nil
   "Functions called when something a person should know happens to a story.
 Each is called with the space, the event and the story's token.  The
-events are `done' (merged and about to be archived), `parked' (stopped
-until someone moves it; its `:reason' says why), `review' (it waits for
-a verdict) and `stuck'.  They are called inside the transaction that
-made the change.")
+events are `done' (at a final place and about to be archived; its
+`:integrated' is set if it was merged), `parked' (stopped until someone
+moves it; its `:reason' says why), `review' (it waits for a verdict),
+`stuck' and `cancelled' (cancelled by hand and about to be archived).
+They are called inside the transaction that made the change, before
+the story's task is closed or released.")
 
 (add-hook 'rat-kingdom-story-event-functions #'rat-kingdom-story--announce t)
 (add-hook 'rat-kingdom-story-event-functions #'rat-kingdom-task-story-event t)
@@ -179,6 +181,7 @@ a candidate its setup and then its check.")
                                 (or (plist-get payload :reason) "no reason given")))
                ('review "waits for a review")
                ('stuck "looks stuck")
+               ('cancelled "is cancelled")
                (_ (format "%s" event))))))
 
 (defun rat-kingdom-story--event (space event story)
@@ -247,16 +250,19 @@ CHANGES is merged into its payload."
     id))
 
 (defun rat-kingdom-story-start (space repo title &optional description id
-                                      workflow task agent)
+                                      workflow task agent epic)
   "Start a story in SPACE for the repository REPO and return its id.
 TITLE says what to do in a line; DESCRIPTION gives the acceptance
 criteria.  ID names the story; one is made up if it is nil.  WORKFLOW
 names its workflow; by default the repository's, and failing that
 `rat-kingdom-story-default-workflow'.  TASK, if given, is the id of
 the tracker's task the story works on: its `available' tuple is taken
-and the task is claimed for the story.  AGENT names the agent every
-worker of the story runs, \"claude\" or \"codex\"; by default
-`rat-kingdom-default-agent'.  An unknown agent is an error."
+and the task is claimed for the story.  A task has at most one story
+in progress, so another for it is an error.  AGENT names the agent
+every worker of the story runs, \"claude\" or \"codex\"; by default
+`rat-kingdom-default-agent'.  An unknown agent is an error.  EPIC, if
+given, is the id of the epic the story was started for, kept on its
+token as `:epic'."
   (let ((record (or (rat-kingdom-repo-get space repo)
                     (error "No repository called %s is registered" repo)))
         (id (or id (rat-kingdom-story--new-id space)))
@@ -274,6 +280,10 @@ worker of the story runs, \"claude\" or \"codex\"; by default
                                            (rat-kingdom-workflow-list) ", ")))))
       (rat-kingdom-space-with-transaction space
         (when task
+          (when-let* ((other (rat-kingdom-space-rd
+                              space (list 'story :scope repo :task task))))
+            (error "The story %s already works on the task %s; see story_show"
+                   (plist-get other :identity) task))
           (rat-kingdom-space-in space (list 'available :scope repo :identity task)
                                 :actor "user"))
         (rat-kingdom-space-out
@@ -283,11 +293,62 @@ worker of the story runs, \"claude\" or \"codex\"; by default
                          :phase "enter" :title title :description description
                          :agent agent :attempt 0
                          :entered (funcall rat-kingdom-space-now-function))
-                   (and task (list :task task)))
+                   (and task (list :task task))
+                   (and epic (list :epic epic)))
          :actor "user"))
       (when task
         (rat-kingdom-task-claim-for-story space repo task id))
       id)))
+
+(defun rat-kingdom-story-task (space repo id)
+  "Return the task ID of the repository REPO in SPACE, for a new story.
+The task is a property list with at least `:title' and `:description',
+taken from its `available' tuple or else from the tracker.  Signal an
+error if REPO has no tracker, the tracker has no such task, or a story
+already works on it."
+  (let ((adapter (or (rat-kingdom-task-adapter space repo)
+                     (error "The repository %s has no task tracker, so it \
+has no task %s; leave out task and give a title and description" repo id))))
+    (when-let* ((story (rat-kingdom-space-rd
+                        space (list 'story :scope repo :task id))))
+      (error "The story %s already works on the task %s; see story_show"
+             (plist-get story :identity) id))
+    (or (plist-get (rat-kingdom-space-rd
+                    space (list 'available :scope repo :identity id))
+                   :payload)
+        (condition-case err
+            (or (rat-kingdom-task-show adapter id)
+                (error "No such task"))
+          (error (error "The tracker of %s has no task %s (%s); see \
+Available tasks in status" repo id (error-message-string err)))))))
+
+(cl-defun rat-kingdom-story-start-for-task (space repo task
+                                                  &key title description
+                                                  agent workflow epic found)
+  "Start a story in SPACE for the task TASK of the repository REPO.
+Return the story's id.  The task is looked up as `rat-kingdom-story-task'
+does, unless FOUND gives it already.  TITLE defaults to the task's.
+Without DESCRIPTION the story's is the task's own text; with it, or if
+the task has none, it is DESCRIPTION followed by a line naming the task.
+AGENT and WORKFLOW default to the task's rk-agent: and rk-workflow:
+labels, then to the usual defaults.  EPIC, if given, is recorded on the
+token as `:epic'.  The task's `available' tuple is taken and the task is
+claimed for the story; see `rat-kingdom-story-start'."
+  (let* ((found (or found (rat-kingdom-story-task space repo task)))
+         (title (or title (plist-get found :title)
+                    (error "Give a title, or a task to take it from")))
+         (description
+          (if (and (not description) (plist-get found :description))
+              (plist-get found :description)
+            (concat (and description (concat description "\n\n"))
+                    (format "This story works on the tracker task %s: %s"
+                            task (plist-get found :title))))))
+    (rat-kingdom-story-start
+     space repo title description nil
+     (or workflow (rat-kingdom-task-workflow found))
+     task
+     (or agent (rat-kingdom-task-agent found))
+     epic)))
 
 (defun rat-kingdom-story-warnings (space repo)
   "Return what a person starting a story in REPO in SPACE should know.
@@ -1010,8 +1071,10 @@ who cancelled it.  Return a sentence saying what is left."
       (unless (rat-kingdom-space-in space (list 'story :id (plist-get story :id))
                                     :actor rat-kingdom-story--actor)
         (error "%s moved on meanwhile; look again" id))
-      (rat-kingdom-story--put space story :phase "cancelled" :step nil
-                              :awaiting nil)
+      (rat-kingdom-story--event
+       space 'cancelled
+       (rat-kingdom-story--put space story :phase "cancelled" :step nil
+                               :awaiting nil))
       (rat-kingdom-space-sweep space (plist-get story :owner))
       (rat-kingdom-story-dequeue space))
     (rat-kingdom-task-story-ended space story)

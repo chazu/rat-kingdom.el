@@ -599,16 +599,30 @@ A tracker failure is reported and otherwise ignored."
     (when-let* ((adapter (rat-kingdom-task-adapter space repo)))
       (rat-kingdom-task-claim adapter task story))))
 
-(defun rat-kingdom-task--settle (space repo task reason)
+(defvar rat-kingdom-task-settled-functions nil
+  "Functions called after the task of a story that ended is settled.
+Each is called with the space and the story's last token, once its task
+has been closed or released and its repository projected again, from a
+timer and outside any transaction.  It is called even if the tracker
+failed.  Add to it with `add-hook', so that reloading does not add a
+function twice.")
+
+(defun rat-kingdom-task--settle (space repo task reason &optional story)
   "Close TASK of REPO in SPACE saying REASON, or release it if REASON is nil.
-Then project REPO again.  Errors are reported and otherwise ignored."
-  (with-demoted-errors "rat-kingdom: settling a task: %S"
-    (when (rat-kingdom-space-db space)
+Then project REPO again, and call `rat-kingdom-task-settled-functions'
+with the token STORY, if given.  Errors are reported and otherwise
+ignored."
+  (when (rat-kingdom-space-db space)
+    (with-demoted-errors "rat-kingdom: settling a task: %S"
       (when-let* ((adapter (rat-kingdom-task-adapter space repo)))
         (if reason
             (rat-kingdom-task-close adapter task reason)
           (rat-kingdom-task-release adapter task))
-        (rat-kingdom-task-project space repo)))))
+        (rat-kingdom-task-project space repo)))
+    (when story
+      (dolist (function rat-kingdom-task-settled-functions)
+        (with-demoted-errors "rat-kingdom: task settled function: %S"
+          (funcall function space story))))))
 
 (defun rat-kingdom-task-story-ended (space story)
   "Settle the task of the token STORY in SPACE, which has ended.
@@ -620,7 +634,8 @@ from a timer, outside any transaction in progress."
                    space (plist-get story :scope) task
                    (when-let* ((head (plist-get payload :integrated)))
                      (format "Merged into %s at %s" (plist-get payload :target)
-                             (substring head 0 (min 7 (length head)))))))))
+                             (substring head 0 (min 7 (length head)))))
+                   story))))
 
 (defun rat-kingdom-task-story-event (space event story)
   "Settle the task of the token STORY in SPACE if EVENT is `done'.
