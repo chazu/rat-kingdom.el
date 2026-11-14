@@ -10,7 +10,9 @@ workflow from a worker through a check and a review to a merge into an
 integration branch; work cut off by an Emacs restart is recovered. Tasks
 come from a br (Rust Beads) workspace in each repository, and the king can
 plan an epic there as tasks with dependencies and, once you agree, run it:
-the engine starts each task's story as the task becomes ready. There is
+the engine starts each task's story as the task becomes ready. With
+a2ui installed you review, edit and approve the king's epic plan in a
+surface in Emacs. There is
 no research workflow yet, nor a feature branch per epic. The
 path through real agents has been run once for a worker and not yet for
 the king.
@@ -97,10 +99,11 @@ the king's `status`, and the others carry on.
 ### Planning an epic
 
 Ask the king to plan a piece of work as an epic. It proposes the stories
-and the dependencies between them, and waits for you to agree. Then it
-calls `epic_create`, which takes the repository, the epic's title, a
-description of its goal and how it will be judged as a whole, and the
-stories as a JSON array. Each story has a `key` of its own in the plan
+and the dependencies between them, and waits for you to agree: in the
+plan surface if you have a2ui (next section), otherwise in conversation.
+Once you agree in conversation it calls `epic_create`, which takes the
+repository, the epic's title, a description of its goal and how it will
+be judged as a whole, and the stories as a JSON array. Each story has a `key` of its own in the plan
 (`a`, `parser`), a `title` and a `description`, and may have `depends_on`
 (keys of other stories), `agent`, `workflow` and `priority`.
 
@@ -131,13 +134,58 @@ the br labels `rk-agent:NAME` and `rk-workflow:NAME`, and a story started
 for the task uses them unless it is given others. An epic itself is never
 available.
 
+### Reviewing an epic plan
+
+If [a2ui](https://github.com/chazu/a2ui.el) is installed, the king
+proposes an epic with `epic_propose` instead, which takes the same
+arguments as `epic_create` and checks the plan the same way. The plan
+opens in an a2ui surface titled "Epic plan: TITLE", shown in your main
+window area as a2ui shows surfaces (`a2ui-vui-display-action`), never in
+the window you are in and without moving the cursor. The king's turn
+ends at once; it is told what you decide.
+
+The surface shows the repository, the epic's title and description, and
+its stories in waves: wave 1 the stories that depend on nothing, each
+later wave those whose dependencies are all in earlier ones. For each
+story there is an include box, ticked; its key; its title and
+description, which you can edit (`RET` on the description edits it in a
+buffer of its own, `C-c C-c` to keep it); what it depends on; and
+pickers for its agent and its workflow, which sets its review mode
+(`story` is reviewed by the king, `story-lite` is not), with the king's
+choices selected. Below them:
+
+- **Start right away**, off unless you tick it, and **Max parallel**,
+  empty for no limit.
+- **Approve and create** keeps the stories ticked, with your edits,
+  checks the plan again and creates the epic and its tasks, as
+  `epic_create` does. If a story you kept depends on one you left out,
+  or anything else is wrong, nothing is created and the surface says
+  why. With Start right away ticked the epic is then run, as
+  `epic_start` does; that counts as your approval, so the king does not
+  ask again. The surface shows the epic's id and its tasks, and the king
+  is told the same.
+- **Send back with notes** sends the plan back to the king with what you
+  wrote, and nothing is created. The king revises it and proposes it
+  again in a fresh surface.
+- **Cancel** closes the surface, as does deleting it with `C-c C-k`, and
+  the king is told you dismissed it.
+
+Nothing is created or started until you press Approve. a2ui is optional:
+rat-kingdom loads it only when a plan is shown. Without it,
+`epic_propose` answers the king that the surface is unavailable, and the
+plan is agreed in conversation and made with `epic_create`. A plan whose
+surface is open when Emacs stops is lost, and the king is not told; ask
+it to propose the plan again.
+
 ### Epics
 
 **Plan.** The king proposes the epic's stories and their dependencies,
-and creates them with `epic_create` once you agree (above). Nothing runs
-yet.
+in the plan surface or in conversation, and the epic is created once you
+agree (above). Nothing runs yet, unless you ticked Start right away in
+the plan surface.
 
-**Start.** The king asks you before it calls `epic_start` with the
+**Start.** Unless you started it from the plan surface, the king asks
+you before it calls `epic_start` with the
 repository, the epic's id and, if you want, `max_parallel`, the most
 stories of the epic in progress at once. From then on the engine starts a
 story for each task of the epic as soon as the task is available: at
@@ -325,7 +373,8 @@ its own.
 ## Requirements
 
 Emacs 29.1 or later, built with SQLite support, Git, and br (Rust Beads)
-for tasks. Starting an agent needs agent-shell.
+for tasks. Starting an agent needs agent-shell. The epic plan surface
+needs [a2ui](https://github.com/chazu/a2ui.el), which is optional.
 
 ## The tuplespace
 
@@ -388,6 +437,14 @@ together, or not at all. The commentary in each file has the details.
 eldev test
 eldev compile -W
 eldev lint
+```
+
+The tests of the epic plan surface that draw it with the real a2ui are
+skipped unless a2ui and vui can be loaded. Name the directories that hold
+them, separated by colons:
+
+```sh
+RAT_KINGDOM_TEST_A2UI=~/.emacs.d/straight/build/a2ui:~/.emacs.d/straight/build/vui eldev test
 ```
 
 After pulling or merging changes to rat-kingdom, run `M-x rat-kingdom-reload`

@@ -80,10 +80,18 @@ the same worktree, with the reason. A story that cannot go on is parked at \
 
 Your tools are those of the rat-kingdom server: {tools}.
 
-To plan an epic, propose its stories and the dependencies between them to \
-the user first, and call `epic_create` only once they agree. `epic_create` \
+To plan an epic, prefer `epic_propose`: it shows the plan to the user in \
+Emacs, where they review and edit it, then approve it, send it back to you \
+with notes, or dismiss it, and you are told which. Approving creates the \
+epic, and starts it if they ask, so do not call `epic_create` for a plan you \
+proposed; when they send it back, revise it and propose it again. Use \
+`epic_create` directly only when the user has agreed to the plan in \
+conversation, or `epic_propose` says the plan surface is unavailable: \
+propose the stories and the dependencies between them to the user first, \
+and call `epic_create` only once they agree. `epic_create` \
 and `task_create` only record tasks in the tracker: they start nothing. Once \
-the user has approved the plan, ask them before you call `epic_start`. While \
+the user has approved the plan, ask them before you call `epic_start`, \
+unless they started it from the plan surface. While \
 an epic runs, the engine itself starts a story for each of its tasks as the \
 task becomes ready, and you review those stories as usual; you do not start \
 them. If one stops or is cancelled, you are told what waits on it; \
