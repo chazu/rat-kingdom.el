@@ -491,6 +491,17 @@ evaluated.
   any. A change to `:track` is applied at once.
 - The king never writes elisp. The registration layer is not written by
   `config_set`.
+- Built: `rat-kingdom-config-show` and `rat-kingdom-config-set`, offered
+  to the king alone, not to a worker or the foreman. A problem the merged
+  configuration already had (from a hand-edited file, say) does not
+  refuse a change that leaves it as it was; only a problem the change
+  would add does, so a broken configuration can be fixed one key at a
+  time. For `global` and `repo` the check covers each affected
+  repository and every epic and task with a policy in it. A file is
+  written under a two-line comment saying rat-kingdom wrote it and that
+  comments are not kept; a `repo` file's `.rk` is made by
+  `rat-kingdom-config-repo-directory`. Setting a key to the value it has
+  writes nothing.
 
 **Built: a feature branch per epic**, chosen per epic rather than through
 configuration: `epic_start` with `feature_branch` (section 10). The epic's
@@ -754,7 +765,7 @@ go, and it lets a role be denied built-in tools as well.
 
 | Role | Lifetime | Tools |
 |---|---|---|
-| king | long-lived, global, no worktree | built: `status` (with the tracker tasks available, each with its epic and agent), `repo_add`, `repo_sync`, `workflow_list`, `story_start` (optionally from a `task`, with an `agent`; a task's `rk-agent:` and `rk-workflow:` labels are the defaults), `story_show`, `story_diff`, `story_move`, `story_cancel`, `verdict`, `publish`, `query`, `fact_forget`, `task_create`, `epic_create`, `epic_propose` (the epic plan surface, 14.1), `epic_start` (optionally with a `feature_branch`, and a `foreman`), `epic_pause`, `epic_resume`, `epic_cancel`, `epic_retry`, `epic_show`, `epic_diff`, `epic_verdict` (section 10), `tell`, `foreman_start`, `foreman_stop`; `story_start` also takes a rarely needed `target`. Planned: `config_show` and `config_set` (7.3) |
+| king | long-lived, global, no worktree | built: `status` (with the tracker tasks available, each with its epic and agent), `repo_add`, `repo_sync`, `workflow_list`, `story_start` (optionally from a `task`, with an `agent`; a task's `rk-agent:` and `rk-workflow:` labels are the defaults), `story_show`, `story_diff`, `story_move`, `story_cancel`, `verdict`, `publish`, `query`, `fact_forget`, `task_create`, `epic_create`, `epic_propose` (the epic plan surface, 14.1), `epic_start` (optionally with a `feature_branch`, and a `foreman`), `epic_pause`, `epic_resume`, `epic_cancel`, `epic_retry`, `epic_show`, `epic_diff`, `epic_verdict` (section 10), `tell`, `foreman_start`, `foreman_stop`, `config_show` and `config_set` (7.3); `story_start` also takes a rarely needed `target` |
 | rat (worker) | one task | built: `finish`, `block`, `note_fact`, `inbox` |
 | researcher | one task | `finish_doc`, `note_fact`, `block` |
 | foreman | one epic, optional | built: `status` (its epic: the `epic_show` view and its stories' lines), `story_show`, `story_diff`, `verdict`, `tell`, `query`, `task_create` (its epic is the parent), `epic_retry`, `story_start` (for a task of its epic), `report` (to the king); every one but `query` limited to its epic |
