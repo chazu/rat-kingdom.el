@@ -17,9 +17,11 @@
 ;; reports to the king.
 ;;
 ;; A foreman is a run like the king's, with the id F-EPIC, the role
-;; `foreman', and `:epic' and `:repo' in its record.  It runs Claude
-;; Code unless it is started with another agent; the user's
-;; `rat-kingdom-default-agent' is for workers, not for it.  It works in
+;; `foreman', and `:epic' and `:repo' in its record.  It runs the agent
+;; it is started with, or else the configuration's `:agents' `:foreman'
+;; for its repository and epic (rat-kingdom-config.el), Claude Code
+;; unless configured; the user's `rat-kingdom-default-agent' is for
+;; workers, not for it.  It works in
 ;; the repository's checkout, which it is told not to edit.  The king
 ;; starts one with `foreman_start' (or `epic_start' with `foreman'), for
 ;; a running or paused epic, and stops it with `foreman_stop'.  The
@@ -56,6 +58,7 @@
 (require 'rat-kingdom-mcp)
 (require 'rat-kingdom-run)
 (require 'rat-kingdom-agent-shell)
+(require 'rat-kingdom-config)
 (require 'rat-kingdom-story)
 (require 'rat-kingdom-task)
 (require 'rat-kingdom-king)
@@ -231,10 +234,12 @@ registered" repo))
 
 (defun rat-kingdom-foreman-start (space epic &optional agent)
   "Start a foreman for the running or paused epic EPIC in SPACE.
-It runs AGENT, a name from `rat-kingdom-agent-names', by default
-Claude Code.  Signal an error if the epic is not running or paused, or
-already has a foreman running.  Return the foreman's run id.  The
-foreman's agent is started by the reaction `rat-kingdom-run-launch'."
+It runs AGENT, a name from `rat-kingdom-agent-names', by default the
+configuration's `:agents' `:foreman' for the epic's repository and the
+epic (rat-kingdom-config.el), which is Claude Code unless configured.
+Signal an error if the epic is not running or paused, or already has a
+foreman running.  Return the foreman's run id.  The foreman's agent
+is started by the reaction `rat-kingdom-run-launch'."
   (let* ((record (rat-kingdom-epic--get space epic))
          (id (rat-kingdom-foreman-id epic))
          (state (rat-kingdom-epic--payload record :state)))
@@ -245,9 +250,14 @@ or paused" epic state))
       (error "The epic %s already has a foreman running, %s" epic id))
     (rat-kingdom-foreman--launch
      space record
-     (if (rat-kingdom-epic--blank-p agent)
-         rat-kingdom-agent-shell-fallback-agent
-       (rat-kingdom-agent-name agent))
+     (rat-kingdom-agent-name
+      (if (rat-kingdom-epic--blank-p agent)
+          (or (plist-get (rat-kingdom-config-get
+                          space :agents :repo (plist-get record :scope)
+                          :epic epic)
+                         :foreman)
+              rat-kingdom-agent-shell-fallback-agent)
+        agent))
      (rat-kingdom-foreman--prompt space record nil))))
 
 (defun rat-kingdom-foreman--hand-over (space id why)
@@ -629,7 +639,9 @@ ready to land, and review its landing. Start one when the user asks, or for \
 a big epic. It stops by itself when the epic ends."
     '((:name "epic" :type string :description "The epic's id.")
       (:name "agent" :type string :optional t
-       :description "The agent it runs, claude or codex. Default claude."))
+       :description "The agent it runs, claude or codex. Default the \
+configured :agents :foreman for the repository and epic, claude unless \
+configured."))
   (let* ((id (rat-kingdom-foreman-start space (arg 'epic) (arg 'agent)))
          (record (rat-kingdom-epic--get space (arg 'epic)))
          (run (rat-kingdom-run-get space id)))

@@ -2,8 +2,8 @@
 
 ;;; Commentary:
 
-;; Registering a repository makes its br workspace, kept out of Git,
-;; when it has none, and turning on `rat-kingdom-mode' does the same
+;; Registering a repository makes its br workspace, kept out of Git
+;; unless :track says otherwise, when it has none, and turning on `rat-kingdom-mode' does the same
 ;; for those already registered.  The tests use real Git in disposable
 ;; repositories and the fake br of rat-kingdom-story-test.el.
 
@@ -87,8 +87,16 @@ Return its directory.  It is not registered."
       (should-not (plist-get (rat-kingdom-repo-add space other)
                              :task-initialized))
       (should (equal (rat-kingdom-git-test--inits) '("init --prefix demo")))
-      (should (equal (rat-kingdom-task-test--exclude other) exclude))
-      (should (equal (rat-kingdom-task-test--status other) "?? .beads/")))))
+      (should (equal (with-temp-buffer
+                       (insert-file-contents
+                        (expand-file-name ".beads/issues.jsonl" other))
+                       (buffer-string))
+                     ""))
+      ;; br init never runs there, but the exclude line follows :track,
+      ;; whose default keeps .beads (and .rk) out of Git.
+      (should (equal (rat-kingdom-task-test--exclude other)
+                     (concat exclude "/.rk/\n/.beads/\n")))
+      (should (equal (rat-kingdom-task-test--status other) "")))))
 
 (ert-deftest rat-kingdom-git-test-register-fails-cleanly ()
   (rat-kingdom-story-test-with-repo (space _path)
@@ -123,6 +131,90 @@ Return its directory.  It is not registered."
       (should (plist-get (rat-kingdom-repo-add space other) :task-initialized))
       (should (eql (rat-kingdom-task-test--excluded other) 0))
       (should (equal (rat-kingdom-task-test--status other) "?? .beads/")))))
+
+;;;; :track
+
+(defun rat-kingdom-git-test--exclude-lines (path)
+  "Return the lines of the info/exclude of the checkout PATH that are not comments."
+  (seq-remove (lambda (line) (string-prefix-p "#" line))
+              (split-string (or (rat-kingdom-task-test--exclude path) "")
+                            "\n" t)))
+
+(defun rat-kingdom-git-test--global-config (text)
+  "Write TEXT as the global configuration file."
+  (let ((file (expand-file-name "config.eld" rat-kingdom-directory)))
+    (make-directory (file-name-directory file) t)
+    (with-temp-file file (insert text))
+    (set-file-times file (time-subtract nil (random 1000)))))
+
+(ert-deftest rat-kingdom-git-test-register-applies-track ()
+  (rat-kingdom-story-test-with-repo (space path)
+    ;; By default both are kept out: br init adds its line, then :track
+    ;; the other.
+    (should (equal (rat-kingdom-git-test--exclude-lines path)
+                   '("/.beads/" "/.rk/")))
+    ;; :track (:beads t): br init adds no line, and none is left.
+    (rat-kingdom-git-test--global-config "(:track (:beads t))")
+    (let* ((other (rat-kingdom-git-test--repo space "other"))
+           (repo (rat-kingdom-repo-add space other)))
+      (should (plist-get repo :task-initialized))
+      (should-not (plist-get repo :track-warnings))
+      (should (equal (rat-kingdom-git-test--exclude-lines other) '("/.rk/")))
+      (should (equal (rat-kingdom-task-test--status other) "?? .beads/"))
+      ;; Registered again with the line there by hand: it is taken out.
+      (with-temp-buffer
+        (insert-file-contents
+         (expand-file-name ".git/info/exclude" other))
+        (goto-char (point-max))
+        (insert "/.beads/\n")
+        (write-region nil nil (expand-file-name ".git/info/exclude" other)))
+      (rat-kingdom-repo-add space other)
+      (should (equal (rat-kingdom-git-test--exclude-lines other) '("/.rk/"))))))
+
+(ert-deftest rat-kingdom-git-test-register-warns-of-tracked-beads ()
+  (rat-kingdom-story-test-with-repo (space _path)
+    (rat-kingdom-king-test--start space)
+    (let* ((other (rat-kingdom-git-test--repo space "other"))
+           (head nil)
+           (warnings nil))
+      (make-directory (expand-file-name ".beads" other))
+      (with-temp-file (expand-file-name ".beads/issues.jsonl" other))
+      (rat-kingdom-git other "add" ".beads")
+      (rat-kingdom-git other "commit" "-q" "-m" "Track beads")
+      (setq head (rat-kingdom-git other "rev-parse" "HEAD"))
+      (cl-letf (((symbol-function 'display-warning)
+                 (lambda (_type message &rest _) (push message warnings))))
+        (let ((text (rat-kingdom-king-test--ok "repo_add" `(path . ,other))))
+          (should (string-match-p
+                   "Warning: Git already tracks 1 file in \\.beads of other"
+                   text))))
+      (should (equal (length warnings) 1))
+      (should (string-match-p "other at .*warning (tell the user): Git \
+already tracks 1 file in \\.beads"
+                              (rat-kingdom-king-status space)))
+      ;; br was not run, nothing left the index, nothing was committed.
+      (should (equal (rat-kingdom-git-test--inits) '("init --prefix demo")))
+      (should (equal (rat-kingdom-git other "ls-files" "--" ".beads")
+                     ".beads/issues.jsonl"))
+      (should (equal (rat-kingdom-git other "rev-parse" "HEAD") head))
+      (should (equal (rat-kingdom-git other "diff" "--cached" "--name-only")
+                     ""))
+      (should (equal (rat-kingdom-git-test--exclude-lines other)
+                     '("/.rk/" "/.beads/"))))))
+
+(ert-deftest rat-kingdom-git-test-mode-applies-track ()
+  (rat-kingdom-story-test-with-repo (space path)
+    (let ((rat-kingdom-mode nil)
+          (rat-kingdom--watch-timer nil))
+      (should (equal (rat-kingdom-git-test--exclude-lines path)
+                     '("/.beads/" "/.rk/")))
+      (rat-kingdom-git-test--global-config "(:track (:rk t))")
+      (unwind-protect
+          (rat-kingdom-mode 1)
+        (rat-kingdom-mode -1))
+      (should (equal (rat-kingdom-git-test--exclude-lines path)
+                     '("/.beads/")))
+      (should (equal (rat-kingdom-task-test--status path) "")))))
 
 (ert-deftest rat-kingdom-git-test-repo-add-tool-reports-init ()
   (rat-kingdom-story-test-with-repo (space _path)

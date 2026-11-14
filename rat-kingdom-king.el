@@ -41,6 +41,7 @@
 (require 'rat-kingdom-mcp)
 (require 'rat-kingdom-run)
 (require 'rat-kingdom-workflow)
+(require 'rat-kingdom-config)
 (require 'rat-kingdom-story)
 (require 'rat-kingdom-task)
 
@@ -69,7 +70,8 @@ otherwise). Nothing is pushed unless the user asks, and the user's checkout \
 is never touched. The user merges the target branch into their own branch \
 when they choose.
 - Each story follows a workflow. `story` has a review by you before the \
-merge; `story-lite` has none. Use `workflow_list` to see them.
+merge; `story-lite` has none. The user may define others in workflow \
+files, some for one repository only. Use `workflow_list` to see them.
 - Every repository has a task tracker, a br (Rust Beads) workspace in the \
 user's checkout, which repo_add creates, kept out of Git, if it is \
 missing. `status` lists its ready tasks under Available tasks. A story started for one of them should pass its id \
@@ -297,6 +299,83 @@ not add a function twice.")
           (push section sections))))
     (nreverse sections)))
 
+(defun rat-kingdom-king--run-text (value)
+  "Return the setup or check VALUE, from the configuration, as text.
+VALUE is an argument list or a list of command names."
+  (if (stringp (car value))
+      (combine-and-quote-strings value)
+    (mapconcat #'symbol-name value " ")))
+
+(defun rat-kingdom-king--repo-line (space repo)
+  "Return the line of status that describes REPO, a repository record, in SPACE.
+Its target, check, setup and workflow are the configured ones
+\(rat-kingdom-config.el); the agent its workers run is named if it is
+not the one configured for every repository.  What is wrong with its
+configuration as a whole is said briefly."
+  (let* ((name (plist-get repo :name))
+         (config (rat-kingdom-config-merged space :repo name))
+         (worker (plist-get (plist-get config :agents) :worker))
+         (problems (rat-kingdom-config-validate-merged space name)))
+    (format "- %s at %s; target %s; check %s%s; workflow %s%s%s%s%s"
+            name (plist-get repo :path)
+            (plist-get config :target)
+            (if (plist-get config :check)
+                (rat-kingdom-king--run-text (plist-get config :check))
+              "none")
+            (if (plist-get config :setup)
+                (concat "; setup "
+                        (rat-kingdom-king--run-text (plist-get config :setup)))
+              "")
+            (plist-get config :workflow)
+            (if (equal worker (plist-get (rat-kingdom-config-get space :agents)
+                                         :worker))
+                ""
+              (format "; workers run %s" worker))
+            (if problems
+                (format "; its configuration is wrong (tell the user): %s"
+                        (string-join problems "; "))
+              "")
+            (if-let* ((problem (rat-kingdom-task-workspace-error name)))
+                (format "; it has no br workspace, so no tasks (tell \
+the user): %s" problem)
+              "")
+            (mapconcat (lambda (warning)
+                         (concat "; warning (tell the user): " warning))
+                       (rat-kingdom-config-track-warnings name)
+                       ""))))
+
+(defun rat-kingdom-king--config-errors (space repos)
+  "Return the configuration being ignored, as a section of status, or \"\".
+That is what `rat-kingdom-config-errors' knows of the global file, the
+global workflow files and the repositories REPOS, records in SPACE, with
+their workflow files, epics and tasks.  Every workflow file of REPOS is
+read first, so that one that is wrong is known."
+  (rat-kingdom-config-workflows space)
+  (dolist (repo repos)
+    (with-demoted-errors "rat-kingdom: reading workflow files: %S"
+      (rat-kingdom-config-workflows space repo)))
+  (if-let* ((global (rat-kingdom-config-global-file))
+            (errors
+             (append
+              (cl-remove-if-not (lambda (error) (equal (car error) global))
+                                (rat-kingdom-config-errors))
+              (cl-remove-if-not
+               (lambda (error)
+                 (or (string-suffix-p "/.rk/config.eld" (car error))
+                     (string-prefix-p "the policy of " (car error))))
+               (cl-remove-duplicates
+                (mapcan (lambda (repo)
+                          (rat-kingdom-config-errors (plist-get repo :name)))
+                        repos)
+                :test #'equal))
+              (rat-kingdom-king--workflow-errors repos))))
+      (concat "\n\nConfiguration ignored (tell the user; fixing the file \
+is enough):\n"
+              (mapconcat (lambda (error)
+                           (format "- %s: %s" (car error) (cadr error)))
+                         errors "\n"))
+    ""))
+
 (defun rat-kingdom-king-status (space)
   "Return a text describing the repositories, stories and tasks in SPACE.
 The ready tasks of every repository are projected first; a tracker
@@ -309,31 +388,15 @@ that fails is reported and otherwise ignored."
     (concat
      "Repositories:\n"
      (if repos
-         (mapconcat
-          (lambda (repo)
-            (format "- %s at %s; target %s; check %s%s; workflow %s%s"
-                    (plist-get repo :name) (plist-get repo :path)
-                    (plist-get repo :target)
-                    (if (plist-get repo :check)
-                        (combine-and-quote-strings (plist-get repo :check))
-                      "none")
-                    (if (plist-get repo :setup)
-                        (concat "; setup " (combine-and-quote-strings
-                                            (plist-get repo :setup)))
-                      "")
-                    (or (plist-get repo :workflow)
-                        rat-kingdom-story-default-workflow)
-                    (if-let* ((problem (rat-kingdom-task-workspace-error
-                                        (plist-get repo :name))))
-                        (format "; it has no br workspace, so no tasks (tell \
-the user): %s" problem)
-                      "")))
-          repos "\n")
+         (mapconcat (lambda (repo) (rat-kingdom-king--repo-line space repo))
+                    repos "\n")
        "- none registered; use repo_add")
      (format "\n\nAgents: %s. New stories' workers run %s \
-(rat-kingdom-default-agent) unless story_start names another."
+(rat-kingdom-default-agent, unless configured) unless story_start names \
+another."
              (string-join (rat-kingdom-agent-names) ", ")
-             rat-kingdom-default-agent)
+             (plist-get (rat-kingdom-config-get space :agents) :worker))
+     (rat-kingdom-king--config-errors space repos)
      "\n\nStories in progress:\n"
      (if stories
          (mapconcat (lambda (story) (rat-kingdom-king--story-line space story))
@@ -452,8 +515,16 @@ see `rat-kingdom-king-story-start'."
                      (format "Check: %s%s%s"
                              (plist-get checked :value)
                              (if (plist-get checked :check)
-                                 (format " (%s)" (combine-and-quote-strings
-                                                  (plist-get checked :check)))
+                                 (format
+                                  " (%s)"
+                                  (if (and (equal (plist-get checked :value)
+                                                  "pass")
+                                           (plist-get checked :names))
+                                      (string-join (plist-get checked :names)
+                                                   ", ")
+                                    (rat-kingdom-story-command-text
+                                     (plist-get checked :check)
+                                     (plist-get checked :command))))
                                " (the repository has no check; the merge was \
 clean)")
                              (if (and (equal (plist-get checked :value) "fail")
@@ -600,7 +671,7 @@ the work another way."
                        name (plist-get payload :at)
                        (or (plist-get payload :reason) "none given"))))
             ('review
-             (when (equal (plist-get (rat-kingdom-story--step story) :with)
+             (when (equal (plist-get (rat-kingdom-story--step space story) :with)
                           'king)
                (format "%s passed its check and waits for your review. Read \
 story_diff and story_show for %s, then give a verdict."
@@ -971,19 +1042,116 @@ available to start stories from."
     nil
   (rat-kingdom-king-status space))
 
+(defun rat-kingdom-king--workflow-origin (entry &optional shadowed)
+  "Return text saying where the workflow of ENTRY comes from.
+ENTRY is (WORKFLOW ORIGIN FILE), as `rat-kingdom-config-workflows'
+returns.  SHADOWED, if given, is the entry it takes the place of."
+  (pcase-let ((`(,_ ,origin ,file) entry))
+    (concat
+     (pcase origin
+       ('built-in "built-in")
+       ('global (format "global, from %s" file))
+       (_ (format "this repository's own, from %s" file)))
+     (if shadowed
+         (format "; it shadows the %s one" (nth 1 shadowed))
+       ""))))
+
+(defun rat-kingdom-king-workflow-list (space &optional repo)
+  "Return the text of `workflow_list' in SPACE, for REPO or for all.
+REPO is a repository's name.  With REPO, it describes each workflow a
+story there can follow and where it comes from.  Without, it describes
+those every repository has, and then, for each registered repository,
+names the workflows it has and describes those its own files define.
+Workflow files being ignored follow, with the reason."
+  (when (and repo (not (rat-kingdom-repo-get space repo)))
+    (error "No repository called %s is registered" repo))
+  (let* ((every (rat-kingdom-config-workflows space))
+         (repos (if repo
+                    (list (rat-kingdom-repo-get space repo))
+                  (rat-kingdom-repo-list space)))
+         (sections nil))
+    (cl-flet ((describe (entry)
+                (rat-kingdom-workflow-describe
+                 (car entry)
+                 (rat-kingdom-king--workflow-origin
+                  entry
+                  (and (eq (nth 1 entry) 'repo)
+                       (cl-find (plist-get (car entry) :name) every
+                                :key (lambda (other)
+                                       (plist-get (car other) :name))
+                                :test #'equal))))))
+      (unless repo
+        (push (concat "Workflows of every repository:\n\n"
+                      (mapconcat #'describe every "\n\n"))
+              sections))
+      (dolist (record repos)
+        (let* ((name (plist-get record :name))
+               (entries (rat-kingdom-config-workflows space record))
+               (own (cl-remove-if-not (lambda (entry)
+                                        (eq (nth 1 entry) 'repo))
+                                      entries)))
+          (push (if repo
+                    (concat (format "Workflows of %s:\n\n" name)
+                            (mapconcat #'describe entries "\n\n"))
+                  (concat
+                   (format "Repository %s has: %s." name
+                           (mapconcat
+                            (lambda (entry)
+                              (format "%s (%s)" (plist-get (car entry) :name)
+                                      (if (eq (nth 1 entry) 'repo)
+                                          "its own"
+                                        (nth 1 entry))))
+                            entries ", "))
+                   (if own
+                       (concat "\n\n" (mapconcat #'describe own "\n\n"))
+                     "")))
+                sections))))
+    (when-let* ((errors (rat-kingdom-king--workflow-errors repos)))
+      (push (concat "Workflow files ignored (tell the user; fixing the file \
+is enough):\n"
+                    (mapconcat (lambda (error)
+                                 (format "- %s: %s" (car error) (cadr error)))
+                               errors "\n"))
+            sections))
+    (string-join (nreverse sections) "\n\n")))
+
+(defun rat-kingdom-king--workflow-errors (repos)
+  "Return the workflow files being ignored that affect REPOS, records.
+They are the global workflow files and those of REPOS, as (SOURCE
+MESSAGE) from `rat-kingdom-config-errors'."
+  (let ((global (rat-kingdom-config-workflow-directory)))
+    (cl-remove-duplicates
+     (append
+      (cl-remove-if-not (lambda (error) (string-prefix-p global (car error)))
+                        (rat-kingdom-config-errors))
+      (cl-remove-if-not
+       (lambda (error)
+         (string-match-p "/\\.rk/workflows/[^/]*\\'" (car error)))
+       (mapcan (lambda (repo)
+                 (rat-kingdom-config-errors (plist-get repo :name)))
+               repos)))
+     :test #'equal)))
+
 (rat-kingdom-king--deftool "workflow_list"
-    "List the workflows a story can follow, with their steps."
-    nil
-  (mapconcat #'rat-kingdom-workflow-describe (rat-kingdom-workflow-list)
-             "\n\n"))
+    "List the workflows a story can follow, with their steps, and where \
+each comes from: built in, a global workflow file, or a repository's own \
+file in .rk/workflows, which counts for that repository only. Without \
+repo, the workflows of every repository and then what each registered \
+repository has; with repo, that repository's."
+    '((:name "repo" :type string :optional t
+       :description "A registered repository, to list only the workflows \
+its stories can follow."))
+  (rat-kingdom-king-workflow-list space (arg 'repo)))
 
 (rat-kingdom-king--deftool "repo_add"
     "Register a Git repository so that stories can be started in it, or \
 change the settings of one already registered. Creates the target branch \
 from HEAD if it does not exist. Every repository needs a br (Rust Beads) \
 workspace for its tasks: if the checkout has no .beads directory one is \
-initialized, kept out of Git through info/exclude, and the answer says so. \
-An existing .beads is left alone. If br is missing or fails, nothing is \
+initialized, and the answer says so. An existing .beads is left alone. \
+.rk and .beads are kept out of Git through info/exclude, or not, as the \
+configuration's :track says; the answer warns if Git already tracks files \
+in one kept out (tell the user). If br is missing or fails, nothing is \
 registered."
     '((:name "path" :type string
        :description "Absolute path of the repository's checkout.")
@@ -1003,8 +1171,21 @@ rk/integration. It must not be a branch that is checked out.")
       (:name "task_prefix" :type string :optional t
        :description "The issue prefix of the br workspace, if one has to \
 be created. Default the repository's name."))
-  (when (and (arg 'workflow) (not (rat-kingdom-workflow-get (arg 'workflow))))
-    (error "There is no workflow called %s" (arg 'workflow)))
+  (when-let* ((workflow (arg 'workflow))
+              (where (list :path (expand-file-name (arg 'path))
+                           :name (or (plist-get (cl-find
+                                                 (expand-file-name (arg 'path))
+                                                 (rat-kingdom-repo-list space)
+                                                 :key (lambda (repo)
+                                                        (plist-get repo :path))
+                                                 :test #'equal)
+                                                :name)
+                                     (file-name-nondirectory
+                                      (directory-file-name
+                                       (expand-file-name (arg 'path))))))))
+    (unless (rat-kingdom-config-workflow space workflow where)
+      (error "There is no workflow called %s; there are: %s" workflow
+             (rat-kingdom-config-workflow-names space where))))
   (let ((repo (rat-kingdom-repo-add
                space (expand-file-name (arg 'path))
                :check (and (arg 'check) (split-string-and-unquote (arg 'check)))
@@ -1014,12 +1195,19 @@ be created. Default the repository's name."))
     (string-join
      (cons (format "Registered %s at %s. Finished work is merged into %s.%s"
                    (plist-get repo :name) (plist-get repo :path)
-                   (plist-get repo :target)
+                   (rat-kingdom-story-repo-target space (plist-get repo :name))
                    (if (plist-get repo :task-initialized)
                        (format " Initialized a br workspace there with the \
-prefix %s, kept out of Git." (rat-kingdom-task-br-prefix repo))
+prefix %s, %s." (rat-kingdom-task-br-prefix repo)
+                               (if (plist-get (rat-kingdom-config-get
+                                               space :track
+                                               :repo (plist-get repo :name))
+                                              :beads)
+                                   "to be tracked in Git"
+                                 "kept out of Git"))
                      ""))
-           (rat-kingdom-story-warnings space (plist-get repo :name)))
+           (append (plist-get repo :track-warnings)
+                   (rat-kingdom-story-warnings space (plist-get repo :name))))
      "\nWarning: ")))
 
 (rat-kingdom-king--deftool "repo_sync"
@@ -1124,6 +1312,68 @@ rk/integration. It is pushed to the branch of the same name.")
   (rat-kingdom-git-publish-describe
    (rat-kingdom-git-publish space (arg 'repo) (arg 'branch)
                             :remote (arg 'remote) :actor rat-kingdom-king-id)))
+
+(rat-kingdom-king--deftool "config_show"
+    "Show the effective configuration of a repository, or of an epic or \
+task in it: every key (workflow, target, commands, setup, check, agents, \
+timeouts, attempts, max-workers, track) with its value and the layer it \
+came from (defaults, global, registration, repo, epic or task), the files \
+the layers are read from, any configuration being ignored and why, and \
+anything the merged result cannot resolve, such as an unknown workflow or \
+an undefined command. It never writes."
+    '((:name "repo" :type string :description "The repository's name.")
+      (:name "epic" :type string :optional t
+       :description "An epic's id, to include its policy.")
+      (:name "task" :type string :optional t
+       :description "A task's id, to include its policy."))
+  (rat-kingdom-config-show space (arg 'repo) :epic (arg 'epic)
+                           :task (arg 'task)))
+
+(rat-kingdom-king--deftool "config_set"
+    "Set or remove one configuration key at one layer. Change it only when \
+the user asks. Layers: global (every repository; the file config.eld in \
+the rat-kingdom directory), repo (one repository; <repo>/.rk/config.eld \
+in the user's checkout), epic or task (a policy kept by rat-kingdom). A \
+more specific layer wins, and for commands, agents, timeouts and track, \
+sub-key by sub-key. Keys and the layers that may set them: workflow (all), \
+target (global, repo), commands (global, repo), setup (global, repo), check \
+(all), agents (all), timeouts (all), attempts (all), max-workers (global), \
+track (global, repo). Before writing, the change is checked for every \
+repository it affects: an unknown workflow, an undefined command name, a \
+key not allowed at the layer, a value of the wrong shape or a target that \
+is not a local branch refuses it, and nothing is written. A file is \
+rewritten whole, so comments in it are not kept. A change to track is \
+applied to info/exclude at once. Returns what changed and the value now in \
+effect."
+    '((:name "layer" :type string
+       :description "global, repo, epic or task.")
+      (:name "key" :type string
+       :description "The key, e.g. check or :check.")
+      (:name "value" :type string
+       :description "The new value, as Emacs Lisp text, read and never \
+evaluated; nil removes the key from the layer, so a less specific layer's \
+value applies. workflow: a name, story. target: a branch, \
+\"rk/integration\". commands: a property list from command name to \
+argument list, (:lint (\"npx\" \"eslint\" \".\") :test (\"npm\" \"test\")). \
+setup and check: an argument list run without a shell, (\"make\" \"test\"), \
+or command names defined in commands, run in order, (lint test). agents: \
+(:worker codex :foreman claude). timeouts: seconds, (:worker 7200 :check \
+1800). attempts and max-workers: a positive integer, 5. track: (:rk nil \
+:beads t), t to keep the directory in Git, nil to keep it out. A value for \
+commands, agents, timeouts or track replaces that key's whole value at \
+this layer; sub-keys it leaves out come from the layers below.")
+      (:name "repo" :type string :optional t
+       :description "The repository's name. Required for the repo, epic \
+and task layers.")
+      (:name "epic" :type string :optional t
+       :description "The epic's id, for the epic layer.")
+      (:name "task" :type string :optional t
+       :description "The task's id, for the task layer."))
+  (rat-kingdom-config-set
+   space (arg 'layer) (arg 'key)
+   (rat-kingdom-config-read-value (alist-get 'value arguments))
+   :repo (arg 'repo) :epic (arg 'epic) :task (arg 'task)
+   :actor rat-kingdom-king-id))
 
 (provide 'rat-kingdom-king)
 ;;; rat-kingdom-king.el ends here

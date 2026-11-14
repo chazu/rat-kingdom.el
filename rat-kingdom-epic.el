@@ -97,6 +97,7 @@
 (require 'rat-kingdom-workflow)
 (require 'rat-kingdom-task)
 (require 'rat-kingdom-agent-shell)
+(require 'rat-kingdom-config)
 (require 'rat-kingdom-story)
 (require 'rat-kingdom-king)
 
@@ -129,13 +130,16 @@ or spaces."
     (format "there is no agent called %s; there are: %s"
             agent (string-join (rat-kingdom-agent-names) ", "))))
 
-(defun rat-kingdom-epic--workflow-problem (workflow)
-  "Return what is wrong with the workflow name WORKFLOW, or nil."
+(defun rat-kingdom-epic--workflow-problem (workflow &optional space repo)
+  "Return what is wrong with the workflow name WORKFLOW, or nil.
+With SPACE and REPO, a repository's name, WORKFLOW must resolve for
+REPO, which may have workflow files of its own; otherwise it must be
+one every repository has."
   (unless (or (rat-kingdom-epic--blank-p workflow)
-              (rat-kingdom-workflow-get workflow))
+              (rat-kingdom-config-workflow space workflow (and space repo)))
     (format "there is no workflow called %s; there are: %s"
-            workflow (mapconcat (lambda (workflow) (plist-get workflow :name))
-                                (rat-kingdom-workflow-list) ", "))))
+            workflow (rat-kingdom-config-workflow-names space
+                                                        (and space repo)))))
 
 (defun rat-kingdom-epic--priority-problem (value)
   "Return what is wrong with VALUE as a priority, or nil.
@@ -239,7 +243,7 @@ description" index))
             :priority (get 'priority)
             :index index))))
 
-(defun rat-kingdom-epic-check (stories)
+(defun rat-kingdom-epic-check (stories &optional space repo)
   "Check the plan STORIES and return its stories, in an order to create.
 STORIES is a list of alists, as JSON objects arrive from a tool call,
 or a JSON text of such an array.  Each has `key', `title' and
@@ -253,7 +257,9 @@ Signal an error naming every problem found, if any: a story that is not
 an object, a missing, blank or repeated key, a blank title or
 description, a dependency on a key that is not in the plan, a cycle of
 dependencies, an unknown agent or workflow, or a priority that is not
-from 0 to 4."
+from 0 to 4.  A workflow is known if it resolves for REPO, a
+repository's name, in SPACE, when they are given, and otherwise if
+every repository has it."
   (when (stringp stories)
     (setq stories (condition-case err
                       (json-parse-string stories :object-type 'alist
@@ -296,7 +302,7 @@ from 0 to 4."
                               (plist-get plan :agent))))
             (problem "%s" agent))
           (when-let* ((workflow (rat-kingdom-epic--workflow-problem
-                                 (plist-get plan :workflow))))
+                                 (plist-get plan :workflow) space repo)))
             (problem "%s" workflow))
           (when-let* ((priority (rat-kingdom-epic--priority-problem
                                  (plist-get plan :priority))))
@@ -363,7 +369,7 @@ tracker fails partway, signal an error saying what was created."
   (when (rat-kingdom-epic--blank-p description)
     (error "Nothing was created: the epic's description is blank"))
   (let* ((adapter (rat-kingdom-epic--adapter space repo))
-         (plans (rat-kingdom-epic-check stories))
+         (plans (rat-kingdom-epic-check stories space repo))
          (epic nil)
          (created nil)                  ; in the order they were made
          (edges nil)                    ; newest first
@@ -497,7 +503,7 @@ error that names it."
                   (rat-kingdom-epic--priority-problem
                    (plist-get options :priority))
                   (rat-kingdom-epic--agent-problem agent)
-                  (rat-kingdom-epic--workflow-problem workflow)
+                  (rat-kingdom-epic--workflow-problem workflow space repo)
                   (and parent (member parent depends)
                        (format "%s is the parent; it cannot also be depended \
 on" parent)))
@@ -713,10 +719,11 @@ A held task is not started by dispatch until `epic_retry' clears it."
 
 (defun rat-kingdom-epic--target (space record)
   "Return the branch the epic RECORD in SPACE lands on.
-That is the `:target' it was started with, or else its repository's."
+That is the `:target' it was started with, or else its repository's,
+from its configuration (`rat-kingdom-story-repo-target')."
   (or (rat-kingdom-epic--payload record :target)
-      (plist-get (rat-kingdom-repo-get space (plist-get record :scope))
-                 :target)))
+      (and (rat-kingdom-repo-get space (plist-get record :scope))
+           (rat-kingdom-story-repo-target space (plist-get record :scope)))))
 
 (defun rat-kingdom-epic--tell (space repo text &optional epic)
   "Leave the king a message in SPACE, about REPO, saying TEXT.
@@ -1044,7 +1051,8 @@ cause, then epic_resume lands it again."
 (defun rat-kingdom-epic--land (space repo id from)
   "Begin landing the epic ID of REPO in SPACE, if it is in a state of FROM.
 Its feature branch is merged into its target in a fresh candidate
-worktree, and the repository's setup and check run there, by
+worktree, and the setup and check configured for the repository and
+the epic run there (`rat-kingdom-story-commands'), by
 `rat-kingdom-story-check-candidate', as for a story.  The outcome is a
 `checked' tuple named by the epic, which
 `rat-kingdom-epic-landing-checked' takes from there.  The epic is
@@ -1072,7 +1080,8 @@ registered" repo)))
            (rat-kingdom-epic--payload record :candidate)
            (format "Merge the epic %s: %s" id
                    (rat-kingdom-epic--payload record :title))
-           (plist-get repo-record :check) (plist-get repo-record :setup)))
+           (rat-kingdom-story-commands space :check repo id)
+           (rat-kingdom-story-commands space :setup repo id)))
       (error
        (rat-kingdom-epic--stop-landing
         space repo id (format "its check could not be begun: %s"
@@ -1131,13 +1140,15 @@ merges cleanly into %s, which has moved on since." name target branch target))
         (format "The epic %s cannot land on %s: with its branch %s merged \
 into %s, the repository's setup %s exited with %s, so the check did not run."
                 name target branch target
-                (combine-and-quote-strings (plist-get checked :setup))
+                (rat-kingdom-story-command-text (plist-get checked :setup)
+                                                (plist-get checked :command))
                 (plist-get checked :exit)))
        (_
         (format "The epic %s cannot land on %s: with its branch %s merged \
 into %s, the check %s exited with %s."
                 name target branch target
-                (combine-and-quote-strings (plist-get checked :check))
+                (rat-kingdom-story-command-text (plist-get checked :check)
+                                                (plist-get checked :command))
                 (plist-get checked :exit))))
      (format "\n\nMerge %s into your branch (git merge %s), %s, make sure the \
 repository's check passes, and commit. Your branch is cut from %s and your \
@@ -1786,7 +1797,7 @@ first sentence, and CLOSING, if given, the last paragraph."
                                                   :awaiting)
                                        rat-kingdom-story-free-worker)
                                 (format "queued for a free worker: at most %s \
-workers run at once" rat-kingdom-story-max-workers))
+workers run at once" (rat-kingdom-config-get space :max-workers)))
                                (t (rat-kingdom-epic--story-place story))))))
                   started "\n"))
               "No story was started now.")
@@ -1897,7 +1908,7 @@ not %s"
       (error "The epic %s has no tasks; plan them with epic_create or \
 task_create" id))
     (let* ((target (and feature-branch
-                        (plist-get (rat-kingdom-repo-get space repo) :target)))
+                        (rat-kingdom-story-repo-target space repo)))
            (branch (and feature-branch (rat-kingdom-epic-branch-name id))))
       (when branch
         (rat-kingdom-epic--prepare-branch

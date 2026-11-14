@@ -44,6 +44,7 @@
 (require 'subr-x)
 (require 'rat-kingdom-space)
 (require 'rat-kingdom-workflow)
+(require 'rat-kingdom-config)
 (require 'rat-kingdom-task)
 (require 'rat-kingdom-agent-shell)
 (require 'rat-kingdom-story)
@@ -200,14 +201,17 @@ stories keep the order they were given in."
    (mapcar (lambda (name) (rat-kingdom-plan--obj "label" name "value" name))
            (rat-kingdom-agent-names))))
 
-(defun rat-kingdom-plan--workflow-options ()
-  "Return the workflow picker's options, the repository's first."
+(defun rat-kingdom-plan--workflow-options (&optional space repo)
+  "Return the workflow picker's options, the repository's first.
+With SPACE, they are the workflows REPO's stories can follow, which
+may include REPO's own; without, those every repository has."
   (vconcat
    (list (rat-kingdom-plan--obj "label" "the repository's" "value" ""))
    (mapcar (lambda (workflow)
              (let ((name (plist-get workflow :name)))
                (rat-kingdom-plan--obj "label" name "value" name)))
-           (rat-kingdom-workflow-list))))
+           (mapcar #'car (rat-kingdom-config-workflows space
+                                                      (and space repo))))))
 
 (defun rat-kingdom-plan--depends-text (story)
   "Return what STORY depends on, as text for the surface."
@@ -364,13 +368,14 @@ told to use it when it starts the epic.")
        "result" "Text" "text" (rat-kingdom-plan--path "/result")
        "tone" (rat-kingdom-plan--path "/resultTone"))))))
 
-(defun rat-kingdom-plan--data (repo title description stories)
+(defun rat-kingdom-plan--data (repo title description stories &optional space)
   "Return the surface's data model for the epic TITLE of REPO.
-DESCRIPTION is the epic's, and STORIES its checked stories."
+DESCRIPTION is the epic's, and STORIES its checked stories.  SPACE,
+if given, holds REPO, whose workflows are offered."
   (rat-kingdom-plan--obj
    "header" (rat-kingdom-plan--header repo title description)
    "agents" (rat-kingdom-plan--agent-options)
-   "workflows" (rat-kingdom-plan--workflow-options)
+   "workflows" (rat-kingdom-plan--workflow-options space repo)
    "stories" (vconcat
               (mapcar (lambda (story)
                         (rat-kingdom-plan--obj
@@ -388,12 +393,14 @@ DESCRIPTION is the epic's, and STORIES its checked stories."
    "result" ""
    "resultTone" "muted"))
 
-(defun rat-kingdom-plan-surface (surface-id repo title description stories)
+(defun rat-kingdom-plan-surface (surface-id repo title description stories
+                                            &optional space)
   "Return the A2UI messages that draw the surface SURFACE-ID.
 It shows the epic TITLE of REPO, with DESCRIPTION, and its STORIES, as
 `rat-kingdom-epic-check' returns them, in the order they were given.
 The messages are hash tables, as a2ui takes them: createSurface,
-updateComponents and updateDataModel."
+updateComponents and updateDataModel.  SPACE, if given, holds REPO,
+whose own workflows are then offered too."
   (cl-flet ((message (type &rest pairs)
               (rat-kingdom-plan--obj
                "version" "v0.9"
@@ -407,7 +414,7 @@ updateComponents and updateDataModel."
                                                                   stories)))
      (message "updateDataModel" "path" "/"
               "value" (rat-kingdom-plan--data repo title description
-                                              stories)))))
+                                              stories space)))))
 
 (defun rat-kingdom-plan--set (surface-id path value)
   "Set PATH of the data of the surface SURFACE-ID to VALUE, if it is shown."
@@ -446,7 +453,7 @@ error saying what is wrong; nothing is created."
     (error "Nothing was created: the epic's title is blank"))
   (when (rat-kingdom-epic--blank-p description)
     (error "Nothing was created: the epic's description is blank"))
-  (cl-sort (copy-sequence (rat-kingdom-epic-check stories)) #'<
+  (cl-sort (copy-sequence (rat-kingdom-epic-check stories space repo)) #'<
            :key (lambda (story) (plist-get story :index))))
 
 (defun rat-kingdom-plan-show (space repo title description stories)
@@ -468,7 +475,7 @@ Return the surface's id."
                      :description description :stories checked :state 'open)
                rat-kingdom-plan--plans)
       (dolist (message (rat-kingdom-plan-surface surface-id repo title
-                                                 description checked))
+                                                 description checked space))
         (rat-kingdom-plan--send message))
       (rat-kingdom-plan--display surface-id)
       surface-id)))
@@ -606,7 +613,7 @@ create nothing.  Return the epic's id, or nil if nothing was created."
             (error (push (error-message-string err) problems) nil))))
     (unless problems
       (condition-case err
-          (rat-kingdom-epic-check kept)
+          (rat-kingdom-epic-check kept space repo)
         (error (setq problems (error-message-string err)))))
     (if problems
         (progn (rat-kingdom-plan--refuse surface-id problems) nil)

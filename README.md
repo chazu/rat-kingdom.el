@@ -451,6 +451,28 @@ steps from one place, a place with no way on, no way to a final place. A
 repository names the workflow its stories follow, and a story can name
 its own.
 
+Workflows can also be files, one per file, read and never evaluated:
+`workflows/*.eld` in `rat-kingdom-directory` for every repository, and
+`.rk/workflows/*.eld` in a repository's checkout for that repository
+only. A file holds the same property list with `:name` added:
+
+```elisp
+(:name quick
+ :doc "As story-lite, with a shorter worker limit."
+ :places (ready checking integrating done blocked)
+ :start ready
+ :final (done)
+ :steps ((implement :from ready :spawn rat :to checking :timeout 1800)
+         (check :from checking :check t :pass integrating :fail ready)
+         (integrate :from integrating :merge t :to done :stale checking)))
+```
+
+A repository's file shadows a global or built-in workflow of the same
+name there, and a global file replaces a built-in one. A file that does
+not hold together is ignored, and the king's `status` says why. Files
+are read again when they change, and a changed workflow applies from a
+story's next move. `workflow_list` shows where each workflow comes from.
+
 ## Requirements
 
 Emacs 29.1 or later, built with SQLite support, Git, and br (Rust Beads)

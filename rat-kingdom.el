@@ -71,6 +71,7 @@
 (require 'rat-kingdom-run)
 (require 'rat-kingdom-workflow)
 (require 'rat-kingdom-task)
+(require 'rat-kingdom-config)
 (require 'rat-kingdom-story)
 (require 'rat-kingdom-king)
 (require 'rat-kingdom-fact)
@@ -144,7 +145,8 @@ again (%s), %d to set up again (%s)"
 While this is on, stories move: workers are started, their results
 checked, reviewed and merged.  Turning it on first recovers whatever
 an earlier Emacs left in flight, makes sure every registered repository
-has a br workspace, then shows each repository's ready tasks as
+has a br workspace and that its info/exclude says what the
+configuration's :track says, then shows each repository's ready tasks as
 `available' in the space, and starts the stories running epics have
 room for.  A repository whose workspace cannot be made is reported and
 skipped."
@@ -159,6 +161,8 @@ skipped."
         (rat-kingdom-reconcile)
         (with-demoted-errors "rat-kingdom: making br workspaces: %S"
           (rat-kingdom-task-ensure-all space))
+        (with-demoted-errors "rat-kingdom: applying :track: %S"
+          (rat-kingdom-config-track-apply-all space))
         (with-demoted-errors "rat-kingdom: projecting tasks: %S"
           (rat-kingdom-task-project-all space))
         (with-demoted-errors "rat-kingdom: running epics: %S"
@@ -238,8 +242,10 @@ candidate worktree; work is merged only if it succeeds.  SETUP is a
 command of the same kind run in each new worktree before a worker
 starts and before the check, such as one that installs dependencies.
 If the checkout has no br workspace, one is created with TASK-PREFIX,
-by default the repository's name, as its issue prefix, and kept out
-of Git; see `rat-kingdom-task-br-ensure'."
+by default the repository's name, as its issue prefix; see
+`rat-kingdom-task-br-ensure'.  .rk and .beads are then kept out of
+Git, or not, as the configuration's :track says; see
+`rat-kingdom-config-track-apply'."
   (interactive
    (let ((path (read-directory-name "Repository: " nil nil t)))
      (list path
@@ -258,12 +264,22 @@ repository's name): ")))
   (let ((repo (rat-kingdom-repo-add (rat-kingdom-space-default) path
                                     :check check :setup setup
                                     :task-prefix task-prefix)))
-    (message "Registered %s; finished work is merged into %s%s"
-             (plist-get repo :name) (plist-get repo :target)
+    (message "Registered %s; finished work is merged into %s%s%s"
+             (plist-get repo :name)
+             (rat-kingdom-story-repo-target (rat-kingdom-space-default)
+                                            (plist-get repo :name))
              (if (plist-get repo :task-initialized)
-                 (format "; created its br workspace, prefix %s, kept out of Git"
-                         (rat-kingdom-task-br-prefix repo))
-               ""))))
+                 (format "; created its br workspace, prefix %s, %s"
+                         (rat-kingdom-task-br-prefix repo)
+                         (if (plist-get (rat-kingdom-config-get
+                                         (rat-kingdom-space-default) :track
+                                         :repo (plist-get repo :name))
+                                        :beads)
+                             "to be tracked in Git"
+                           "kept out of Git"))
+               "")
+             (mapconcat (lambda (warning) (concat "\nWarning: " warning))
+                        (plist-get repo :track-warnings) ""))))
 
 ;;;###autoload
 (defun rat-kingdom-start-story (repo title description &optional agent)
@@ -301,9 +317,9 @@ nil means `rat-kingdom-default-agent'."
   "Put STORY at PLACE of its workflow, with NOTE saying why."
   (interactive
    (let* ((story (rat-kingdom--read-story "Move story: "))
+          (space (rat-kingdom-space-default))
           (workflow (rat-kingdom-story--workflow
-                     (rat-kingdom-story-get (rat-kingdom-space-default)
-                                            story))))
+                     space (rat-kingdom-story-get space story))))
      (list story
            (completing-read "To: " (plist-get workflow :places) nil t)
            (read-string "Note for the next worker (may be empty): "))))
@@ -349,7 +365,8 @@ See `rat-kingdom-git-publish'."
                                                     "--format=%(refname:short)"
                                                     "refs/heads")
                                    "\n" t)
-                     nil t nil nil (plist-get repo :target)))
+                     nil t nil nil (rat-kingdom-story-repo-target
+                                    space (plist-get repo :name))))
             (remote (completing-read
                      "Remote: " (split-string (rat-kingdom-git path "remote")
                                               "\n" t)
@@ -368,9 +385,9 @@ See `rat-kingdom-git-publish'."
   '("rat-kingdom-space" "rat-kingdom-reaction" "rat-kingdom-git"
     "rat-kingdom-mcp" "rat-kingdom-inspector" "rat-kingdom-agent-shell"
     "rat-kingdom-run" "rat-kingdom-workflow" "rat-kingdom-task"
-    "rat-kingdom-story" "rat-kingdom-king" "rat-kingdom-fact"
-    "rat-kingdom-message" "rat-kingdom-epic" "rat-kingdom-plan"
-    "rat-kingdom-foreman" "rat-kingdom")
+    "rat-kingdom-config" "rat-kingdom-story" "rat-kingdom-king"
+    "rat-kingdom-fact" "rat-kingdom-message" "rat-kingdom-epic"
+    "rat-kingdom-plan" "rat-kingdom-foreman" "rat-kingdom")
   "The package's files, each after the files it requires.")
 
 (defun rat-kingdom--directory ()

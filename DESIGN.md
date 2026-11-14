@@ -127,7 +127,7 @@ is the audit trail and can be replayed.
 | `message` | linear | engine, king `tell` | text for the king, or for a story's working run, delivered at a turn boundary |
 | `doc` | persistent | research worker | a design or research document and its status |
 | `fact` | persistent | workers | something learned about the repo |
-| `policy` | persistent | king | an epic or task override of configuration |
+| `policy` | persistent | king `config_set` | an epic or task override of configuration (7.3), scoped to the repo, named and owned by the epic or task, its payload the keys that layer allows; replaced whole |
 | `event` | affine | ingress, engine | something happened outside or inside |
 | `stuck` | persistent | watchdog | a token that cannot move |
 | `repo` | persistent | user | a registered repository: path, target branch, check, setup |
@@ -282,18 +282,241 @@ All of this is built.
 
 ### 7.3 Configuration layers
 
-Most specific wins: global → repo → epic → task.
+Configuration says, per repository and, where it matters, per epic and
+task: which workflow a story runs, the target branch, the commands for
+setup and check, which agent runs each role, the time limits and
+attempts, the worker limit, and whether rat-kingdom's directories are
+kept in Git. This section is the spec for step 7 of the build order
+(section 15). Mixins, aspects and git discipline beyond the target branch
+(branch naming, merge or rebase) come later.
+
+**Format.** A configuration file is one Emacs Lisp property list, read
+with `read` and never evaluated. Its extension is `.eld`. Anything after
+the list, other than whitespace and comments, makes the file invalid.
+
+```elisp
+(:workflow story
+ :target "rk/integration"
+ :commands (:install ("npm" "ci") :lint ("npx" "eslint" ".") :test ("npm" "test"))
+ :setup (install)
+ :check (lint test)
+ :agents (:worker codex :foreman claude)
+ :timeouts (:worker 7200 :check 1800)
+ :attempts 5
+ :max-workers 3
+ :track (:rk t :beads nil))
+```
+
+**Keys**, and the layers that may set each (the layers are below):
+
+| Key | Value | Layers |
+|---|---|---|
+| `:workflow` | a workflow name, symbol or string | all |
+| `:target` | a branch name, string | global, repo |
+| `:commands` | a property list from a command name (`:lint`) to an argument list of strings, run without a shell | global, repo |
+| `:setup` | an argument list of strings, or a list of command names | global, repo |
+| `:check` | as `:setup` | all |
+| `:agents` | a property list: `:worker`, `:foreman`, each an agent kind, `claude` or `codex` | all |
+| `:timeouts` | a property list: `:worker`, `:check`, each a number of seconds | all |
+| `:attempts` | how many workers a story is given before it is parked, a positive integer | all |
+| `:max-workers` | how many workers run at once, across all repositories, a positive integer | global |
+| `:track` | a property list: `:rk`, `:beads`, each `t` to track that directory in Git or `nil` to keep it out | global, repo |
+
+- `:setup` and `:check` are either one argument list (`("make" "test")`,
+  every element a string) or a list of command names (`(lint test)`,
+  every element a symbol). A list that mixes the two is invalid. Names
+  run in order, each as its argument list from the merged `:commands`;
+  all must succeed, and the first that fails ends the setup or check
+  with its name, exit and output. A name that `:commands` does not
+  define is invalid. A command name in `:commands` is a keyword (`:lint`)
+  and the same name in `:setup` or `:check` is a plain symbol (`lint`).
+- Names are resolved against the merged configuration of the repository
+  (and the epic and task, for `:check`), so a global `:check (lint test)`
+  may use commands each repository defines for itself. `:commands` is
+  set only at the global and repo layers, so an epic's or task's `:check`
+  names commands defined there.
+- A key whose value is `nil` in a file is the same as a key left out.
+  There is no way yet to turn off at one layer a check or setup set at a
+  less specific one.
+- The king's own agent is not configured here; it stays as it is started.
+  `:agents :foreman` is the agent `foreman_start` and `epic_start` with
+  `foreman` use when not given one.
+- An explicit argument still wins over configuration: `story_start` with
+  an `agent` or `workflow`, a task's `rk-agent:` and `rk-workflow:`
+  labels, `foreman_start` with an agent. Configuration gives the default
+  they replace.
+- Review mode is chosen by the workflow, `story` (the king reviews) or
+  `story-lite` (no review), for now. There is no `:review` key.
+- An unknown key is invalid, and so is a key set at a layer the table
+  does not allow.
+
+**Layers**, least to most specific:
 
 | Layer | Where | Who edits |
 |---|---|---|
-| global | `~/.emacs.d/rat-kingdom/config.eld`, `~/.emacs.d/rat-kingdom/workflows/` | user, or king through a tool |
-| repo | `<repo>/.rk/config.eld`, `<repo>/.rk/workflows/` | same; versioned with the code |
-| epic, task | `policy` tuples owned by the epic or task | king |
+| defaults | the existing user options, below | user, with Customize |
+| global | `~/.emacs.d/rat-kingdom/config.eld`, that is `config.eld` in `rat-kingdom-directory` | user, or king with `config_set` |
+| registration | the `:workflow`, `:target`, `:check` and `:setup` stored on the `repo` tuple by `repo_add` or `rat-kingdom-add-repo` | user, when registering |
+| repo | `<repo>/.rk/config.eld` in the user's checkout | user, or king with `config_set` |
+| epic | the epic's `policy` tuple | king with `config_set` |
+| task | the task's `policy` tuple | king with `config_set` |
 
-Configuration covers: the default workflow, command arrays (`lint`,
-`test`, `format`, `check`), git discipline (branch naming, target branch,
-merge or rebase, feature branch per epic), review mode (`king`, `user`,
-`none`), worker limit, and the agent command per role.
+- The defaults are the existing user options, so a customization made
+  before this keeps working: `:workflow` from
+  `rat-kingdom-story-default-workflow`, `:target` from
+  `rat-kingdom-git-default-target`, `:agents :worker` from
+  `rat-kingdom-default-agent`, `:agents :foreman` is `claude` (as the
+  foreman runs today), `:timeouts` from `rat-kingdom-story-timeouts` (its
+  `:spawn` entry is `:worker`), `:attempts` from
+  `rat-kingdom-story-attempts`, `:max-workers` from
+  `rat-kingdom-story-max-workers`, `:track :beads` from
+  `rat-kingdom-task-br-untracked` (non-nil there is `nil` here), and
+  `:track :rk` is `nil`. There is no default `:commands`, `:setup` or
+  `:check`.
+- Registration stays a layer of its own, between global and repo, so a
+  repository registered before configuration existed needs nothing
+  migrated. Its values are written only by registering.
+- The repo file is read from the user's checkout, the repository's
+  `:path`, never from a worker's worktree or a branch. A worker that
+  changes `.rk/config.eld` changes nothing until that commit reaches the
+  user's checkout.
+- A `policy` tuple is persistent, scoped to the repository, named by the
+  epic's or task's id and owned by it, and is replaced whole. Its payload
+  is a property list of the keys its layer allows, in the same form as a
+  file. A story with no epic or task has no layer there.
+- **Most specific wins, key by key.** For `:commands`, `:agents`,
+  `:timeouts` and `:track` the merge goes sub-key by sub-key: a repo
+  file with `:commands (:test ("make" "test"))` keeps the global `:lint`.
+- Every lookup can report the layer each value came from, and for the
+  four property-list keys, each sub-key's layer. Code reads configuration
+  through one function that takes the repository and optionally the epic
+  and task, so the engine never reads a user option or a `repo` field
+  directly for these keys again.
+
+**Errors.** A file that does not read as one property list, or that fails
+validation (an unknown key, a key not allowed at its layer, a value of
+the wrong shape), is ignored as a whole: its layer contributes nothing.
+The error is shown in the king's `status`, for every repository it
+affects, and once in `*Messages*`. It never stops the engine or a
+reaction. A file is read again when its modification time changes, so
+fixing it is enough. A file that is missing contributes nothing and is no
+error.
+
+What a single file cannot show (a command name defined in no layer, a
+workflow that does not exist) is checked on the merged result. It is
+shown in `status` for that repository, and a step that needs the missing
+thing cannot begin, so its story goes to the failure place with the
+reason (7.2). `config_set` refuses such a change before it is made; only
+a hand-edited file can cause it.
+
+**`:track`.** The engine never commits anything. `:track` only adds or
+removes the line `/.rk/` or `/.beads/` in the repository's
+`info/exclude`, in the directory `git rev-parse --git-common-dir` names,
+which worktrees share. It never writes `.gitignore`.
+
+- `nil` adds the line if it is missing; `t` removes it if it is there.
+  The line is rat-kingdom's to manage: change it with `:track`, not by
+  hand.
+- It is applied when a repository is registered, when `rat-kingdom-mode`
+  starts, and when `config_set` changes `:track` (at the global layer,
+  for every repository).
+- The `.rk` directory is created only when something is first written at
+  the repo layer, by `config_set`. Applying `:track` never creates it.
+- If a directory is to be kept out of Git but Git already tracks files in
+  it (`git ls-files -- .rk`), rat-kingdom warns, in `status` and in
+  `*Messages*`, and adds the line anyway, which does not affect tracked
+  files. It does not run `git rm --cached`; that is the user's call.
+- `:track :beads` replaces `rat-kingdom-task-br-untracked`, which becomes
+  its default. A br workspace that already existed before rat-kingdom is
+  still never touched by `br init` (section 10), but its exclude line
+  follows `:track` like any other: kept out by default, with the warning
+  above if Git already tracks it. A user who keeps `.beads` in Git sets
+  `:track (:beads t)`.
+- Built: `rat-kingdom-config-track-apply` (one repository, returning the
+  lines added and removed and any warnings, which `status` and
+  `repo_add` also show), `rat-kingdom-config-track-apply-all` (mode
+  start) and `rat-kingdom-config-repo-directory` (makes `.rk`, applying
+  `:track` first), for `config_set` to call.
+- An untracked `.rk` keeps `git status` in the user's checkout quiet, so
+  `story_start` does not warn of uncommitted changes. A user who wants
+  the configuration versioned with the code sets `:track (:rk t)` and
+  commits `.rk` themselves.
+
+**Workflow files.** Workflows can also be defined in
+`~/.emacs.d/rat-kingdom/workflows/*.eld` (in `rat-kingdom-directory`, for
+all repositories) and `<repo>/.rk/workflows/*.eld` (that repository
+only). Each file holds one workflow as a property list with the keys
+`rat-kingdom-workflow-define` takes (`:places`, `:start`, `:final`,
+`:failure`, `:steps`, `:doc`) and `:name`, read with `read` and never
+evaluated.
+
+- It is validated as `rat-kingdom-workflow-define` validates, by
+  `rat-kingdom-workflow-validate`. An invalid file, and two files in one
+  directory with the same `:name`, are ignored with the error shown as
+  for a configuration file. Files are read again when their modification
+  time changes, and a changed workflow applies from a token's next move
+  (7.1).
+- A global file replaces a built-in workflow of the same name. A repo
+  file shadows a global or built-in one of the same name for that
+  repository only. Looking a workflow up therefore takes the repository,
+  and `workflow_list` and the check of `:workflow` use the repository's
+  view.
+- A token whose workflow has gone, because its file was removed and
+  nothing of that name is left, cannot move; the watchdog reports it as
+  stuck (7.2).
+- Built (`rat-kingdom-config.el`): `rat-kingdom-config-workflows`
+  returns a repository's view, each workflow with its origin (`repo`,
+  `global` or `built-in`) and file; `rat-kingdom-config-workflow`
+  resolves one name for a repository. The engine looks a story's
+  workflow up by name, for its repository, each time it moves the token,
+  as it always did for built-in workflows; nothing is pinned when a story
+  starts, so an edited file applies from the next move. A file may have
+  no key but `:name` and those `rat-kingdom-workflow-define` takes.
+  `workflow_list` takes an optional `repo`: without it, the workflows of
+  every repository and then what each registered one has, with its own
+  files' workflows described; with it, that repository's view. Each
+  workflow says where it comes from and what it shadows, and ignored
+  workflow files follow. `story_start`, `repo_add`, `epic_create`,
+  `task_create`, the plan surface and the check of `:workflow` all use
+  the repository's view.
+
+**King tools.**
+
+- `config_show` takes a repository and optionally an epic or a task. It
+  returns the effective configuration, one line per key or sub-key, each
+  with its value and the layer it came from, followed by any file that
+  is being ignored and why, and any name the merged result cannot
+  resolve.
+- `config_set` takes a layer (`global`, `repo`, `epic` or `task`), the
+  repository, epic or task it applies to (none for `global`), a key and a
+  value. The value is Emacs Lisp text, read with `read` and never
+  evaluated: `("npm" "test")`, `(lint test)`, `7200`. A value for a
+  property-list key replaces that key's whole value at that layer;
+  sub-keys it leaves out fall back to less specific layers. The value
+  `nil` removes the key from that layer.
+- Before writing anything it validates the merged result for every
+  repository the change affects (every registered one for `global`): an
+  unknown workflow, an undefined command name, a key not allowed at that
+  layer, a value of the wrong shape, a `:target` that is not an existing
+  local branch. If any fails it refuses with the reason and writes
+  nothing.
+- Otherwise it writes the file, pretty-printed and replaced whole, or
+  replaces the policy tuple. Comments in a file are not preserved; the
+  tool's description says so, and so does its answer when the file had
+  any. A change to `:track` is applied at once.
+- The king never writes elisp. The registration layer is not written by
+  `config_set`.
+- Built: `rat-kingdom-config-show` and `rat-kingdom-config-set`, offered
+  to the king alone, not to a worker or the foreman. A problem the merged
+  configuration already had (from a hand-edited file, say) does not
+  refuse a change that leaves it as it was; only a problem the change
+  would add does, so a broken configuration can be fixed one key at a
+  time. For `global` and `repo` the check covers each affected
+  repository and every epic and task with a policy in it. A file is
+  written under a two-line comment saying rat-kingdom wrote it and that
+  comments are not kept; a `repo` file's `.rk` is made by
+  `rat-kingdom-config-repo-directory`. Setting a key to the value it has
+  writes nothing.
 
 **Built: a feature branch per epic**, chosen per epic rather than through
 configuration: `epic_start` with `feature_branch` (section 10). The epic's
@@ -303,12 +526,8 @@ and the repository's target moves once, when the epic lands. A story's
 target is read in one place, `rat-kingdom-story-target`: the token's
 `:target`, else the repository's. `story_start` takes a `target` too,
 rarely needed; it must be an existing local branch that is not checked
-out.
-
-The king changes configuration through a tool that validates the merged
-result and refuses a change that leaves a workflow invalid: an unknown
-place, a step with no exit, an undefined command. The king never writes
-elisp.
+out. With configuration, "the repository's" target is the merged
+`:target`, and an epic's or story's own target still wins over it.
 
 ## 8. Runs
 
@@ -561,7 +780,7 @@ go, and it lets a role be denied built-in tools as well.
 
 | Role | Lifetime | Tools |
 |---|---|---|
-| king | long-lived, global, no worktree | built: `status` (with the tracker tasks available, each with its epic and agent), `repo_add`, `repo_sync`, `workflow_list`, `story_start` (optionally from a `task`, with an `agent`; a task's `rk-agent:` and `rk-workflow:` labels are the defaults), `story_show`, `story_diff`, `story_move`, `story_cancel`, `verdict`, `publish`, `query`, `fact_forget`, `task_create`, `epic_create`, `epic_propose` (the epic plan surface, 14.1), `epic_start` (optionally with a `feature_branch`, and a `foreman`), `epic_pause`, `epic_resume`, `epic_cancel`, `epic_retry`, `epic_show`, `epic_diff`, `epic_verdict` (section 10), `tell`, `foreman_start`, `foreman_stop`; `story_start` also takes a rarely needed `target`. Planned: `config_set` |
+| king | long-lived, global, no worktree | built: `status` (with the tracker tasks available, each with its epic and agent), `repo_add`, `repo_sync`, `workflow_list`, `story_start` (optionally from a `task`, with an `agent`; a task's `rk-agent:` and `rk-workflow:` labels are the defaults), `story_show`, `story_diff`, `story_move`, `story_cancel`, `verdict`, `publish`, `query`, `fact_forget`, `task_create`, `epic_create`, `epic_propose` (the epic plan surface, 14.1), `epic_start` (optionally with a `feature_branch`, and a `foreman`), `epic_pause`, `epic_resume`, `epic_cancel`, `epic_retry`, `epic_show`, `epic_diff`, `epic_verdict` (section 10), `tell`, `foreman_start`, `foreman_stop`, `config_show` and `config_set` (7.3); `story_start` also takes a rarely needed `target` |
 | rat (worker) | one task | built: `finish`, `block`, `note_fact`, `inbox` |
 | researcher | one task | `finish_doc`, `note_fact`, `block` |
 | foreman | one epic, optional | built: `status` (its epic: the `epic_show` view and its stories' lines), `story_show`, `story_diff`, `verdict`, `tell`, `query`, `task_create` (its epic is the parent), `epic_retry`, `story_start` (for a task of its epic), `report` (to the king); every one but `query` limited to its epic |
@@ -655,8 +874,8 @@ those registered earlier, when `rat-kingdom-mode` starts or the tasks are
 refreshed (`rat-kingdom-task-br-ensure`):
 
 - br must be installed; if it is not, registration fails, saying so.
-- A `.beads` that already exists is left alone, tracked, ignored or
-  neither.
+- A `.beads` that already exists is left alone: br is not run in it.
+  Only its exclude line follows `:track` (7.3).
 - Otherwise `br init --prefix PREFIX` runs in the checkout, and `br config
   get issue_prefix` must then answer PREFIX, since a user-level br
   configuration once overrode it. PREFIX is the repository's
@@ -666,8 +885,8 @@ refreshed (`rat-kingdom-task-br-ensure`):
 - The new workspace is untracked: `/.beads/` is added, once, to
   `info/exclude` in the repository's common Git directory, never to
   `.gitignore`, and `git status --porcelain` must then show nothing under
-  `.beads`. `rat-kingdom-task-br-untracked` set to nil leaves it to be
-  tracked instead.
+  `.beads`, unless `:track :beads` (7.3), whose default comes from
+  `rat-kingdom-task-br-untracked`, says to track it instead.
 - If any step fails, the `.beads` it made and the exclude line it added
   are removed, and registration fails with the reason: no `repo` tuple is
   written and no target branch created. On mode start a failure is a
@@ -1120,7 +1339,13 @@ wait longer for review than for implementation.
    facts in every worker's brief through
    `rat-kingdom-story-brief-functions`, and the king's `query` and
    `fact_forget`.
-7. **Configuration**: layers, mixins, aspects, validated `config_set`.
+7. **Configuration** (7.3): `.eld` files read and never evaluated, the
+   layers (defaults from the existing user options, global file,
+   registration, repo file, epic and task `policy` tuples) merged key by
+   key with the layer of each value, ignored files reported in `status`,
+   `:track` kept in `info/exclude`, workflow files global and per repo,
+   and the king's `config_show` and validated `config_set`. Mixins and
+   aspects come after.
 8. **Dashboard** additions with the factory floor, attention queue and
    review card (surfaces 1 to 3), then the **research** workflow, docs and
    the remaining surfaces.
