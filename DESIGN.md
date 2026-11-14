@@ -384,6 +384,64 @@ by reading both; not yet exercised by a test):
   deathless and meta-agent-shell already depend on both. rat-kingdom keeps
   every such call in one file.
 
+### 8.5 Agents
+
+**Built.** A run's agent is one of a small set of agent kinds. Each kind
+is a function that returns an agent-shell config:
+
+| Kind | Config | Loads |
+|---|---|---|
+| `claude` | `agent-shell-anthropic-make-claude-code-config` | agent-shell-anthropic |
+| `codex` | `agent-shell-openai-make-codex-config`, put in full-access mode | agent-shell-openai |
+
+A kind's library is loaded only when a run of that kind starts. The
+built-in kinds are in the defconst `rat-kingdom-agent-shell-builtin-agents`.
+`rat-kingdom-agent-shell-define-agent` adds a kind, or replaces one of the
+same name. Those additions are kept in a defvar, so a reload keeps them,
+takes the built-in defaults afresh and lists no kind twice.
+
+The agent is chosen per story. `story_start` takes `agent`, `claude` or
+`codex`, and so does `rat-kingdom-story-start`. When it is left out, the
+story gets `rat-kingdom-default-agent` (default `claude`). The name is
+checked when the story starts: an unknown one is an error that names the
+known kinds. The result is recorded on the story token as `:agent`, so a
+later change to the default does not affect stories already started.
+Each worker the story is given gets the story's agent as `:agent` on its
+run. That holds for the first worker and for every replacement: after a
+failed check, a merge conflict, a review that asks for changes, and after
+recovery. The backend builds the run's config from that `:agent`. A run
+with no `:agent` is Claude Code: the king, and runs recorded before agents
+could be chosen. The king is always started that way. A run that takes up
+a session (`:resume`) is given the agent of the run that started the
+session. Today only the king resumes sessions. `status` lists the agent
+kinds and the default, and shows each story's agent, as does `story_show`.
+
+**Codex runs in full access**, the equivalent of `codex --yolo`. codex-acp
+has four session modes: `read-only`, `workspace-write`, `agent` (its
+default, auto review) and `agent-full-access` (approval policy `never`,
+sandbox `dangerFullAccess`). rat-kingdom sets `agent-full-access` in two
+ways. The config's `:default-session-mode-id` returns it, so agent-shell
+sets the mode once the session is up. The client's environment also has
+`INITIAL_AGENT_MODE=agent-full-access`, which codex-acp reads when it
+makes, loads or resumes a session. The user's
+`agent-shell-openai-default-session-mode-id` is not changed.
+
+**Checked, 2026-11-13**, by reading the installed
+`@agentclientprotocol/codex-acp` 2.2.2 and trying codex-cli 0.166.0. No
+Codex worker has been run end to end yet.
+
+- codex-acp advertises `mcpCapabilities.http: true` (not `sse`, not
+  `acp`). It honours HTTP servers given in `session/new`, `session/load`
+  and `session/resume`. It turns each into an `mcp_servers` entry of the
+  Codex config, with `url` and `http_headers`, so a Codex worker reaches
+  rat-kingdom's endpoint as a Claude one does, through the run's own
+  token URL from `rat-kingdom-agent-shell--servers`. One catch: if the
+  user's Codex config already defines a server named `rat-kingdom`,
+  codex-acp skips the requested one in its favour. Setting
+  `DISABLE_MCP_CONFIG_FILTERING=true` turns that off.
+- codex-acp starts `codex app-server` with its own environment, which is
+  the ACP client's. So the push guard's variables reach Codex.
+
 ## 9. Roles and tools
 
 Tools are served by an MCP endpoint inside Emacs, scoped by role. A
@@ -407,7 +465,7 @@ go, and it lets a role be denied built-in tools as well.
 
 | Role | Lifetime | Tools |
 |---|---|---|
-| king | long-lived, global, no worktree | built: `status` (with the tracker tasks available), `repo_add`, `repo_sync`, `workflow_list`, `story_start` (optionally from a `task`), `story_show`, `story_diff`, `story_move`, `story_cancel`, `verdict`, `publish`. Planned: `task_create`, `epic_create`, `tell`, `query`, `config_set` |
+| king | long-lived, global, no worktree | built: `status` (with the tracker tasks available), `repo_add`, `repo_sync`, `workflow_list`, `story_start` (optionally from a `task`, with an `agent`), `story_show`, `story_diff`, `story_move`, `story_cancel`, `verdict`, `publish`. Planned: `task_create`, `epic_create`, `tell`, `query`, `config_set` |
 | rat (worker) | one task | `finish`, `block`, `note_fact`, `inbox` |
 | researcher | one task | `finish_doc`, `note_fact`, `block` |
 | foreman | one epic, optional | `story_start`, `tell`, `verdict`, `query`, limited to its epic |
@@ -473,7 +531,10 @@ next push. `M-x rat-kingdom-publish` is the user's own way in.
 
 - Role-scoped tools replace rk2's role checks.
 - No managed session can push. Built in three layers, for workers and the
-  king alike, all in rat-kingdom-agent-shell.el:
+  king alike, all in rat-kingdom-agent-shell.el. Claude sessions get all
+  three. Codex sessions get only the first, which
+  `rat-kingdom-agent-shell--guard` applies to every agent kind in the
+  same way (section 8.5):
   1. **Environment.** The agent's client is started with Git
      configuration in its environment: `GIT_CONFIG_COUNT` and
      `GIT_CONFIG_KEY_n`/`GIT_CONFIG_VALUE_n` pairs (Git 2.31 or later),
@@ -484,7 +545,7 @@ next push. `M-x rat-kingdom-publish` is the user's own way in.
      `--no-verify` or not, while fetches still work. It is set through
      the ACP client's own environment variables, so it applies whenever
      the client's process starts. It works in every permission mode,
-     auto and bypass included. Nothing is written to `.git/config`, hooks
+     auto and bypass included, and in Codex's full-access mode. Nothing is written to `.git/config`, hooks
      or the user's global configuration, so the user's own pushes are
      unaffected. `GH_PROMPT_DISABLED=1` and `RAT_KINGDOM_RUN=<run id>` are
      set too. Git does not rewrite a remote with an explicit `pushurl`,
@@ -501,12 +562,35 @@ next push. `M-x rat-kingdom-publish` is the user's own way in.
      permission.
 
   rk2's session-only pre-push hook is not used: `--no-verify` skips it.
+
+  **For Codex the environment is the only layer.** The session meta is
+  the same for every kind, so a Codex session carries the Claude deny
+  rules too. codex-acp ignores `_meta.claudeCode`, and keeping one guard
+  for all kinds is simpler than leaving them out. In full-access mode,
+  with approval `never`, Codex sends no permission requests, so layer 3
+  never fires. This leaves Codex workers uncovered in three cases:
+  - a remote with an explicit `pushurl`, which Git does not rewrite;
+  - `gh`, which only has `GH_PROMPT_DISABLED`;
+  - an agent that unsets the variables on purpose.
+
+  Codex passes its environment to the commands it runs according to
+  `shell_environment_policy` in the user's Codex config. With codex-cli
+  0.166.0 and no such setting, every variable is passed, the
+  `GIT_CONFIG_*` ones included. This was checked with `codex sandbox --
+  env`, which applies the policy. Two settings change that:
+  - `inherit = "core"` or `"none"` drops `GIT_CONFIG_COUNT`, and with it
+    the block.
+  - `ignore_default_excludes = false` drops only the `GIT_CONFIG_KEY_n`
+    variables, whose names contain KEY. Git then refuses to run at all
+    ("missing config key"), so the block fails closed.
+
+  rat-kingdom does not check the user's Codex config.
 - ACP permission requests pass through Emacs, so a policy function can
   refuse a tool call before it runs. This applies only when the session
   mode asks for permission.
 
-Whether workers run in Claude's auto mode is no longer a question for
-pushing: the environment block holds in any mode. It remains one for
+Whether workers run in Claude's auto mode, or Codex in full access, is no
+longer a question for pushing: the environment block holds in any mode. It remains one for
 other tool calls, which in auto mode do not reach Emacs.
 
 ## 13. Ingress and ambient agents

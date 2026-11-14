@@ -10,12 +10,22 @@
 ;;; Commentary:
 
 ;; The backend that runs each agent as an agent-shell buffer, which
-;; speaks the Agent Client Protocol to Claude Code.  Every use of
-;; agent-shell is in this file, because two of the things used,
+;; speaks the Agent Client Protocol to Claude Code or to Codex.  Every
+;; use of agent-shell is in this file, because two of the things used,
 ;; `agent-shell--start' and `agent-shell--state', are internal to it.
 ;;
 ;; agent-shell is not a dependency of the package.  It is loaded when the
 ;; first agent is started, and that fails with a clear error without it.
+;; agent-shell-anthropic or agent-shell-openai is loaded only when an
+;; agent of its kind is started.
+;;
+;; Which agent a run gets is its `:agent', the name of an agent kind:
+;; "claude" or "codex" built in, more with
+;; `rat-kingdom-agent-shell-define-agent'.  A run that names none, such as
+;; the king's, gets Claude Code.  A story's workers run the agent the
+;; story was started with, `rat-kingdom-default-agent' unless it named
+;; one.  Codex runs in its full-access mode, approval policy never and
+;; no sandbox, the equivalent of `codex --yolo'.
 ;;
 ;; Each run's shell is given the rat-kingdom tool endpoint with the run's
 ;; own token, ahead of the servers in `agent-shell-mcp-servers'.  Requests
@@ -26,13 +36,16 @@
 ;;
 ;; 1. The agent's process gets Git configuration in its environment,
 ;;    through GIT_CONFIG_COUNT, that rewrites every push URL to one Git
-;;    cannot use.  This holds whatever Claude's permission mode, and
+;;    cannot use.  This holds whatever the agent's permission mode, and
 ;;    `git push --no-verify' too.  Nothing is written to any Git config
-;;    file, so the user's own pushes are not affected.
+;;    file, so the user's own pushes are not affected.  It is the same
+;;    for every agent kind, and for Codex it is the only layer.
 ;; 2. The session is started with Claude tool rules that deny `git push'
-;;    and `gh'.  Deny rules apply in every permission mode.
+;;    and `gh'.  Deny rules apply in every permission mode.  Only
+;;    Claude's adapter reads them.
 ;; 3. A permission request to run such a command is refused here,
-;;    before any other responder sees it.
+;;    before any other responder sees it.  Codex in full-access mode
+;;    never asks.
 ;;
 ;; Pushing is left to the king's `publish' tool, which runs Git in Emacs
 ;; itself (rat-kingdom-git.el).
@@ -56,6 +69,7 @@
 (declare-function shell-maker-busy "shell-maker")
 (declare-function agent-shell-anthropic-make-claude-code-config
                   "agent-shell-anthropic")
+(declare-function agent-shell-openai-make-codex-config "agent-shell-openai")
 (declare-function rat-kingdom-run-exited "rat-kingdom-run")
 (declare-function rat-kingdom-run-update "rat-kingdom-run")
 (defvar rat-kingdom-run-idle-functions)
@@ -83,6 +97,117 @@ Return non-nil if it was answered."
                            (map-elt permission :options))))
         (funcall (map-elt permission :respond) (map-elt choice :option-id))
         t))))
+
+;;;; Agent kinds
+
+(defcustom rat-kingdom-default-agent 'claude
+  "The agent a story's workers run when the story names none.
+A name from `rat-kingdom-agent-shell-agents': `claude' for Claude Code
+or `codex' for OpenAI Codex, in full-access mode.  It is read when a
+story starts, and the story keeps the agent it was given.  The king is
+always Claude Code."
+  :type '(choice (const :tag "Claude Code" claude)
+                 (const :tag "Codex, in full-access mode" codex)
+                 (symbol :tag "Another defined agent kind"))
+  :group 'rat-kingdom)
+
+(defconst rat-kingdom-agent-shell-fallback-agent "claude"
+  "The agent of a run that names none.
+That is the king's, and any run recorded before agents could be chosen.")
+
+(defconst rat-kingdom-agent-shell-codex-mode "agent-full-access"
+  "The codex-acp session mode Codex runs in: approval never, no sandbox.
+It is what `codex --yolo' does.  codex-acp's other modes are
+read-only, workspace-write and agent.")
+
+(defconst rat-kingdom-agent-shell-builtin-agents
+  '((claude . rat-kingdom-agent-shell-claude-config)
+    (codex . rat-kingdom-agent-shell-codex-config))
+  "The agent kinds built in, as an alist from name to config function.
+Each function takes no arguments and returns an agent-shell config.")
+
+(defvar rat-kingdom-agent-shell--defined-agents nil
+  "Agent kinds defined by `rat-kingdom-agent-shell-define-agent'.
+An alist like `rat-kingdom-agent-shell-builtin-agents', whose entries
+come before, and hide, built-in ones of the same name.")
+
+(defun rat-kingdom-agent-shell-define-agent (name function)
+  "Define the agent kind NAME, a symbol, whose config FUNCTION returns.
+FUNCTION takes no arguments and returns an agent-shell config, such as
+`agent-shell-anthropic-make-claude-code-config' does.  A kind of the
+same name, built in or defined before, is replaced."
+  (setf (alist-get name rat-kingdom-agent-shell--defined-agents) function)
+  name)
+
+(defun rat-kingdom-agent-shell-agents ()
+  "Return every agent kind, as an alist from name to config function.
+Defined kinds come first; a built-in one they replace is left out."
+  (append rat-kingdom-agent-shell--defined-agents
+          (cl-remove-if (lambda (entry)
+                          (assq (car entry)
+                                rat-kingdom-agent-shell--defined-agents))
+                        rat-kingdom-agent-shell-builtin-agents)))
+
+(defun rat-kingdom-agent-names ()
+  "Return the names of the agent kinds, as strings."
+  (mapcar (lambda (entry) (symbol-name (car entry)))
+          (rat-kingdom-agent-shell-agents)))
+
+(defun rat-kingdom-agent-name (agent)
+  "Return the agent AGENT, a string or symbol, as a known agent's name.
+Nil and the empty string mean `rat-kingdom-default-agent'.  Signal an
+error naming the known agents if there is no such agent."
+  (let ((name (format "%s" (if (or (null agent) (equal agent ""))
+                               rat-kingdom-default-agent
+                             agent))))
+    (if (member name (rat-kingdom-agent-names))
+        name
+      (error "There is no agent called %s; there are: %s"
+             name (string-join (rat-kingdom-agent-names) ", ")))))
+
+(defun rat-kingdom-agent-shell--override (config &rest pairs)
+  "Return CONFIG with the entries of the property list PAIRS set.
+CONFIG is an agent config, an alist; it is not changed."
+  (let ((keys (cl-loop for (key) on pairs by #'cddr collect key)))
+    (append (cl-loop for (key value) on pairs by #'cddr
+                     collect (cons key value))
+            (cl-remove-if (lambda (entry) (memq (car-safe entry) keys))
+                          config))))
+
+(defun rat-kingdom-agent-shell-claude-config ()
+  "Return the agent-shell config for Claude Code."
+  (require 'agent-shell-anthropic)
+  (agent-shell-anthropic-make-claude-code-config))
+
+(defun rat-kingdom-agent-shell-codex-config ()
+  "Return the agent-shell config for Codex, in full-access mode.
+The session is put in `rat-kingdom-agent-shell-codex-mode' twice over:
+the config's default session mode is it, which agent-shell sets once
+the session is up, and the client's environment has INITIAL_AGENT_MODE
+set to it, which codex-acp reads when it makes, loads or resumes a
+session.  `agent-shell-openai-default-session-mode-id' is left alone."
+  (require 'agent-shell-openai)
+  (let* ((config (agent-shell-openai-make-codex-config))
+         (maker (map-elt config :client-maker)))
+    (rat-kingdom-agent-shell--override
+     config
+     :default-session-mode-id (lambda () rat-kingdom-agent-shell-codex-mode)
+     :client-maker
+     (lambda (buffer)
+       (let ((client (funcall maker buffer)))
+         (setf (map-elt client :environment-variables)
+               (cons (concat "INITIAL_AGENT_MODE="
+                             rat-kingdom-agent-shell-codex-mode)
+                     (map-elt client :environment-variables)))
+         client)))))
+
+(defun rat-kingdom-agent-shell-config (agent)
+  "Return the agent-shell config of the agent kind AGENT, a name.
+Nil means `rat-kingdom-agent-shell-fallback-agent'."
+  (let* ((name (intern (rat-kingdom-agent-name
+                        (or agent rat-kingdom-agent-shell-fallback-agent))))
+         (function (alist-get name (rat-kingdom-agent-shell-agents))))
+    (funcall function)))
 
 ;;;; Keeping agents from pushing
 
@@ -162,7 +287,9 @@ ACP adapter hands to Claude Code."
   "Return the agent CONFIG with the push guards for RUN-ID.
 Its client is given `rat-kingdom-agent-shell-environment-entries' as
 environment variables, which the client's process is started with,
-and its session meta the denied tools.  CONFIG is not changed."
+and its session meta the denied tools.  CONFIG is not changed.  It is
+the same for every agent kind: a Codex session's meta carries the
+Claude rules too, which codex-acp ignores."
   (let ((maker (map-elt config :client-maker)))
     (append
      (list (cons :client-maker
@@ -340,22 +467,27 @@ had before, if it is a function.  Return non-nil if it was answered."
       (format "rat %s" (plist-get run :id))
     (plist-get run :id)))
 
+(defun rat-kingdom-agent-shell-run-config (run token)
+  "Return the agent config for RUN, whose tool endpoint token is TOKEN.
+It is the config of RUN's `:agent', with the push guards, the run's
+buffer name and its MCP servers."
+  (rat-kingdom-agent-shell--override
+   (rat-kingdom-agent-shell--guard
+    (rat-kingdom-agent-shell-config (plist-get run :agent))
+    (plist-get run :id))
+   :buffer-name (rat-kingdom-agent-shell--buffer-name run)
+   :mcp-servers (rat-kingdom-agent-shell--servers token)))
+
 (defun rat-kingdom-agent-shell-start (run prompt)
   "Start an agent-shell for RUN, send it PROMPT and return its buffer.
-If RUN has `:resume', take that session up again."
+The agent is RUN's `:agent'; see `rat-kingdom-agent-shell-config'.  If
+RUN has `:resume', take that session up again, with the same agent."
   (unless (require 'agent-shell nil t)
     (error "Starting an agent needs the agent-shell package"))
-  (require 'agent-shell-anthropic)
   (let* ((id (plist-get run :id))
          (worktree (file-name-as-directory (plist-get run :worktree)))
          (token (rat-kingdom-mcp-grant id (intern (plist-get run :role))))
-         (config (append
-                  (list (cons :buffer-name
-                              (rat-kingdom-agent-shell--buffer-name run))
-                        (cons :mcp-servers
-                              (rat-kingdom-agent-shell--servers token)))
-                  (rat-kingdom-agent-shell--guard
-                   (agent-shell-anthropic-make-claude-code-config) id)))
+         (config (rat-kingdom-agent-shell-run-config run token))
          (buffer (with-temp-buffer
                    (setq default-directory worktree)
                    (let ((agent-shell-cwd-function (lambda () worktree)))

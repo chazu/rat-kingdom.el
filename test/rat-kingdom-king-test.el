@@ -73,6 +73,80 @@ Fail the test if the call failed."
     (should-not (rat-kingdom-story-list space))
     (should-not (rat-kingdom-reaction-failures space))))
 
+(ert-deftest rat-kingdom-king-test-chooses-the-agent ()
+  (rat-kingdom-story-test-with-repo (space _path)
+    (let ((rat-kingdom-default-agent 'codex))
+      (rat-kingdom-king-test--start space)
+      ;; The king itself is Claude Code whatever the default.
+      (should-not (plist-get (rat-kingdom-run-get space "king") :agent))
+      (should (string-search "Agents: claude, codex. New stories' workers \
+run codex" (rat-kingdom-king-test--ok "status")))
+      (let* ((answer (rat-kingdom-king-test--ok
+                      "story_start" '(repo . "demo") '(title . "Add a file")
+                      '(description . "Call it feature.txt.")
+                      '(agent . "claude")))
+             (id (progn (string-match "Started \\(S-[0-9a-f]+\\)" answer)
+                        (match-string 1 answer))))
+        (should (string-search "and the agent claude" answer))
+        (rat-kingdom-reaction-run space)
+        (should (equal (rat-kingdom-story-test--agent (concat id ".1"))
+                       "claude"))
+        (should (string-search (format "%s.1, working), " id)
+                               (rat-kingdom-king-test--ok "status")))
+        (should (string-match-p ", [0-9]+s, claude: Add a file"
+                                (rat-kingdom-king-test--ok "status")))
+        (should (string-search "\nAgent: claude\n"
+                               (rat-kingdom-king-test--ok "story_show"
+                                                          `(story . ,id)))))
+      ;; Left out, it is the default.
+      (let* ((answer (rat-kingdom-king-test--ok
+                      "story_start" '(repo . "demo") '(title . "Another")
+                      '(description . "D")))
+             (id (progn (string-match "Started \\(S-[0-9a-f]+\\)" answer)
+                        (match-string 1 answer))))
+        (should (string-search "and the agent codex" answer))
+        (should (string-search "\nAgent: codex\n"
+                               (rat-kingdom-king-test--ok "story_show"
+                                                          `(story . ,id)))))
+      ;; An unknown agent is an error that names the known ones.
+      (let ((answer (rat-kingdom-king-test--call
+                     "story_start" '(repo . "demo") '(title . "T")
+                     '(description . "D") '(agent . "gemini"))))
+        (should (cdr answer))
+        (should (string-search "no agent called gemini; there are: claude, \
+codex" (car answer))))
+      (should (= (length (rat-kingdom-story-list space)) 2))
+      ;; The tool says what the argument is for.
+      (let* ((tool (cl-find "story_start" (rat-kingdom-mcp-tool-list 'king)
+                            :key (lambda (tool) (plist-get tool :name))
+                            :test #'equal))
+             (schema (plist-get tool :inputSchema)))
+        (should (string-search
+                 "Chooses the agent the story's workers run"
+                 (plist-get (gethash "agent" (plist-get schema :properties))
+                            :description)))
+        (should-not (seq-contains-p (plist-get schema :required) "agent"))))))
+
+(ert-deftest rat-kingdom-king-test-resumes-with-the-same-agent ()
+  (rat-kingdom-story-test-with-repo (space _path)
+    (rat-kingdom-king-test--start space)
+    ;; A session is taken up by the agent that started it.
+    (rat-kingdom-run-update space "king" :session-id "session-1"
+                            :agent "codex")
+    (rat-kingdom-run-exited "king")
+    (setq rat-kingdom-story-test--started nil)
+    (rat-kingdom-king-test--start space)
+    (let ((run (car (car rat-kingdom-story-test--started))))
+      (should (equal (plist-get run :resume) "session-1"))
+      (should (equal (plist-get run :agent) "codex")))
+    ;; A fresh session is the king's own agent, Claude Code.
+    (rat-kingdom-run-exited "king")
+    (setq rat-kingdom-story-test--started nil)
+    (rat-kingdom-king-start space t)
+    (rat-kingdom-reaction-run space)
+    (should-not (plist-get (car (car rat-kingdom-story-test--started))
+                           :agent))))
+
 (ert-deftest rat-kingdom-king-test-runs-a-story-with-its-tools ()
   (rat-kingdom-story-test-with-repo (space path)
     (rat-kingdom-king-test--start space)
