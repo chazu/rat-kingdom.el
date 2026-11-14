@@ -138,13 +138,31 @@ reload only says that `rat-kingdom-king-restart' is needed."
   "Return the agent of the story whose token has PAYLOAD."
   (or (plist-get payload :agent) rat-kingdom-agent-shell-fallback-agent))
 
+(defvar rat-kingdom-king-story-note-functions nil
+  "Functions that add to what `status' and `story_show' say of a story.
+Each is called with the space, the story's live token and a style,
+`status' or `show', and returns a string or nil.  A `status' note is
+added to the story's line, after its agent; a `show' note is a line, or
+lines, of the story's entry.  Add to it with `add-hook', so that
+reloading does not add a function twice.")
+
+(defun rat-kingdom-king--story-notes (space story style)
+  "Return the notes on the token STORY in SPACE, in STYLE, as a list.
+See `rat-kingdom-king-story-note-functions'."
+  (let (notes)
+    (dolist (function rat-kingdom-king-story-note-functions)
+      (with-demoted-errors "rat-kingdom: story note function: %S"
+        (when-let* ((note (funcall function space story style)))
+          (push note notes))))
+    (nreverse notes)))
+
 (defun rat-kingdom-king--story-line (space story)
   "Return one line describing the token STORY in SPACE."
   (let* ((payload (plist-get story :payload))
          (run (and (plist-get payload :run)
                    (rat-kingdom-run-get space (plist-get payload :run))))
          (now (funcall rat-kingdom-space-now-function)))
-    (format "- %s [%s] %s%s, %s, %s: %s%s%s"
+    (format "- %s [%s] %s%s, %s, %s%s: %s%s%s"
             (plist-get story :identity) (plist-get story :scope)
             (plist-get payload :at)
             (pcase (plist-get payload :phase)
@@ -160,6 +178,8 @@ reload only says that `rat-kingdom-king-restart' is needed."
             (rat-kingdom-king--age
              (- now (or (plist-get payload :entered) now)))
             (rat-kingdom-king--agent payload)
+            (mapconcat (lambda (note) (concat ", " note))
+                       (rat-kingdom-king--story-notes space story 'status) "")
             (plist-get payload :title)
             (if-let* ((reason (plist-get payload :reason))
                       ((equal (plist-get payload :phase) "parked")))
@@ -315,6 +335,10 @@ The second value, in a cons, is non-nil if it is archived."
                                          :test #'equal)))
                        (format "Worker %s: %s" (plist-get payload :run)
                                (or (plist-get run :state) "unknown"))))
+                (and (not archived)
+                     (when-let* ((notes (rat-kingdom-king--story-notes
+                                         space story 'show)))
+                       (string-join notes "\n")))
                 (and (plist-get payload :worktree)
                      (not (plist-get payload :integrated))
                      (format "Worktree %s on branch %s"

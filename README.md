@@ -164,6 +164,29 @@ by a new one in the same worktree, told to look at what is there. A check
 or setup that was running runs again. The king takes up its earlier
 session; `C-u M-x rat-kingdom-king` starts a new one instead.
 
+### Telling a worker something
+
+Ask the king to tell a story's worker something, a correction or a detail
+it left out, and it calls `tell` with the story and the text. The message
+waits in the space as a `message` tuple owned by the story, and the
+answer says what became of it:
+
+- a worker between turns is given it at once, as its next prompt;
+- a worker in the middle of a turn is given it when the turn ends, and can
+  read it sooner with its `inbox` tool, which workers are told to check
+  during long turns and before they call `finish`;
+- a story with no worker right now, because it is queued for a free
+  worker, being checked or reviewed, or stopped, keeps it for its next
+  worker, which finds it in its prompt.
+
+A worker that has already reported with `finish` or `block` is never
+given one. So a message sent while a story is at its check or review is
+only read if the story goes back to a worker; if it passes and is merged,
+the message is archived unread. `status` says how many messages wait on
+each story, and `story_show` lists them. A message is removed only once
+it has been handed over, so a restart keeps it, and a worker that
+replaces one cut off by a restart finds it in its prompt.
+
 ### Facts
 
 A worker that learns something a later worker in the same repository

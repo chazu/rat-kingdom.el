@@ -34,7 +34,8 @@
 ;; backend that starts nothing.
 ;;
 ;; Two tools are offered to a worker here: `finish' and `block'.
-;; rat-kingdom-fact.el adds `note_fact'.
+;; rat-kingdom-fact.el adds `note_fact', and rat-kingdom-message.el
+;; `inbox'.
 ;;
 ;; A run need not belong to a story.  The king is a run too; see
 ;; rat-kingdom-king.el.
@@ -113,6 +114,8 @@ must be clean.
 know, such as a convention, a pitfall, how to build or test something, or \
 where something lives, record it with the `note_fact' tool. Do not use it \
 for progress reports on this task.
+- Messages from the king arrive between your turns; during a long turn, \
+check `inbox` now and then, and always before you call `finish`.
 - After `finish' or `block', stop. Do not start other work."
   "What every worker is told before its task."
   :type 'string
