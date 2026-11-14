@@ -105,7 +105,8 @@ Every tuple written during a story is owned by that story, and by its epic
 if it has one. When a story's token reaches a terminal place, its owned
 tuples move to an archive table in the same transaction. The live space
 holds only work in flight. Facts worth keeping past a story are written
-with the repo as owner.
+with no owner, scoped to the repo, so no sweep takes them; the king
+removes a wrong one with `fact_forget`, which retracts it.
 
 Each `out` and `in` is also appended to an operations log table. That log
 is the audit trail and can be replayed.
@@ -340,6 +341,21 @@ instructions, the task, and a query of the space for facts, docs and
 policy in that task's repo and epic. This is how a research worker's
 findings reach a worker started days later.
 
+**Built for facts** (`rat-kingdom-fact.el`). A worker records a fact with
+`note_fact`: the text, at most `rat-kingdom-fact-max-length` (1500)
+characters, and optionally a topic and the files it concerns. It is
+written as a persistent `fact` tuple scoped to the run's repo, with no
+owner, the payload `:text :topic :files :story :run`, and the run as the
+actor, so it outlives the story, merged or cancelled. A worker's prompt
+ends with the sections returned by the functions on
+`rat-kingdom-story-brief-functions`, each called with the space, the
+story's token and the run's id. rat-kingdom-fact.el puts one there: the
+repo's facts, newest first, with topic and files, capped at
+`rat-kingdom-fact-brief-max-count` (40) facts and
+`rat-kingdom-fact-brief-max-chars` (8000) characters, saying how many
+older ones are left out. A repo with no facts adds no section. Docs and
+policy are not in the brief yet.
+
 ### 8.4 Recovery
 
 **Built** (`rat-kingdom-story-reconcile`, run when `rat-kingdom-mode` is
@@ -465,8 +481,8 @@ go, and it lets a role be denied built-in tools as well.
 
 | Role | Lifetime | Tools |
 |---|---|---|
-| king | long-lived, global, no worktree | built: `status` (with the tracker tasks available, each with its epic and agent), `repo_add`, `repo_sync`, `workflow_list`, `story_start` (optionally from a `task`, with an `agent`; a task's `rk-agent:` and `rk-workflow:` labels are the defaults), `story_show`, `story_diff`, `story_move`, `story_cancel`, `verdict`, `publish`, `task_create`, `epic_create` (section 10). Planned: `tell`, `query`, `config_set` |
-| rat (worker) | one task | `finish`, `block`, `note_fact`, `inbox` |
+| king | long-lived, global, no worktree | built: `status` (with the tracker tasks available, each with its epic and agent), `repo_add`, `repo_sync`, `workflow_list`, `story_start` (optionally from a `task`, with an `agent`; a task's `rk-agent:` and `rk-workflow:` labels are the defaults), `story_show`, `story_diff`, `story_move`, `story_cancel`, `verdict`, `publish`, `query`, `fact_forget`, `task_create`, `epic_create` (section 10). Planned: `tell`, `config_set` |
+| rat (worker) | one task | built: `finish`, `block`, `note_fact`. Planned: `inbox` |
 | researcher | one task | `finish_doc`, `note_fact`, `block` |
 | foreman | one epic, optional | `story_start`, `tell`, `verdict`, `query`, limited to its epic |
 | ambient | one event | set by the reaction that starts it |
@@ -475,6 +491,17 @@ The king's instructions list its tools by name, generated from the tools
 defined for the role `king` (`{tools}` in `rat-kingdom-king-instructions`),
 so a tool added later is listed without editing them. A changed list
 changes the king's fingerprint, and a reload restarts it in place.
+
+**Built:** `query` (`rat-kingdom-fact.el`) is the king's read-only look
+into the space (5.5). It takes a `category`, which must be a known one,
+and optionally `scope`, `identity`, `owner`, `contains` (a substring of
+the printed payload, ignoring case), `archived` (true to search the
+archive too) and `limit` (default 20, at most 200). It answers one block
+per tuple, newest first: id, category, scope, identity, owner, the actor
+from the operations log, time, and the payload, cut to
+`rat-kingdom-fact-query-payload-limit` characters; it says how many
+matched and whether the list was cut off. It never writes.
+`fact_forget` retracts one `fact` by id and refuses any other tuple.
 
 The king's chores from imp and rk2 (run the check, merge, close the task,
 clean the worktree, notice a finished worker) are reactions. Review
@@ -796,6 +823,11 @@ wait longer for review than for implementation.
    list its tools from those defined. Still to come: an epic token that
    dispatches ready tasks, an epic status view, feature branches per epic,
    the foreman, and the epic plan surface (4).
+
+   **Facts** (built: `rat-kingdom-fact.el`): the worker's `note_fact`,
+   facts in every worker's brief through
+   `rat-kingdom-story-brief-functions`, and the king's `query` and
+   `fact_forget`.
 7. **Configuration**: layers, mixins, aspects, validated `config_set`.
 8. **Dashboard** additions with the factory floor, attention queue and
    review card (surfaces 1 to 3), then the **research** workflow, docs and
@@ -817,4 +849,5 @@ but a disposable bare repository.
 4. Where do design docs live: in the repo, or in the project's org-roam
    hub?
 5. Does the king see every `fact`, or only those a reaction promotes?
+   Today it can `query` every one, and is told none unasked.
 6. The package layout.

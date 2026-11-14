@@ -203,6 +203,26 @@ by a new one in the same worktree, told to look at what is there. A check
 or setup that was running runs again. The king takes up its earlier
 session; `C-u M-x rat-kingdom-king` starts a new one instead.
 
+### Facts
+
+A worker that learns something a later worker in the same repository
+would want to know, such as a convention, a pitfall, how to run the tests
+or where something lives, records it with its `note_fact` tool: the fact,
+and optionally a topic and the files it concerns. A fact is a `fact`
+tuple scoped to the repository with no owner, so it outlives the story
+that wrote it. Every worker started later in that repository is told the
+repository's facts in its prompt, newest first, at most 40 of them and
+8000 characters (`rat-kingdom-fact-brief-max-count`,
+`rat-kingdom-fact-brief-max-chars`). A fact may be at most 1500
+characters (`rat-kingdom-fact-max-length`).
+
+The king can look into the space with `query`, which only reads: one
+category, optionally narrowed by scope, identity, owner and a text the
+payload contains, newest first, archived tuples too if asked. Ask it
+"what facts do we have for myrepo?". It removes a fact that turned out
+wrong with `fact_forget`. Other code can add its own section to a
+worker's prompt through `rat-kingdom-story-brief-functions`.
+
 ### Workflows
 
 A workflow is data: places, and the step taken from each.

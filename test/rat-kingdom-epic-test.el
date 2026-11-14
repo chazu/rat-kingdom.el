@@ -480,7 +480,8 @@ between them to the user first, and call `epic_create` only once they agree"
       (rat-kingdom-mcp-define-tool "rat_only" :description "Other."
                                    :roles '(rat) :function #'ignore)
       (let ((text (flat (rat-kingdom-king-instructions))))
-        (should (string-search ", epic_create and later." text))
+        (should (string-search ", epic_create, " text))
+        (should (string-search " and later." text))
         (should-not (string-search "rat_only" text)))
       ;; Instructions with no place for the list are left as they are.
       (setq rat-kingdom-king-instructions "Be brief.")
@@ -492,7 +493,7 @@ between them to the user first, and call `epic_create` only once they agree"
   (rat-kingdom-story-test-with-repo (space _path)
     (rat-kingdom-king-test--start space)
     (let ((prompt (rat-kingdom-story-test--prompt "king")))
-      (should (string-search "task_create and epic_create" prompt))
+      (should (string-search "task_create, epic_create" prompt))
       (should-not (string-search "{tools}" prompt)))))
 
 (provide 'rat-kingdom-epic-test)

@@ -33,7 +33,8 @@
 ;; `rat-kingdom-run-backend'.  The default is agent-shell.  Tests use a
 ;; backend that starts nothing.
 ;;
-;; Two tools are offered to a worker: `finish' and `block'.
+;; Two tools are offered to a worker here: `finish' and `block'.
+;; rat-kingdom-fact.el adds `note_fact'.
 ;;
 ;; A run need not belong to a story.  The king is a run too; see
 ;; rat-kingdom-king.el.
@@ -108,6 +109,10 @@ work around that.
 rat-kingdom server with a summary and the checks you ran. Your worktree \
 must be clean.
 - If you cannot finish, call the `block' tool and say what you need.
+- When you learn something a later worker in this repository would want to \
+know, such as a convention, a pitfall, how to build or test something, or \
+where something lives, record it with the `note_fact' tool. Do not use it \
+for progress reports on this task.
 - After `finish' or `block', stop. Do not start other work."
   "What every worker is told before its task."
   :type 'string
