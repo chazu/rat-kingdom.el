@@ -1313,5 +1313,67 @@ rk/integration. It is pushed to the branch of the same name.")
    (rat-kingdom-git-publish space (arg 'repo) (arg 'branch)
                             :remote (arg 'remote) :actor rat-kingdom-king-id)))
 
+(rat-kingdom-king--deftool "config_show"
+    "Show the effective configuration of a repository, or of an epic or \
+task in it: every key (workflow, target, commands, setup, check, agents, \
+timeouts, attempts, max-workers, track) with its value and the layer it \
+came from (defaults, global, registration, repo, epic or task), the files \
+the layers are read from, any configuration being ignored and why, and \
+anything the merged result cannot resolve, such as an unknown workflow or \
+an undefined command. It never writes."
+    '((:name "repo" :type string :description "The repository's name.")
+      (:name "epic" :type string :optional t
+       :description "An epic's id, to include its policy.")
+      (:name "task" :type string :optional t
+       :description "A task's id, to include its policy."))
+  (rat-kingdom-config-show space (arg 'repo) :epic (arg 'epic)
+                           :task (arg 'task)))
+
+(rat-kingdom-king--deftool "config_set"
+    "Set or remove one configuration key at one layer. Change it only when \
+the user asks. Layers: global (every repository; the file config.eld in \
+the rat-kingdom directory), repo (one repository; <repo>/.rk/config.eld \
+in the user's checkout), epic or task (a policy kept by rat-kingdom). A \
+more specific layer wins, and for commands, agents, timeouts and track, \
+sub-key by sub-key. Keys and the layers that may set them: workflow (all), \
+target (global, repo), commands (global, repo), setup (global, repo), check \
+(all), agents (all), timeouts (all), attempts (all), max-workers (global), \
+track (global, repo). Before writing, the change is checked for every \
+repository it affects: an unknown workflow, an undefined command name, a \
+key not allowed at the layer, a value of the wrong shape or a target that \
+is not a local branch refuses it, and nothing is written. A file is \
+rewritten whole, so comments in it are not kept. A change to track is \
+applied to info/exclude at once. Returns what changed and the value now in \
+effect."
+    '((:name "layer" :type string
+       :description "global, repo, epic or task.")
+      (:name "key" :type string
+       :description "The key, e.g. check or :check.")
+      (:name "value" :type string
+       :description "The new value, as Emacs Lisp text, read and never \
+evaluated; nil removes the key from the layer, so a less specific layer's \
+value applies. workflow: a name, story. target: a branch, \
+\"rk/integration\". commands: a property list from command name to \
+argument list, (:lint (\"npx\" \"eslint\" \".\") :test (\"npm\" \"test\")). \
+setup and check: an argument list run without a shell, (\"make\" \"test\"), \
+or command names defined in commands, run in order, (lint test). agents: \
+(:worker codex :foreman claude). timeouts: seconds, (:worker 7200 :check \
+1800). attempts and max-workers: a positive integer, 5. track: (:rk nil \
+:beads t), t to keep the directory in Git, nil to keep it out. A value for \
+commands, agents, timeouts or track replaces that key's whole value at \
+this layer; sub-keys it leaves out come from the layers below.")
+      (:name "repo" :type string :optional t
+       :description "The repository's name. Required for the repo, epic \
+and task layers.")
+      (:name "epic" :type string :optional t
+       :description "The epic's id, for the epic layer.")
+      (:name "task" :type string :optional t
+       :description "The task's id, for the task layer."))
+  (rat-kingdom-config-set
+   space (arg 'layer) (arg 'key)
+   (rat-kingdom-config-read-value (alist-get 'value arguments))
+   :repo (arg 'repo) :epic (arg 'epic) :task (arg 'task)
+   :actor rat-kingdom-king-id))
+
 (provide 'rat-kingdom-king)
 ;;; rat-kingdom-king.el ends here
