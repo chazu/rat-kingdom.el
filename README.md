@@ -272,6 +272,37 @@ notes.
 
 `epic_cancel` keeps the branch, with what its stories merged.
 
+### Foremen
+
+A big epic can have a foreman, so that its reviews do not flood the king.
+A foreman is an agent of its own, `F-` and the epic's id, that runs one
+epic for the king. The king starts one with `foreman_start` (the epic, and
+optionally `codex` as its agent; Claude Code otherwise), or with
+`foreman` on `epic_start`, when you ask or when the epic is big. Nothing
+starts one by itself.
+
+While it runs, news of the epic's stories goes to the foreman instead of
+the king: review requests, stories that stop or look stuck, held tasks,
+merges. It reviews with `story_diff`, `story_show` and `verdict`, steers
+a worker with `tell` (the worker sees "Message from foreman F-…"), and
+when a story is stuck it retries a held task with `epic_retry`, adds a
+task to the epic with `task_create`, or tells the king with `report`. It
+can also `query` the space, see its epic with `status`, and start a story
+at once for a task of its epic with `story_start`. Every one of its tools
+refuses a story or task outside its epic, and it has no `publish` and
+none of the king's other tools. It works in the repository's checkout, but
+is told never to edit files, and like every agent it cannot push.
+
+The king still hears of the epic as a whole: that it is done, that it is
+ready to land (the landing review stays with the king), and what the
+foreman reports, as "[rat-kingdom] Report from the foreman of epic …".
+`foreman_stop` hands reviews back to the king, with any news the foreman
+had not read. A foreman stops by itself when its epic is done or
+cancelled, and the king is told. If a foreman dies, news goes back to the
+king, saying so. `status` and `epic_show` show "foreman F-… (claude,
+working)", idle or stopped. After a restart a foreman takes up its session
+again.
+
 ### Choosing the agent
 
 Each story's workers run Claude Code or OpenAI Codex. Tell the king which
@@ -345,7 +376,8 @@ what the last Emacs left in flight. A worker that was cut off is replaced
 by a new one in the same worktree, told to look at what is there. A check
 or setup that was running runs again, and so does the check of an epic
 that was landing. Running epics carry on: the stories their ready tasks
-have room for are started, and none twice. The king
+have room for are started, and none twice. An epic's foreman that was cut
+off takes up its session again. The king
 takes up its earlier session; `C-u M-x rat-kingdom-king` starts a new one
 instead.
 

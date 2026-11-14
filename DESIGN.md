@@ -345,11 +345,33 @@ is made twenty seconds later and at the end of its next turn. A message is
 removed after it is sent, so a crash between the two repeats it and never
 loses it.
 
+**Built for foremen** (`rat-kingdom-foreman.el`). An epic's foreman (9) is
+given its news the same way, by the same code: `rat-kingdom-king-deliver-to`
+gives any run the `message` tuples addressed to it with `:to`, as one
+prompt headed "[rat-kingdom] News from the engine:", retracting them only
+after the send, and retries on a timer of its own;
+`rat-kingdom-king-deliver` is that for the king. A message written with a
+`:to` is tried soon after (a space change hook), and a run's messages
+whenever it ends a turn. Which run is told of an epic's work is chosen by
+`rat-kingdom-king-route`, through `rat-kingdom-king-route-functions`: while
+a live epic's foreman is running (or starting), news of the epic's stories
+(review requests, stopped and stuck stories, held tasks, merges, a task
+dispatch could not start) is addressed to it instead of the king. News of
+the epic as a whole (done, ready to land, landing that failed) has no
+epic to route by and stays the king's, as do the foreman's own `report`s.
+Without a running foreman everything goes to the king as before; if the
+foreman died rather than being stopped, each piece of news the king gets
+instead says so. Messages that waited for a foreman when it stops, by
+`foreman_stop`, with its epic, by dying, or at a reconcile that cannot take
+it up again, are readdressed to the king in one transaction, each prefixed
+with what happened, so none is lost.
+
 **Built for workers** (`rat-kingdom-message.el`). The king's `tell`
 writes a linear `message` tuple scoped to the story's repo, owned by the
 story so that it is archived with it, with the payload `:to-story STORY
 :from FROM :text TEXT`. FROM is `king`; `rat-kingdom-message-tell` takes
-another, for the foreman to come. Telling an unknown or finished story,
+another, and the foreman passes its run id, which workers see as
+"Message from foreman F-…". Telling an unknown or finished story,
 or with blank text, is an error. A message is addressed to the story, not
 to a run, and is given only to the story's current run while that run is
 `working`: never to one that has reported with `finish` or `block`, and
@@ -418,7 +440,11 @@ worker takes its old place ahead of the queue for a free worker, which is
 kept and served once the replaced workers have started. A
 check that was running is run again, and so is a setup that was running
 in a new worker worktree, which keeps its worker place. The king takes up its earlier
-session by its id. An epic that was `landing` stays so; if its landing
+session by its id. So does an epic's foreman, on reconcile: a foreman run
+left `interrupted` whose epic is live is recorded again with the same agent
+and `:resume` set to its session (`rat-kingdom-foreman-reconcile`), and the
+reaction that starts runs takes the session up; one whose epic ended is
+marked `stopped` and its waiting news given to the king. An epic that was `landing` stays so; if its landing
 check was running, `rat-kingdom-epic-reconcile` runs it again in a fresh
 candidate (from `rat-kingdom-reconcile`, as interrupted story checks are),
 and a landing that waited for a review still waits. Running epics are
@@ -535,16 +561,53 @@ go, and it lets a role be denied built-in tools as well.
 
 | Role | Lifetime | Tools |
 |---|---|---|
-| king | long-lived, global, no worktree | built: `status` (with the tracker tasks available, each with its epic and agent), `repo_add`, `repo_sync`, `workflow_list`, `story_start` (optionally from a `task`, with an `agent`; a task's `rk-agent:` and `rk-workflow:` labels are the defaults), `story_show`, `story_diff`, `story_move`, `story_cancel`, `verdict`, `publish`, `query`, `fact_forget`, `task_create`, `epic_create`, `epic_propose` (the epic plan surface, 14.1), `epic_start` (optionally with a `feature_branch`), `epic_pause`, `epic_resume`, `epic_cancel`, `epic_retry`, `epic_show`, `epic_diff`, `epic_verdict` (section 10), `tell`; `story_start` also takes a rarely needed `target`. Planned: `config_set` |
+| king | long-lived, global, no worktree | built: `status` (with the tracker tasks available, each with its epic and agent), `repo_add`, `repo_sync`, `workflow_list`, `story_start` (optionally from a `task`, with an `agent`; a task's `rk-agent:` and `rk-workflow:` labels are the defaults), `story_show`, `story_diff`, `story_move`, `story_cancel`, `verdict`, `publish`, `query`, `fact_forget`, `task_create`, `epic_create`, `epic_propose` (the epic plan surface, 14.1), `epic_start` (optionally with a `feature_branch`, and a `foreman`), `epic_pause`, `epic_resume`, `epic_cancel`, `epic_retry`, `epic_show`, `epic_diff`, `epic_verdict` (section 10), `tell`, `foreman_start`, `foreman_stop`; `story_start` also takes a rarely needed `target`. Planned: `config_set` |
 | rat (worker) | one task | built: `finish`, `block`, `note_fact`, `inbox` |
 | researcher | one task | `finish_doc`, `note_fact`, `block` |
-| foreman | one epic, optional | `story_start`, `tell`, `verdict`, `query`, limited to its epic |
+| foreman | one epic, optional | built: `status` (its epic: the `epic_show` view and its stories' lines), `story_show`, `story_diff`, `verdict`, `tell`, `query`, `task_create` (its epic is the parent), `epic_retry`, `story_start` (for a task of its epic), `report` (to the king); every one but `query` limited to its epic |
 | ambient | one event | set by the reaction that starts it |
 
 The king's instructions list its tools by name, generated from the tools
 defined for the role `king` (`{tools}` in `rat-kingdom-king-instructions`),
 so a tool added later is listed without editing them. A changed list
 changes the king's fingerprint, and a reload restarts it in place.
+
+A tool is defined per role: a definition replaces only the tools of its
+name that share a role with it, so the foreman's `status` or `tell` is
+its own and the king's is unchanged, and no role is offered two tools of
+one name.
+
+**Built: the foreman** (`rat-kingdom-foreman.el`). An optional long-lived
+agent that runs one epic on the king's behalf, so that a big epic does not
+flood the king with reviews. It is a run like the king's, with the id
+`F-` and the epic's id, the role `foreman`, `:epic` and `:repo`, in the
+repository's checkout, which its instructions
+(`rat-kingdom-foreman-instructions`, with `{epic}`, `{title}`, `{repo}`,
+`{goal}` and a generated `{tools}`) say never to edit. It runs Claude Code
+unless started with another agent; `rat-kingdom-default-agent` is not
+applied. Its first prompt has the epic's `epic_show` view and the stories
+waiting for review. The king's `foreman_start` (an epic, optionally an
+agent) starts one for a running or paused epic and records `:foreman` on
+the epic's record, refusing if one is running; `epic_start` with
+`foreman` starts one right after. `foreman_stop` stops it and hands its
+reviews back to the king. It stops by itself when its epic is done or
+cancelled (`rat-kingdom-epic-ended-functions`), and the king is told.
+
+The foreman's tools share the king's code: `rat-kingdom-king-story-start`,
+`rat-kingdom-king-verdict`, `rat-kingdom-king--show`,
+`rat-kingdom-king--diff`, `rat-kingdom-message-tell-answer` take an
+optional scope check, which the foreman's tools pass and the king's do
+not. It refuses a story whose `:epic` is not the foreman's epic, live or
+archived, and a task whose parent is not the epic; it is applied before
+anything is written. `task_create` forces the parent to the epic and
+refuses dependencies outside it (`rat-kingdom-epic-task-create-answer`);
+`epic_retry` is always its own epic's
+(`rat-kingdom-epic-retry-answer`); `report` writes a message to the king,
+"[rat-kingdom] Report from the foreman of epic E: …". `query` is the
+king's, offered to both roles. The foreman has no `publish`, `repo_add`,
+`repo_sync`, `epic_create`, `epic_start`, `epic_cancel`, `epic_verdict`,
+`story_move`, `story_cancel` or `foreman_*`. `status` and `epic_show`
+show "foreman F-… (agent, working)", idle, starting or stopped.
 
 **Built:** `query` (`rat-kingdom-fact.el`) is the king's read-only look
 into the space (5.5). It takes a `category`, which must be a known one,
@@ -766,7 +829,8 @@ check and review, and the target does not move.
 Without a feature branch nothing changes: the epic is done when its tasks
 are closed.
 
-Not built yet: a foreman, the epic plan surface.
+An epic's foreman (section 9), when it has one, is told of its stories
+instead of the king (8.2).
 
 ## 11. Integration and publication
 
@@ -1043,7 +1107,11 @@ wait longer for review than for implementation.
    one check and the king's `epic_verdict` after `epic_diff`, conflicts
    and failed checks returned as tasks on the epic's branch, and an
    interrupted landing check run again on reconcile, tested with real
-   Git. Still to come: the foreman.
+   Git. The foreman is built (`rat-kingdom-foreman.el`): `foreman_start`
+   and `foreman_stop`, news of an epic's stories routed to it through the
+   king's delivery, its tools limited to its epic, `report`, its end with
+   the epic's, and its session taken up again on reconcile, tested with
+   the backend that starts no agent.
 
    **Facts** (built: `rat-kingdom-fact.el`): the worker's `note_fact`,
    facts in every worker's brief through
@@ -1066,7 +1134,10 @@ but a disposable bare repository.
 2. Does a passing check on a `story-lite` story integrate with no review
    at all, or does the user confirm the first few per repo?
 3. When is a foreman worth starting, given that waves advance on their
-   own? Proposal: only when the epic's policy asks for one.
+   own? Answered for now: the king starts one when the user asks, or when
+   an epic is big, with `foreman_start` or `foreman` on `epic_start`. There
+   is no automatic policy yet; an epic's policy could ask for one once
+   configuration (step 7) exists.
 4. Where do design docs live: in the repo, or in the project's org-roam
    hub?
 5. Does the king see every `fact`, or only those a reaction promotes?

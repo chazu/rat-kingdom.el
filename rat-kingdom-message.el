@@ -11,7 +11,8 @@
 
 ;; Messages to workers (DESIGN.md, sections 5.4, 8.2 and 9).
 ;;
-;; The king tells a story's worker something with the `tell' tool.  The
+;; The king tells a story's worker something with the `tell' tool, and
+;; so does the foreman of the story's epic (rat-kingdom-foreman.el).  The
 ;; message is a linear `message' tuple scoped to the story's repository
 ;; and owned by the story, so it is archived with it, with the payload
 ;; `:to-story STORY :from FROM :text TEXT'.  It is addressed to the
@@ -67,10 +68,13 @@ space once the run is working.")
 ;;;; Writing
 
 (defun rat-kingdom-message--sender (from)
-  "Return the sender FROM as words: \"the king\" or FROM itself."
-  (if (or (null from) (equal from rat-kingdom-king-id))
-      "the king"
-    from))
+  "Return the sender FROM as words.
+That is \"the king\", \"foreman F-...\" for the run of an epic's
+foreman, or else FROM itself."
+  (cond ((or (null from) (equal from rat-kingdom-king-id)) "the king")
+        ((string-prefix-p rat-kingdom-foreman-id-prefix from)
+         (format "foreman %s" from))
+        (t from)))
 
 (cl-defun rat-kingdom-message-tell (space story text &key from)
   "Leave in SPACE the message TEXT for the worker of STORY, a story id.
@@ -196,7 +200,7 @@ Return how many were given."
             (let ((from (plist-get payload :from)))
               (if (or (null from) (equal from rat-kingdom-king-id))
                   ""
-                (format "(from %s) " from)))
+                (format "(from %s) " (rat-kingdom-message--sender from))))
             (string-replace "\n" "\n  " (plist-get payload :text))
             "\n")))
 
@@ -371,8 +375,17 @@ never told."
     '((:name "story" :type string :description "The story's id, like S-1a2b.")
       (:name "text" :type string
        :description "The message, written so that the worker can act on it."))
-  (let* ((story (arg 'story))
-         (tuple (rat-kingdom-message-tell space story (arg 'text))))
+  (rat-kingdom-message-tell-answer space (arg 'story) (arg 'text)))
+
+(cl-defun rat-kingdom-message-tell-answer (space story text &key from check)
+  "Tell the worker of STORY in SPACE the TEXT, as `tell' does.
+FROM is the sender, by default the king.  Deliver it at once if the
+worker can take it, and return what `tell' answers.  CHECK, if given,
+is a scope check, called with the story's token, live or archived,
+before anything is written; see `rat-kingdom-king-story-start'."
+  (when (and check story)
+    (funcall check 'story (car (rat-kingdom-king--find-story space story))))
+  (let ((tuple (rat-kingdom-message-tell space story text :from from)))
     (rat-kingdom-message-deliver space story)
     (rat-kingdom-message--told space story tuple)))
 

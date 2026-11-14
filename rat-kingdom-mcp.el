@@ -38,7 +38,11 @@ Claude Code calls its tools mcp__rat-kingdom__NAME.")
   "The defined tools, as property lists, in definition order.")
 
 (cl-defun rat-kingdom-mcp-define-tool (name &key description args roles function)
-  "Define the tool NAME, replacing any tool of that name.
+  "Define the tool NAME, replacing any tool of that name offered to ROLES.
+Tools of one name may be defined for different roles, so that a role
+is offered its own version: the foreman's `status' is not the king's.
+A role is never offered two tools of one name: a definition replaces
+every tool of its name that shares a role with it.
 DESCRIPTION tells the agent what it does.  ARGS is a list of property
 lists with `:name', `:type' (a symbol such as `string', `integer',
 `array' or `object'), `:description' and `:optional'.  An argument of
@@ -52,9 +56,12 @@ an object as an alist."
   (let ((tool (list :name name :description description :args args
                     :roles roles :function function)))
     (setq rat-kingdom-mcp--tools
-          (append (cl-remove name rat-kingdom-mcp--tools
-                             :key (lambda (other) (plist-get other :name))
-                             :test #'equal)
+          (append (cl-remove-if
+                   (lambda (other)
+                     (and (equal (plist-get other :name) name)
+                          (or (cl-intersection (plist-get other :roles) roles)
+                              (equal (plist-get other :roles) roles))))
+                   rat-kingdom-mcp--tools)
                   (list tool)))
     tool))
 

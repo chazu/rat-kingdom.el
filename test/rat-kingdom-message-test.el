@@ -398,7 +398,7 @@ Second.")))
         (should (eql (cl-count (cdr entry) (symbol-value (car entry))) 1)))
       (should (equal rat-kingdom-story-brief-functions
                      '(rat-kingdom-fact-brief rat-kingdom-message-brief)))
-      (should (eql (cl-count "tell" rat-kingdom-mcp--tools
+      (should (eql (cl-count "tell" (rat-kingdom-mcp--tools-for 'king)
                              :key (lambda (tool) (plist-get tool :name))
                              :test #'equal)
                    1))

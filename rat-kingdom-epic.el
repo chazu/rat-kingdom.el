@@ -80,7 +80,12 @@
 ;; epic's branch; when it is merged, the epic lands again.  The branch
 ;; is never deleted.
 ;;
-;; Not here yet: a foreman.
+;; An epic may have a foreman, an agent that runs it for the king
+;; (rat-kingdom-foreman.el).  Its id is kept as `:foreman' in the
+;; record.  While it runs, news of the epic's work that
+;; `rat-kingdom-epic--tell' is given the epic for goes to it instead of
+;; the king; `rat-kingdom-epic-ended-functions' are told when an epic
+;; ends, so that its foreman stops.
 
 ;;; Code:
 
@@ -94,6 +99,8 @@
 (require 'rat-kingdom-agent-shell)
 (require 'rat-kingdom-story)
 (require 'rat-kingdom-king)
+
+(autoload 'rat-kingdom-foreman-start "rat-kingdom-foreman")
 
 (defconst rat-kingdom-epic-task-types '("task" "bug" "feature" "chore")
   "The kinds of task `task_create' makes.")
@@ -530,6 +537,31 @@ it depends on %s: %s.%s It was not removed" id
 
 ;;;; The king's tools
 
+(defun rat-kingdom-epic-task-create-answer (space repo title &rest options)
+  "Create the task TITLE in REPO in SPACE, as `task_create' does.
+OPTIONS are those of `rat-kingdom-epic-create-task'.  Return what
+`task_create' answers.  The foreman calls it with its epic as
+`:parent'."
+  (let* ((depends (rat-kingdom-epic--ids (plist-get options :depends-on)))
+         (parent (plist-get options :parent))
+         (id (apply #'rat-kingdom-epic-create-task space repo title
+                    (plist-put (copy-sequence options) :depends-on depends))))
+    (string-join
+     (delq nil
+           (list (format "Created the task %s in %s: %s." id repo title)
+                 (and parent (format "Epic: %s." parent))
+                 (and depends (format "Depends on: %s."
+                                      (string-join depends ", ")))
+                 (and (plist-get options :agent)
+                      (format "Agent: %s." (plist-get options :agent)))
+                 (and (plist-get options :workflow)
+                      (format "Workflow: %s." (plist-get options :workflow)))
+                 (if (rat-kingdom-space-rd space (list 'available :scope repo
+                                                       :identity id))
+                     "It is ready now. Nothing has been started."
+                   "It is not ready yet. Nothing has been started.")))
+     " ")))
+
 (rat-kingdom-king--deftool "task_create"
     "Create one task in a repository's tracker (br), optionally in an epic, \
 depending on other tasks, and naming the agent and workflow its story should \
@@ -556,26 +588,11 @@ codex. Kept as the label rk-agent:NAME; story_start uses it by default.")
       (:name "workflow" :type string :optional t
        :description "The workflow its story should follow. Kept as the \
 label rk-workflow:NAME; story_start uses it by default."))
-  (let* ((repo (arg 'repo))
-         (depends (rat-kingdom-epic--ids (arg 'depends_on)))
-         (id (rat-kingdom-epic-create-task
-              space repo (arg 'title)
-              :description (arg 'description) :priority (arg 'priority)
-              :type (arg 'type) :parent (arg 'parent) :depends-on depends
-              :agent (arg 'agent) :workflow (arg 'workflow))))
-    (string-join
-     (delq nil
-           (list (format "Created the task %s in %s: %s." id repo (arg 'title))
-                 (and (arg 'parent) (format "Epic: %s." (arg 'parent)))
-                 (and depends (format "Depends on: %s."
-                                      (string-join depends ", ")))
-                 (and (arg 'agent) (format "Agent: %s." (arg 'agent)))
-                 (and (arg 'workflow) (format "Workflow: %s." (arg 'workflow)))
-                 (if (rat-kingdom-space-rd space (list 'available :scope repo
-                                                       :identity id))
-                     "It is ready now. Nothing has been started."
-                   "It is not ready yet. Nothing has been started.")))
-     " ")))
+  (rat-kingdom-epic-task-create-answer
+   space (arg 'repo) (arg 'title)
+   :description (arg 'description) :priority (arg 'priority)
+   :type (arg 'type) :parent (arg 'parent) :depends-on (arg 'depends_on)
+   :agent (arg 'agent) :workflow (arg 'workflow)))
 
 (rat-kingdom-king--deftool "epic_create"
     "Create an epic in a repository's tracker (br) and its stories as tasks \
@@ -701,11 +718,33 @@ That is the `:target' it was started with, or else its repository's."
       (plist-get (rat-kingdom-repo-get space (plist-get record :scope))
                  :target)))
 
-(defun rat-kingdom-epic--tell (space repo text)
-  "Leave the king a message in SPACE, about REPO, saying TEXT."
-  (rat-kingdom-space-out space 'message :scope repo
-                         :payload (list :to rat-kingdom-king-id :text text)
-                         :actor "engine"))
+(defun rat-kingdom-epic--tell (space repo text &optional epic)
+  "Leave the king a message in SPACE, about REPO, saying TEXT.
+With EPIC, the id of an epic, the news is of that epic's work, which
+goes where `rat-kingdom-king-route' says: to the epic's foreman while
+one is running.  News of an epic as a whole, that it is done or ready
+to land, is given no EPIC, so it is always the king's."
+  (pcase-let ((`(,to . ,note) (rat-kingdom-king-route space repo epic)))
+    (rat-kingdom-space-out space 'message :scope repo
+                           :payload (list :to to
+                                          :text (if note
+                                                    (concat text "\n" note)
+                                                  text))
+                           :actor "engine")))
+
+(defvar rat-kingdom-epic-ended-functions nil
+  "Functions called when an epic has ended, done or cancelled.
+Each is called with the space and the epic's tuple as it is now, after
+the transaction that ended it.  rat-kingdom-foreman.el puts one here,
+which stops the epic's foreman.  Add to it with `add-hook', so that
+reloading does not add a function twice.")
+
+(defun rat-kingdom-epic--ended (space repo id)
+  "Tell `rat-kingdom-epic-ended-functions' that the epic ID of REPO in SPACE ended."
+  (when-let* ((record (rat-kingdom-epic-record space id repo)))
+    (dolist (function rat-kingdom-epic-ended-functions)
+      (with-demoted-errors "rat-kingdom: epic ended function: %S"
+        (funcall function space record)))))
 
 ;;;; What the tracker and the space say of an epic's tasks
 
@@ -834,7 +873,8 @@ cannot be started is held, and the king is told why."
 and %s."
                           (rat-kingdom-epic--name record) task
                           (plist-get (plist-get available :payload) :title)
-                          (error-message-string err) id task)))))))))
+                          (error-message-string err) id task)
+                  id))))))))
     (nreverse started)))
 
 (defun rat-kingdom-epic-dispatch (space &optional repo id)
@@ -897,28 +937,32 @@ stories" total merged)))
                  (closed (rat-kingdom-epic--problem
                           #'rat-kingdom-task-close
                           (rat-kingdom-epic--adapter space repo) id reason)))
-            (rat-kingdom-space-with-transaction space
-              (when (rat-kingdom-epic--update
-                     space repo id
-                     (lambda (payload)
-                       (when (member (plist-get payload :state)
-                                     rat-kingdom-epic-building-states)
-                         (plist-put (plist-put payload :state "done")
-                                    :finished
-                                    (funcall rat-kingdom-space-now-function)))))
-                (rat-kingdom-epic--tell
-                 space repo
-                 (concat (format "Epic %s is done: %s."
-                                 (rat-kingdom-epic--name record)
-                                 (if (= merged total)
-                                     (format "%d stories merged" merged)
-                                   (format "all %d tasks are closed, %d of \
+            (when (rat-kingdom-space-with-transaction space
+                    (when (rat-kingdom-epic--update
+                           space repo id
+                           (lambda (payload)
+                             (when (member (plist-get payload :state)
+                                           rat-kingdom-epic-building-states)
+                               (plist-put (plist-put payload :state "done")
+                                          :finished
+                                          (funcall
+                                           rat-kingdom-space-now-function)))))
+                      (rat-kingdom-epic--tell
+                       space repo
+                       (concat (format "Epic %s is done: %s."
+                                       (rat-kingdom-epic--name record)
+                                       (if (= merged total)
+                                           (format "%d stories merged" merged)
+                                         (format "all %d tasks are closed, %d of \
 them by merged stories" total merged)))
-                         (if closed
-                             (format " The br epic %s could not be closed: %s"
-                                     id closed)
-                           (format " The br epic %s is closed." id))))
-                t)))))))))
+                               (if closed
+                                   (format " The br epic %s could not be \
+closed: %s"
+                                           id closed)
+                                 (format " The br epic %s is closed." id))))
+                      t))
+              (rat-kingdom-epic--ended space repo id)
+              t))))))))
 
 ;;;; Landing an epic with a feature branch
 
@@ -1154,7 +1198,8 @@ kept for the user to delete (git branch -d %s)."
                    (format " The br epic %s could not be closed: %s" id closed)
                  (format " The br epic %s is closed." id))
                (rat-kingdom-epic--payload record :branch)
-               (rat-kingdom-epic--payload record :branch))))))
+               (rat-kingdom-epic--payload record :branch))))
+    (rat-kingdom-epic--ended space repo id)))
 
 (defun rat-kingdom-epic--move-target (space repo id)
   "Land the epic ID of REPO in SPACE, whose landing passed its check and review.
@@ -1523,6 +1568,22 @@ gives them."
           (when-let* ((limit (rat-kingdom-epic--payload record :max-parallel)))
             (format ", at most %d stories at once" limit))))
 
+(defun rat-kingdom-epic-foreman-phrase (space record)
+  "Return what the epic RECORD in SPACE has to say of its foreman, or nil.
+That is \"foreman F-ID (AGENT, STATE)\": STATE is working or idle while
+its agent runs, starting before then, and stopped, with why if it did
+not stop on purpose, after."
+  (when-let* ((id (rat-kingdom-epic--payload record :foreman)))
+    (let* ((run (rat-kingdom-run-get space id))
+           (state (plist-get run :state)))
+      (format "foreman %s (%s, %s)" id
+              (or (plist-get run :agent) rat-kingdom-agent-shell-fallback-agent)
+              (cond ((rat-kingdom-run-live-p id)
+                     (if (rat-kingdom-run-busy-p id) "working" "idle"))
+                    ((equal state "starting") "starting")
+                    ((member state '(nil "stopped")) "stopped")
+                    (t (format "stopped: %s" state)))))))
+
 (defun rat-kingdom-epic--status-entry (space record)
   "Return the lines `status' gives for the epic RECORD in SPACE."
   (let ((head (format "- %s [%s] %s: %s"
@@ -1544,6 +1605,9 @@ gives them."
                  (list
                   (format "%s, %s" head (rat-kingdom-epic--progress record tasks))
                   (when-let* ((phrase (rat-kingdom-epic--landing-phrase
+                                       space record)))
+                    (concat "    " phrase))
+                  (when-let* ((phrase (rat-kingdom-epic-foreman-phrase
                                        space record)))
                     (concat "    " phrase))
                   (and stories
@@ -1620,7 +1684,7 @@ For `rat-kingdom-king-status-functions'."
                                   task))
                         (rat-kingdom-epic--tasks space record))))
     (concat
-     (format "Epic %s in %s: %s\nState: %s%s. %s.\n%s"
+     (format "Epic %s in %s: %s\nState: %s%s. %s.\n%s%s"
              id (plist-get record :scope) (plist-get payload :title)
              (rat-kingdom-epic--state-phrase record)
              (cond ((plist-get payload :finished)
@@ -1635,6 +1699,9 @@ For `rat-kingdom-king-status-functions'."
              (rat-kingdom-epic--progress record tasks)
              (if-let* ((phrase (rat-kingdom-epic--landing-phrase space record)))
                  (format "Feature %s.\n" phrase)
+               "")
+             (if-let* ((phrase (rat-kingdom-epic-foreman-phrase space record)))
+                 (format "It has a %s.\n" phrase)
                ""))
      "\n| task | title | status | story | agent | waits on |\n"
      "|---|---|---|---|---|---|\n"
@@ -1674,10 +1741,11 @@ For `rat-kingdom-king-status-functions'."
                   up "\n"))
        ""))))
 
-(defun rat-kingdom-epic--answer (space record started &optional opening)
+(defun rat-kingdom-epic--answer (space record started &optional opening
+                                       closing)
   "Return what the king is told after the epic RECORD in SPACE dispatched.
 STARTED are the stories it started, as (TASK . STORY).  OPENING is the
-first sentence."
+first sentence, and CLOSING, if given, the last paragraph."
   (let* ((record (or (rat-kingdom-epic-record space (plist-get record :identity)
                                               (plist-get record :scope))
                      record))
@@ -1779,7 +1847,8 @@ landing: %s."
                                  (rat-kingdom-epic--landing-phrase space
                                                                    record)))
               ("done" (format "Every task is closed, so the epic is done."))
-              (_ nil))))
+              (_ nil))
+            closing))
      "\n\n")))
 
 ;;;; The king's tools for running epics
@@ -1847,6 +1916,34 @@ task_create" id))
     (unless (rat-kingdom-epic--finish-if-done space repo id)
       (rat-kingdom-epic-dispatch space repo id))))
 
+(defun rat-kingdom-epic-retry-answer (space id task)
+  "Let dispatch start the held TASK of the epic ID in SPACE again.
+Return what `epic_retry' answers.  The foreman calls it with its epic."
+  (let* ((started (rat-kingdom-epic-retry space id task))
+         (record (rat-kingdom-epic--get space id))
+         (story (cdr (assoc task started))))
+    (rat-kingdom-epic--run-reactions space)
+    (concat
+     (format "The task %s of the epic %s is no longer held. "
+             task (rat-kingdom-epic--name record))
+     (cond
+      (story (format "Started %s for it." story))
+      ((not (equal (rat-kingdom-epic--payload record :state) "running"))
+       (format "The epic is %s, so nothing starts until it runs."
+               (rat-kingdom-epic--payload record :state)))
+      ((rat-kingdom-space-rd space (list 'available
+                                         :scope (plist-get record :scope)
+                                         :identity task))
+       "It is ready, and starts when the epic has room under max_parallel.")
+      (t "It starts when the tracker reports it ready."))
+     (if (cl-remove task started :key #'car :test #'equal)
+         (format " Also started: %s."
+                 (mapconcat (lambda (entry)
+                              (format "%s for %s" (cdr entry) (car entry)))
+                            (cl-remove task started :key #'car :test #'equal)
+                            ", "))
+       ""))))
+
 (defun rat-kingdom-epic--true-p (value)
   "Return non-nil if VALUE, an argument from a tool call, means yes."
   (and value
@@ -1912,6 +2009,7 @@ cancelled stories as \(TASK . STORY)."
       (push (cons (plist-get (plist-get story :payload) :task)
                   (plist-get story :identity))
             cancelled))
+    (rat-kingdom-epic--ended space repo id)
     (nreverse cancelled)))
 
 (defun rat-kingdom-epic-retry (space id task)
@@ -1954,12 +2052,24 @@ once. Default no limit but the workers' cap.")
 cut from the repository's target: its stories merge there instead, and the \
 target moves only once, when every task is closed, after one check of the \
 whole and your epic_verdict. Use it when the user wants the epic to land as \
-one unit. Default false: each story merges into the target as it passes."))
+one unit. Default false: each story merges into the target as it passes.")
+      (:name "foreman" :type boolean :optional t
+       :description "true to start a foreman for the epic right after, as \
+foreman_start does: an agent that reviews the epic's stories and steers its \
+workers for you, and reports to you. Use it for a big epic, or when the user \
+asks. Default false: you review its stories."))
   (let* ((repo (arg 'repo))
          (id (arg 'epic))
          (started (rat-kingdom-epic-start
                    space repo id (arg 'max_parallel)
                    (rat-kingdom-epic--true-p (arg 'feature_branch))))
+         (foreman (when (rat-kingdom-epic--true-p (arg 'foreman))
+                    (condition-case err
+                        (format "Started the foreman %s for it: news of its \
+stories goes to the foreman from now on, and it reports to you."
+                                (rat-kingdom-foreman-start space id))
+                      (error (format "No foreman was started: %s"
+                                     (error-message-string err))))))
          (record (rat-kingdom-epic-record space id repo)))
     (rat-kingdom-epic--run-reactions space)
     (rat-kingdom-epic--answer
@@ -1978,7 +2088,8 @@ one unit. Default false: each story merges into the target as it passes."))
 %s lands only after every task is closed, one check of the whole, and your \
 epic_verdict"
                           branch (rat-kingdom-epic--target space record))
-                ""))))))
+                "")))
+     foreman)))
 
 (rat-kingdom-king--deftool "epic_pause"
     "Pause a running epic: no new story of it starts, and those in progress \
@@ -2046,32 +2157,7 @@ its story ended without being merged, such as when it was cancelled, or when \
 its story could not be started."
     '((:name "epic" :type string :description "The epic's id.")
       (:name "task" :type string :description "The held task's id."))
-  (let* ((id (arg 'epic))
-         (task (arg 'task))
-         (started (rat-kingdom-epic-retry space id task))
-         (record (rat-kingdom-epic--get space id))
-         (story (cdr (assoc task started))))
-    (rat-kingdom-epic--run-reactions space)
-    (concat
-     (format "The task %s of the epic %s is no longer held. "
-             task (rat-kingdom-epic--name record))
-     (cond
-      (story (format "Started %s for it." story))
-      ((not (equal (rat-kingdom-epic--payload record :state) "running"))
-       (format "The epic is %s, so nothing starts until it runs."
-               (rat-kingdom-epic--payload record :state)))
-      ((rat-kingdom-space-rd space (list 'available
-                                         :scope (plist-get record :scope)
-                                         :identity task))
-       "It is ready, and starts when the epic has room under max_parallel.")
-      (t "It starts when the tracker reports it ready."))
-     (if (cl-remove task started :key #'car :test #'equal)
-         (format " Also started: %s."
-                 (mapconcat (lambda (entry)
-                              (format "%s for %s" (cdr entry) (car entry)))
-                            (cl-remove task started :key #'car :test #'equal)
-                            ", "))
-       ""))))
+  (rat-kingdom-epic-retry-answer space (arg 'epic) (arg 'task)))
 
 (rat-kingdom-king--deftool "epic_diff"
     "Show the commits and the combined diff of an epic's feature branch \
