@@ -162,14 +162,22 @@ choices selected. Below them:
 
 - **Start right away**, off unless you tick it, and **Max parallel**,
   empty for no limit.
+- **Feature branch: land the epic as one unit**, off unless you tick
+  it. It applies when the epic is started: its stories merge into a
+  branch of its own, `rk/epic/ID`, which lands on the target after one
+  check and the king's `epic_verdict` (see **Feature branch** in
+  [Epics](#epics)). With Start right away also ticked, the epic is started
+  with its branch; without it, the king is told you want one, so that it
+  passes `feature_branch` to `epic_start` when it starts the epic.
 - **Approve and create** keeps the stories ticked, with your edits,
   checks the plan again and creates the epic and its tasks, as
   `epic_create` does. If a story you kept depends on one you left out,
   or anything else is wrong, nothing is created and the surface says
   why. With Start right away ticked the epic is then run, as
-  `epic_start` does; that counts as your approval, so the king does not
-  ask again. The surface shows the epic's id and its tasks, and the king
-  is told the same.
+  `epic_start` does, with a feature branch if you ticked that too; that
+  counts as your approval, so the king does not ask again. The surface
+  shows the epic's id and its tasks, and the king is told the same,
+  including whether the epic has a feature branch.
 - **Send back with notes** sends the plan back to the king with what you
   wrote, and nothing is created. The king revises it and proposes it
   again in a fresh surface.

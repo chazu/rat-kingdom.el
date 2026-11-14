@@ -949,20 +949,23 @@ earlier waves), with a Card per story holding an include CheckBox, its
 key, its title and description as TextFields, what it depends on, and
 Pickers for its agent and workflow (the workflow sets the review mode),
 the proposed values selected and blank meaning the default; the
-options "start right away" (off) and "max parallel" (empty for no
-limit); and Approve, Cancel, and Send back with a notes field. Nothing
+options "start right away" (off), "feature branch: land the epic as one
+unit" (off, with a note that it applies when the epic is started) and
+"max parallel" (empty for no limit); and Approve, Cancel, and Send back with a notes field. Nothing
 is written until Approve: it drops the stories left out, refuses with
 the reason shown on the surface if a kept story depends on one left out
 or the edited plan fails `rat-kingdom-epic-check`, then calls
-`rat-kingdom-epic-create` and, if asked, `rat-kingdom-epic-start`, and
-shows the epic's id and tasks. Every outcome (approved with what was
-created and whether it started, sent back with the notes, dismissed by
+`rat-kingdom-epic-create` and, if asked, `rat-kingdom-epic-start`,
+passing it the feature branch option, and shows the epic's id and
+tasks. A feature branch ticked without "start right away" starts
+nothing; the king is told the user wants one, to pass `feature_branch`
+to `epic_start` when it starts the epic. Every outcome (approved with what was
+created, whether it started and whether with a feature branch, sent back with the notes, dismissed by
 Cancel or by deleting the surface, or the tracker failing partway) is a
 `message` to the king, delivered between its turns. A plan the user
 started from the surface counts as their approval to run it. The
 surface is shown off the selected window, so it never takes the place
-of the buffer the user is typing in. Not yet: a feature-branch option,
-which waits for `epic_start` to have one, and keeping an open plan
+of the buffer the user is typing in. Not yet: keeping an open plan
 across an Emacs restart.
 
 | # | Surface | Shows | Actions | Kind |
@@ -970,7 +973,7 @@ across an Emacs restart.
 | 1 | Factory floor | one table per epic: each story's place, worker, time in place (warning tone near its timeout), check result; a progress bar per epic | open the shell, tell, move, show diff | engine |
 | 2 | Attention queue | everything waiting on a person: review requests, stuck tokens, blocked runs, failed checks, oldest first | verdict, resume, move to a picked place, discard | engine |
 | 3 | Review card | one `review`: the worker's summary, what integration verified beside what the worker reported, the diff | pass, or fix with notes; writes a `verdict` tuple | engine |
-| 4 | Epic plan (built) | the repository, title and description; the king's proposed stories grouped into waves, each with an include checkbox, its key, editable title and description, what it depends on, and pickers for its agent and its workflow (which sets the review mode); options to start right away and limit stories in parallel | approve (create, and start if asked), send back with notes, cancel | engine, opened by the king's `epic_propose` |
+| 4 | Epic plan (built) | the repository, title and description; the king's proposed stories grouped into waves, each with an include checkbox, its key, editable title and description, what it depends on, and pickers for its agent and its workflow (which sets the review mode); options to start right away, to give the epic a feature branch (it lands as one unit, after one check and `epic_verdict`) and to limit stories in parallel | approve (create, and start if asked, with a feature branch if ticked), send back with notes, cancel | engine, opened by the king's `epic_propose` |
 | 5 | Design doc review | the doc, its status, the facts it cites, a notes field | revise (a message to its author), approve and ask the king for an epic | engine |
 | 6 | Story timeline | one story's history from the operations log: place changes, attempts, messages, checks, verdicts | open any attempt's transcript, move the token | engine |
 | 7 | Policy editor | the effective configuration for a repo or epic, with the layer each value came from | change review mode, workflow, worker limit, commands; validated before it is saved | engine or king |

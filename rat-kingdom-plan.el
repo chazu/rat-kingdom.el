@@ -20,13 +20,16 @@
 ;; waves.  Each story has an include box, its key, an editable title and
 ;; description, what it depends on, and pickers for its agent and its
 ;; workflow (which sets its review mode).  Below them are the options,
-;; "start right away" and "max parallel", and the buttons.
+;; "start right away", "feature branch" and "max parallel", and the
+;; buttons.
 ;;
 ;; Nothing is created until the user presses Approve.  Approve drops the
 ;; stories left out, refuses if a story kept depends on one left out,
 ;; checks the plan again with `rat-kingdom-epic-check', creates the epic
 ;; with `rat-kingdom-epic-create' and, if asked, starts it with
-;; `rat-kingdom-epic-start'.  Every button, and deleting the surface,
+;; `rat-kingdom-epic-start', with a feature branch if that is ticked.  A
+;; feature branch ticked without "start right away" is passed on to the
+;; king, to use when it starts the epic.  Every button, and deleting the surface,
 ;; leaves the king a message saying what the user decided.
 ;;
 ;; a2ui is optional.  It is loaded only when a surface is shown, and
@@ -294,10 +297,22 @@ STORIES are in the order of the data model's /stories."
       (rat-kingdom-plan--component "options" "Section" "title" "Options"
                                    "child" "options-column")
       (rat-kingdom-plan--component "options-column" "Column"
-                                   "children" ["start" "max-parallel"])
+                                   "children" ["start" "feature-branch"
+                                               "feature-branch-note"
+                                               "max-parallel"])
       (rat-kingdom-plan--component
        "start" "CheckBox" "label" "Start right away"
        "value" (rat-kingdom-plan--path "/options/start"))
+      (rat-kingdom-plan--component
+       "feature-branch" "CheckBox"
+       "label" "Feature branch: land the epic as one unit"
+       "value" (rat-kingdom-plan--path "/options/featureBranch"))
+      (rat-kingdom-plan--component
+       "feature-branch-note" "Text" "variant" "caption"
+       "text" "Applies when the epic is started: its stories merge into a \
+branch of its own, which lands on the target after one check and the \
+king's review of the whole. Without \"Start right away\", the king is \
+told to use it when it starts the epic.")
       (rat-kingdom-plan--component
        "max-parallel" "TextField"
        "label" "Max parallel (empty for no limit)"
@@ -366,7 +381,8 @@ DESCRIPTION is the epic's, and STORIES its checked stories."
                          "agent" (or (plist-get story :agent) "")
                          "workflow" (or (plist-get story :workflow) "")))
                       stories))
-   "options" (rat-kingdom-plan--obj "start" :false "maxParallel" "")
+   "options" (rat-kingdom-plan--obj "start" :false "featureBranch" :false
+                                    "maxParallel" "")
    "notes" ""
    "open" t
    "result" ""
@@ -564,10 +580,12 @@ PROBLEMS is a list of them, or a message that says nothing was created."
 (defun rat-kingdom-plan-approve (surface-id context)
   "Do what Approve on the surface SURFACE-ID asks, with CONTEXT.
 CONTEXT is the action's context: `stories', the surface's /stories,
-and `options', its /options with `start' and `maxParallel'.  Apply the
-edits, check the plan, create the epic and, if asked, start it.  If
-the plan has a problem, show it and create nothing.  Return the epic's
-id, or nil if nothing was created."
+and `options', its /options with `start', `featureBranch' and
+`maxParallel'.  Apply the edits, check the plan, create the epic and,
+if asked, start it, with a feature branch if that is ticked too.  A
+feature branch ticked without start is only passed on to the king, to
+use when it starts the epic.  If the plan has a problem, show it and
+create nothing.  Return the epic's id, or nil if nothing was created."
   (let* ((plan (gethash surface-id rat-kingdom-plan--plans))
          (space (plist-get plan :space))
          (repo (plist-get plan :repo))
@@ -575,6 +593,8 @@ id, or nil if nothing was created."
          (options (rat-kingdom-plan--get context "options"))
          (start (rat-kingdom-plan--true-p
                  (rat-kingdom-plan--get options "start")))
+         (feature-branch (rat-kingdom-plan--true-p
+                          (rat-kingdom-plan--get options "featureBranch")))
          (edited (rat-kingdom-plan--edited
                   plan (rat-kingdom-plan--get context "stories")))
          (kept (car edited))
@@ -612,14 +632,16 @@ plan surface, but creating it failed: %s" title text))))
         (when result
           (let* ((epic (plist-get result :epic))
                  (count (length (plist-get result :stories)))
+                 (branch (rat-kingdom-epic-branch-name epic))
                  (started nil)
                  (start-error nil))
             (plist-put plan :state 'approved)
             (when start
               (condition-case err
                   (progn
-                    (setq started (rat-kingdom-epic-start space repo epic
-                                                          max-parallel))
+                    (setq started (rat-kingdom-epic-start
+                                   space repo epic max-parallel
+                                   feature-branch))
                     (rat-kingdom-epic--run-reactions space))
                 (error (setq start-error (rat-kingdom-epic--message err)))))
             (rat-kingdom-plan--show-result
@@ -630,7 +652,11 @@ plan surface, but creating it failed: %s" title text))))
               (cond (start-error
                      (format "\n\nStarting it failed: %s" start-error))
                     (start
-                     (format "\n\nStarted%s; %s."
+                     (format "\n\nStarted%s%s; %s."
+                             (if feature-branch
+                                 (format " on its feature branch %s, which \
+lands on the target after one check and the king's review" branch)
+                               "")
                              (if max-parallel
                                  (format ", at most %d at once" max-parallel)
                                "")
@@ -642,6 +668,8 @@ plan surface, but creating it failed: %s" title text))))
                                                     (cdr entry) (car entry)))
                                           started ", "))
                                "no story could start yet")))
+                    (feature-branch "\n\nNot started: ask the king to run \
+it when you want; it is told to give it a feature branch.")
                     (t "\n\nNot started: ask the king to run it when you \
 want.")))
              (if start-error "warning" "success")
@@ -663,15 +691,25 @@ surface: created epic %s with %d tasks; started: %s."
               (cond
                (start-error
                 (format "\nStarting it failed: %s\nAsk the user before you \
-call epic_start." start-error))
+call epic_start.%s" start-error
+                        (if feature-branch
+                            "\nThe user asked for a feature branch: pass \
+feature_branch to epic_start when you start it."
+                          "")))
                (start
                 (format "\nThe user started it from the plan surface%s, so \
 do not ask again; the engine starts its stories as their tasks become \
-ready.%s"
+ready.%s%s"
                         (if max-parallel
                             (format ", with at most %d stories at once"
                                     max-parallel)
                           "")
+                        (if feature-branch
+                            (format " It has a feature branch, %s: its \
+stories merge into it, and it lands on the target after one check and \
+your epic_verdict." branch)
+                          " It has no feature branch: each story merges \
+into the target as it passes.")
                         (if started
                             (format " Started now: %s."
                                     (mapconcat (lambda (entry)
@@ -680,6 +718,9 @@ ready.%s"
                                                          (car entry)))
                                                started ", "))
                           "")))
+               (feature-branch "\nIt has not been started. Ask the user \
+before you call epic_start. The user wants a feature branch: pass \
+feature_branch to epic_start when you start it.")
                (t "\nIt has not been started. Ask the user before you call \
 epic_start."))))
             epic))))))
