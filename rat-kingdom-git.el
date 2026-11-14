@@ -13,9 +13,10 @@
 ;; repositories rat-kingdom works in.
 ;;
 ;; A registered repository is a `repo' tuple.  Registering one creates
-;; its target branch, by default rk/integration, from HEAD.  Finished
-;; work is merged into the target and nowhere else: the user's checkout,
-;; index, stash and hooks are never touched.
+;; its target branch, by default rk/integration, from HEAD, and its br
+;; workspace, kept out of Git, if it has none (see rat-kingdom-task.el).
+;; Finished work is merged into the target and nowhere else: the user's
+;; checkout, index, stash and hooks are never touched.
 ;;
 ;; The one push is `rat-kingdom-git-publish', which the user, or the king
 ;; on the user's explicit request, calls to push one branch to one
@@ -102,8 +103,11 @@ Signal `rat-kingdom-git-error' if it fails."
 
 ;;;; Repositories
 
+(declare-function rat-kingdom-task-br-ensure "rat-kingdom-task" (repo))
+
 (cl-defun rat-kingdom-repo-add (space path
-                                      &key name target check setup workflow)
+                                      &key name target check setup workflow
+                                      task-prefix)
   "Register the repository at PATH in SPACE and return its record.
 NAME defaults to the directory's name.  TARGET is the branch finished
 work is merged into, by default `rat-kingdom-git-default-target'; it
@@ -113,33 +117,49 @@ without a shell.  SETUP is a command of the same kind run in each new
 worktree before a worker starts in it and before the check, for example
 to install dependencies.  WORKFLOW names the workflow its stories follow
 unless they say otherwise.  Registering a name again replaces its
-record."
+record.
+
+Every registered repository has a br workspace for its tasks.  If the
+checkout has none, one is created by `rat-kingdom-task-br-ensure',
+with TASK-PREFIX, by default NAME, as its issue prefix, and kept out of
+Git; the record returned then has `:task-initialized' t, which is not
+stored.  If that fails, nothing is registered, no target branch is
+created, and the error is signalled."
+  (require 'rat-kingdom-task)
   (let* ((top (rat-kingdom-git path "rev-parse" "--show-toplevel"))
          (name (or name (file-name-nondirectory (directory-file-name top))))
-         (target (or target rat-kingdom-git-default-target)))
+         (target (or target rat-kingdom-git-default-target))
+         (task-prefix (and task-prefix (format "%s" task-prefix))))
     (unless (string-match-p "\\`[[:alnum:]][[:alnum:]._-]*\\'" name)
       (error "A repository name is letters, digits, dots, dashes: %S" name))
     (unless (and (listp check) (cl-every #'stringp check))
       (error "A check is a list of strings: %S" check))
     (unless (and (listp setup) (cl-every #'stringp setup))
       (error "A setup is a list of strings: %S" setup))
+    (when (and task-prefix (string-empty-p task-prefix))
+      (error "A task prefix may not be empty"))
     (unless (rat-kingdom-git-ok-p top "rev-parse" "--verify" "--quiet" "HEAD")
       (error "%s has no commits yet" top))
-    (unless (rat-kingdom-git-ok-p top "rev-parse" "--verify" "--quiet"
-                                  (concat "refs/heads/" target))
-      (rat-kingdom-git top "branch" target "HEAD"))
-    (rat-kingdom-space-put space 'repo :scope name :identity name
-                           :payload (list :path top :target target
-                                          :check check :setup setup
-                                          :workflow (and workflow
-                                                         (format "%s" workflow)))
-                           :actor "user")
-    (rat-kingdom-repo-get space name)))
+    (let ((initialized (rat-kingdom-task-br-ensure
+                        (list :name name :path top :task-prefix task-prefix))))
+      (unless (rat-kingdom-git-ok-p top "rev-parse" "--verify" "--quiet"
+                                    (concat "refs/heads/" target))
+        (rat-kingdom-git top "branch" target "HEAD"))
+      (rat-kingdom-space-put space 'repo :scope name :identity name
+                             :payload (list :path top :target target
+                                            :check check :setup setup
+                                            :workflow (and workflow
+                                                           (format "%s" workflow))
+                                            :task-prefix task-prefix)
+                             :actor "user")
+      (append (rat-kingdom-repo-get space name)
+              (and initialized (list :task-initialized t))))))
 
 (defun rat-kingdom-repo-get (space name)
   "Return the record of the repository NAME in SPACE, or nil.
 The record is a property list: `:name', `:path', `:target', `:check',
-`:setup' and `:workflow'."
+`:setup', `:workflow' and `:task-prefix', the issue prefix its br
+workspace was created with, or nil for its name."
   (when-let* ((tuple (rat-kingdom-space-rd
                       space (list 'repo :scope name :identity name))))
     (append (list :name (plist-get tuple :identity))

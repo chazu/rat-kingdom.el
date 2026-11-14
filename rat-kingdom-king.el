@@ -67,8 +67,9 @@ is never touched. The user merges the target branch into their own branch \
 when they choose.
 - Each story follows a workflow. `story` has a review by you before the \
 merge; `story-lite` has none. Use `workflow_list` to see them.
-- A repository may have a task tracker. `status` lists its ready tasks \
-under Available tasks. A story started for one of them should pass its id \
+- Every repository has a task tracker, a br (Rust Beads) workspace in the \
+user's checkout, which repo_add creates, kept out of Git, if it is \
+missing. `status` lists its ready tasks under Available tasks. A story started for one of them should pass its id \
 as `task` to `story_start`, so that the task is claimed, closed when the \
 story is merged, and the tasks that depend on it become available.
 - A story that fails its check or your review goes back to a new worker in \
@@ -210,7 +211,7 @@ that fails is reported and otherwise ignored."
      (if repos
          (mapconcat
           (lambda (repo)
-            (format "- %s at %s; target %s; check %s%s; workflow %s"
+            (format "- %s at %s; target %s; check %s%s; workflow %s%s"
                     (plist-get repo :name) (plist-get repo :path)
                     (plist-get repo :target)
                     (if (plist-get repo :check)
@@ -221,7 +222,12 @@ that fails is reported and otherwise ignored."
                                             (plist-get repo :setup)))
                       "")
                     (or (plist-get repo :workflow)
-                        rat-kingdom-story-default-workflow)))
+                        rat-kingdom-story-default-workflow)
+                    (if-let* ((problem (rat-kingdom-task-workspace-error
+                                        (plist-get repo :name))))
+                        (format "; it has no br workspace, so no tasks (tell \
+the user): %s" problem)
+                      "")))
           repos "\n")
        "- none registered; use repo_add")
      "\n\nStories in progress:\n"
@@ -628,7 +634,11 @@ available to start stories from."
 (rat-kingdom-king--deftool "repo_add"
     "Register a Git repository so that stories can be started in it, or \
 change the settings of one already registered. Creates the target branch \
-from HEAD if it does not exist."
+from HEAD if it does not exist. Every repository needs a br (Rust Beads) \
+workspace for its tasks: if the checkout has no .beads directory one is \
+initialized, kept out of Git through info/exclude, and the answer says so. \
+An existing .beads is left alone. If br is missing or fails, nothing is \
+registered."
     '((:name "path" :type string
        :description "Absolute path of the repository's checkout.")
       (:name "check" :type string :optional t
@@ -643,18 +653,26 @@ for none.")
        :description "The branch finished work is merged into. Default \
 rk/integration. It must not be a branch that is checked out.")
       (:name "workflow" :type string :optional t
-       :description "The workflow stories here follow by default."))
+       :description "The workflow stories here follow by default.")
+      (:name "task_prefix" :type string :optional t
+       :description "The issue prefix of the br workspace, if one has to \
+be created. Default the repository's name."))
   (when (and (arg 'workflow) (not (rat-kingdom-workflow-get (arg 'workflow))))
     (error "There is no workflow called %s" (arg 'workflow)))
   (let ((repo (rat-kingdom-repo-add
                space (expand-file-name (arg 'path))
                :check (and (arg 'check) (split-string-and-unquote (arg 'check)))
                :setup (and (arg 'setup) (split-string-and-unquote (arg 'setup)))
-               :target (arg 'target) :workflow (arg 'workflow))))
+               :target (arg 'target) :workflow (arg 'workflow)
+               :task-prefix (arg 'task_prefix))))
     (string-join
-     (cons (format "Registered %s at %s. Finished work is merged into %s."
+     (cons (format "Registered %s at %s. Finished work is merged into %s.%s"
                    (plist-get repo :name) (plist-get repo :path)
-                   (plist-get repo :target))
+                   (plist-get repo :target)
+                   (if (plist-get repo :task-initialized)
+                       (format " Initialized a br workspace there with the \
+prefix %s, kept out of Git." (rat-kingdom-task-br-prefix repo))
+                     ""))
            (rat-kingdom-story-warnings space (plist-get repo :name)))
      "\nWarning: ")))
 

@@ -25,9 +25,22 @@
 ;; `:description', `:status' and `:priority', whatever the tracker
 ;; calls them.
 ;;
-;; The first adapter is Rust Beads, the `br' program.  Its workspace is
-;; a directory, by default the repository's own; br is run there,
-;; synchronously and without a shell, with --json.
+;; The adapter is Rust Beads, the `br' program, and br is required:
+;; every registered repository has a br workspace, its checkout's .beads
+;; directory, in the user's own checkout and never in a worker's
+;; worktree.  br is run there, synchronously and without a shell, with
+;; --json.  `rat-kingdom-task-adapter-function' can give a repository
+;; another adapter, as the tests do.
+;;
+;; `rat-kingdom-task-br-ensure' makes the workspace of a repository that
+;; has none: registering a repository does, and so does turning on
+;; `rat-kingdom-mode' for those already registered.  It runs
+;; `br init --prefix PREFIX', checks that the prefix took, and keeps
+;; .beads out of Git by adding /.beads/ to info/exclude in the
+;; repository's common Git directory, never to .gitignore, so that
+;; `git status' does not change; `rat-kingdom-task-br-untracked' turns
+;; that off.  A .beads directory that is already there is left exactly
+;; as it is.
 ;;
 ;; `rat-kingdom-task-project' makes the space show a repository's ready
 ;; tasks as `available' tuples.  A story started from a task takes its
@@ -91,20 +104,33 @@ Its workspace is DIRECTORY, by default the repository's path."
                   (error "The repository %s has no path"
                          (plist-get repo :name)))))
 
-(defun rat-kingdom-task-br--run (adapter &rest args)
-  "Run br with ARGS and --json in ADAPTER's workspace.
-Return what it printed, parsed, with objects as property lists and
-arrays as lists.  Signal `rat-kingdom-task-error' if it fails."
-  (let ((default-directory (file-name-as-directory
-                            (expand-file-name
-                             (rat-kingdom-task-br-directory adapter))))
+(defun rat-kingdom-task-br--executable ()
+  "Return the br executable to run.
+Signal `rat-kingdom-task-error' saying br is required if there is none."
+  (or (executable-find rat-kingdom-task-br-program)
+      (signal 'rat-kingdom-task-error
+              (list (format "rat-kingdom requires br, Rust Beads, for its \
+tasks, and cannot find the program `%s'.  Install Rust Beads (beads_rust), \
+which provides `br', and put it on `exec-path', or set \
+`rat-kingdom-task-br-program'"
+                            rat-kingdom-task-br-program)))))
+
+(defun rat-kingdom-task-br--call (directory &rest args)
+  "Run br with ARGS in DIRECTORY and return what it printed, trimmed.
+Signal `rat-kingdom-task-error' with br's own message if it fails."
+  (let ((default-directory (file-name-as-directory (expand-file-name directory)))
         (process-environment (cons "RUST_LOG=error" process-environment))
-        (args (append args '("--json")))
-        (errors (make-temp-file "rat-kingdom-br")))
+        (program (rat-kingdom-task-br--executable))
+        (errors nil))
+    (unless (file-directory-p default-directory)
+      (signal 'rat-kingdom-task-error
+              (list (format "br %s: the directory %s does not exist"
+                            (string-join args " ") directory))))
+    (setq errors (make-temp-file "rat-kingdom-br"))
     (unwind-protect
         (with-temp-buffer
-          (let ((exit (apply #'call-process rat-kingdom-task-br-program nil
-                             (list t errors) nil args))
+          (let ((exit (apply #'call-process program nil (list t errors) nil
+                             args))
                 (output (string-trim (buffer-string))))
             (unless (eql exit 0)
               (signal 'rat-kingdom-task-error
@@ -113,11 +139,20 @@ arrays as lists.  Signal `rat-kingdom-task-error' if it fails."
                                       (insert-file-contents errors)
                                       (let ((text (string-trim (buffer-string))))
                                         (if (string-empty-p text) output text)))))))
-            (and (not (string-empty-p output))
-                 (json-parse-string output :object-type 'plist
-                                    :array-type 'list
-                                    :null-object nil :false-object nil))))
+            output))
       (delete-file errors))))
+
+(defun rat-kingdom-task-br--run (adapter &rest args)
+  "Run br with ARGS and --json in ADAPTER's workspace.
+Return what it printed, parsed, with objects as property lists and
+arrays as lists.  Signal `rat-kingdom-task-error' if it fails."
+  (let ((output (apply #'rat-kingdom-task-br--call
+                       (rat-kingdom-task-br-directory adapter)
+                       (append args '("--json")))))
+    (and (not (string-empty-p output))
+         (json-parse-string output :object-type 'plist
+                            :array-type 'list
+                            :null-object nil :false-object nil))))
 
 (defun rat-kingdom-task-br--task (issue)
   "Return the task the br ISSUE describes."
@@ -178,18 +213,196 @@ It is unassigned and open again."
   (rat-kingdom-task-br--run adapter "comments" "add" id (concat "--message=" text))
   nil)
 
+;;;; The workspace of a repository
+
+(defcustom rat-kingdom-task-br-untracked t
+  "Non-nil means a br workspace rat-kingdom creates is kept out of Git.
+When rat-kingdom initializes br in a repository that has no .beads
+directory, it adds the line /.beads/ to the info/exclude file in the
+repository's common Git directory, so that nothing br writes shows in
+`git status'.  Nothing is written to .gitignore, and no tracked file
+changes.  Set this to nil to track .beads yourself.  A workspace that
+already exists is never touched, whatever this says."
+  :type 'boolean
+  :group 'rat-kingdom)
+
+(defun rat-kingdom-task-br--exclude-file (top)
+  "Return the info/exclude file of the Git repository whose checkout is TOP.
+It is in the common Git directory, which linked worktrees share."
+  (expand-file-name "info/exclude"
+                    (expand-file-name
+                     (rat-kingdom-git top "rev-parse" "--git-common-dir")
+                     top)))
+
+(defconst rat-kingdom-task-br--exclude-line "/.beads/"
+  "The line that keeps a br workspace out of Git.")
+
+(defun rat-kingdom-task-br--excluded-p (file)
+  "Return non-nil if the exclude FILE already has the .beads line."
+  (and (file-exists-p file)
+       (with-temp-buffer
+         (insert-file-contents file)
+         (member rat-kingdom-task-br--exclude-line
+                 (split-string (buffer-string) "\n")))))
+
+(defun rat-kingdom-task-br--exclude (file)
+  "Add the .beads line to the exclude FILE unless it has it.
+Create FILE and its directory if need be.  Return non-nil if the line
+was added."
+  (unless (rat-kingdom-task-br--excluded-p file)
+    (make-directory (file-name-directory file) t)
+    (with-temp-buffer
+      (when (file-exists-p file)
+        (insert-file-contents file))
+      (goto-char (point-max))
+      (unless (or (bobp) (eq (char-before) ?\n))
+        (insert "\n"))
+      (insert rat-kingdom-task-br--exclude-line "\n")
+      (let ((coding-system-for-write 'utf-8-unix))
+        (write-region nil nil file nil 'silent)))
+    t))
+
+(defun rat-kingdom-task-br--unexclude (file)
+  "Take the .beads line out of the exclude FILE again."
+  (when (file-exists-p file)
+    (with-temp-buffer
+      (insert-file-contents file)
+      (goto-char (point-max))
+      (when (re-search-backward
+             (concat "^" (regexp-quote rat-kingdom-task-br--exclude-line)
+                     "\n")
+             nil t)
+        (replace-match "")
+        (let ((coding-system-for-write 'utf-8-unix))
+          (write-region nil nil file nil 'silent))))))
+
+(defun rat-kingdom-task-br-prefix (repo)
+  "Return the issue prefix for a br workspace of the repository record REPO.
+It is REPO's `:task-prefix', else its name."
+  (or (plist-get repo :task-prefix)
+      (plist-get repo :name)
+      (file-name-nondirectory (directory-file-name (plist-get repo :path)))))
+
+(defvar rat-kingdom-task--workspace-errors nil
+  "Repositories whose br workspace could not be made, as (NAME . MESSAGE).")
+
+(defun rat-kingdom-task-workspace-error (repo)
+  "Return why the br workspace of the repository REPO could not be made.
+Return nil if it was made, or found, the last time it was ensured."
+  (cdr (assoc repo rat-kingdom-task--workspace-errors)))
+
+(defun rat-kingdom-task-br-ensure (repo)
+  "Make sure the repository REPO has a br workspace.
+REPO is a repository record or the path of a checkout.  br is
+required: if it cannot be found, signal `rat-kingdom-task-error'
+saying so.
+
+If the checkout has a .beads directory, leave it as it is, tracked,
+ignored or neither, and return nil.  Otherwise run `br init' there
+with the prefix `rat-kingdom-task-br-prefix' gives, check that br
+took it, and, if `rat-kingdom-task-br-untracked' is non-nil, add
+/.beads/ to the repository's info/exclude and check that `git status'
+shows nothing under .beads.  Return non-nil.
+
+If any of that fails, the .beads directory and the exclude line made
+here are removed again, and the error, with br's or Git's message, is
+signalled.  If REPO is a record, the error is also remembered for
+`rat-kingdom-task-workspace-error' until REPO is ensured again."
+  (let* ((repo (if (stringp repo) (list :path repo) repo))
+         (name (plist-get repo :name)))
+    (condition-case err
+        (prog1 (rat-kingdom-task-br--ensure repo)
+          (when name
+            (setq rat-kingdom-task--workspace-errors
+                  (assoc-delete-all name rat-kingdom-task--workspace-errors))))
+      (error
+       (when name
+         (setf (alist-get name rat-kingdom-task--workspace-errors
+                          nil nil #'equal)
+               (error-message-string err)))
+       (signal (car err) (cdr err))))))
+
+(defun rat-kingdom-task-br--ensure (repo)
+  "Make sure the repository record REPO has a br workspace.
+See `rat-kingdom-task-br-ensure'."
+  (let* ((path (or (plist-get repo :path)
+                   (error "The repository %s has no path"
+                          (plist-get repo :name))))
+         (top (file-name-as-directory
+               (rat-kingdom-git path "rev-parse" "--show-toplevel")))
+         (beads (expand-file-name ".beads" top))
+         (prefix (rat-kingdom-task-br-prefix repo)))
+    (rat-kingdom-task-br--executable)
+    (unless (file-directory-p beads)
+      (let ((exclude (and rat-kingdom-task-br-untracked
+                          (rat-kingdom-task-br--exclude-file top)))
+            (added nil)
+            (done nil))
+        (unwind-protect
+            (progn
+              (rat-kingdom-task-br--call top "init" "--prefix" prefix)
+              (let ((found (plist-get
+                            (json-parse-string
+                             (rat-kingdom-task-br--call
+                              top "config" "get" "issue_prefix" "--json")
+                             :object-type 'plist :null-object nil)
+                            :value)))
+                (unless (equal found prefix)
+                  (signal 'rat-kingdom-task-error
+                          (list (format "br init --prefix %s in %s left the \
+prefix %S; a br configuration may be overriding it" prefix top found)))))
+              (when exclude
+                (setq added (rat-kingdom-task-br--exclude exclude))
+                (let ((status (rat-kingdom-git top "status" "--porcelain"
+                                               "--ignored=no" "--" ".beads")))
+                  (unless (string-empty-p status)
+                    (signal 'rat-kingdom-task-error
+                            (list (format "The br workspace in %s still \
+shows in git status after excluding it:\n%s" top status))))))
+              (setq done t))
+          (unless done
+            (when (file-directory-p beads)
+              (delete-directory beads t))
+            (when added
+              (rat-kingdom-task-br--unexclude exclude)))))
+      t)))
+
+(defun rat-kingdom-task-ensure-all (space)
+  "Make sure every repository registered in SPACE has a br workspace.
+A repository that fails is reported with a warning, and its reason
+kept for `rat-kingdom-task-workspace-error'; the others are still
+ensured.  Return the names of the repositories whose workspace was
+created."
+  (let (created)
+    (dolist (repo (rat-kingdom-repo-list space))
+      (let ((name (plist-get repo :name)))
+        (condition-case err
+            (when (rat-kingdom-task-br-ensure repo)
+              (push name created)
+              (message "rat-kingdom: created a br workspace for %s, kept out \
+of Git" name))
+          (error
+           (display-warning
+            'rat-kingdom
+            (format "The repository %s has no br workspace, so no tasks: %s"
+                    name (error-message-string err))
+            :warning)))))
+    (nreverse created)))
+
 ;;;; Tasks in the space
 
 (defun rat-kingdom-task-default-adapter (repo)
-  "Return a Rust Beads adapter for the repository record REPO, or nil.
-There is one if the repository has a .beads directory."
-  (when (file-directory-p (expand-file-name ".beads" (plist-get repo :path)))
-    (rat-kingdom-task-br repo)))
+  "Return a Rust Beads adapter for the repository record REPO.
+Every registered repository has a br workspace; see
+`rat-kingdom-task-br-ensure'."
+  (rat-kingdom-task-br repo))
 
 (defcustom rat-kingdom-task-adapter-function #'rat-kingdom-task-default-adapter
-  "Function returning the task adapter of a repository, or nil.
-It is called with the repository's record.  A repository with no
-adapter has no tasks."
+  "Function returning the task adapter of a repository.
+It is called with the repository's record.  The default gives every
+repository its br workspace.  Another function can give a repository
+another adapter, such as an in-memory one in tests, or return nil to
+leave it without tasks."
   :type 'function
   :group 'rat-kingdom)
 
@@ -248,10 +461,13 @@ Return how many tasks are available in all."
 
 ;;;###autoload
 (defun rat-kingdom-tasks-refresh ()
-  "Show the ready tasks of every repository as `available' in the space."
+  "Show the ready tasks of every repository as `available' in the space.
+First make sure every repository has a br workspace."
   (interactive)
-  (message "rat-kingdom: %d tasks available"
-           (rat-kingdom-task-project-all (rat-kingdom-space-default))))
+  (let ((space (rat-kingdom-space-default)))
+    (rat-kingdom-task-ensure-all space)
+    (message "rat-kingdom: %d tasks available"
+             (rat-kingdom-task-project-all space))))
 
 ;;;; Stories working on tasks
 

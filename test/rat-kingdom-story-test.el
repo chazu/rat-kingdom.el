@@ -12,6 +12,7 @@
 (require 'url)
 (require 'rat-kingdom-story)
 (require 'rat-kingdom-king)
+(require 'rat-kingdom-task)
 
 (defvar rat-kingdom-story-test--started nil
   "The runs the fake backend started, newest first, as (RUN PROMPT TOKEN).")
@@ -31,6 +32,9 @@
 (defvar rat-kingdom-story-test--now nil
   "If non-nil, the time the space is told it is.")
 
+(defvar rat-kingdom-story-test--br nil
+  "The directory of the fake br the repository fixture uses.")
+
 (defun rat-kingdom-story-test--git (directory &rest args)
   "Run Git with ARGS in DIRECTORY."
   (apply #'rat-kingdom-git directory args))
@@ -42,11 +46,54 @@
   (rat-kingdom-story-test--git directory "add" "-A")
   (rat-kingdom-story-test--git directory "commit" "-m" message))
 
+(defun rat-kingdom-story-test-fake-br (directory)
+  "Write a fake br into DIRECTORY, which must exist, and return its file.
+Each call appends its arguments, one line, to calls in DIRECTORY.
+`init --prefix P' makes .beads, with a .gitignore, a database, an
+issue file and a config naming P, or naming the text of the file
+force-prefix in DIRECTORY if there is one; it fails if DIRECTORY has a
+file init-fails.  `config get issue_prefix' prints the config's prefix
+as JSON.  Anything else prints an empty JSON list."
+  (let ((program (expand-file-name "br" directory)))
+    (with-temp-file program
+      (insert "#!/bin/sh\n"
+              "dir=" (shell-quote-argument (expand-file-name directory)) "\n"
+              "echo \"$*\" >> \"$dir/calls\"\n"
+              "case \"$1\" in\n"
+              "init)\n"
+              "  if [ -e \"$dir/init-fails\" ]; then\n"
+              "    echo 'Error: invalid prefix' >&2; exit 2; fi\n"
+              "  prefix=\"$3\"\n"
+              "  [ -e \"$dir/force-prefix\" ] && prefix=$(cat \"$dir/force-prefix\")\n"
+              "  mkdir .beads || exit 1\n"
+              "  printf '*.db\\n*.db-wal\\n' > .beads/.gitignore\n"
+              "  : > .beads/beads.db\n"
+              "  : > .beads/issues.jsonl\n"
+              "  printf '%s\\n' \"$prefix\" > .beads/prefix\n"
+              "  echo \"Prefix set to: $prefix\" ;;\n"
+              "config)\n"
+              "  printf '{\"key\":\"issue_prefix\",\"value\":\"%s\"}\\n' "
+              "\"$(cat .beads/prefix)\" ;;\n"
+              "*) echo '[]' ;;\n"
+              "esac\n"))
+    (set-file-modes program #o755)
+    program))
+
+(defun rat-kingdom-story-test-br-calls (directory)
+  "Return the calls the fake br in DIRECTORY was given, oldest first."
+  (let ((file (expand-file-name "calls" directory)))
+    (and (file-exists-p file)
+         (with-temp-buffer
+           (insert-file-contents file)
+           (split-string (buffer-string) "\n" t)))))
+
 (defmacro rat-kingdom-story-test-with-repo (vars &rest body)
   "Run BODY with a fresh space and repository.
 VARS is (SPACE PATH): the space and the repository's directory.  The
 repository is registered as \"demo\" with no check.  Stories follow
-the workflow story-lite unless they say otherwise."
+the workflow story-lite unless they say otherwise.  br is a fake, made
+by `rat-kingdom-story-test-fake-br' in the directory
+`rat-kingdom-story-test--br'."
   (declare (indent 1) (debug t))
   (let ((root (make-symbol "root")))
     `(let* ((,root (file-name-as-directory
@@ -65,6 +112,12 @@ the workflow story-lite unless they say otherwise."
             (rat-kingdom-story-test--busy nil)
             (rat-kingdom-story-test--events nil)
             (rat-kingdom-story-test--now nil)
+            (rat-kingdom-story-test--br (expand-file-name "fake-br/" ,root))
+            (rat-kingdom-task-br-program
+             (progn (make-directory rat-kingdom-story-test--br)
+                    (rat-kingdom-story-test-fake-br rat-kingdom-story-test--br)))
+            (rat-kingdom-task-br-untracked t)
+            (rat-kingdom-task--workspace-errors nil)
             (rat-kingdom-space-now-function
              (lambda () (or rat-kingdom-story-test--now (float-time))))
             (rat-kingdom-story-event-functions
