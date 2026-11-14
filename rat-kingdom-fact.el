@@ -24,7 +24,8 @@
 ;;
 ;; Agents write and rules read (section 5.5), but the king is the
 ;; exception: it has `query', a read-only look into the space, and
-;; `fact_forget', which removes a fact that turned out to be wrong.
+;; `fact_forget', which removes a fact that turned out to be wrong.  An
+;; epic's foreman has `query' too.
 
 ;;; Code:
 
@@ -316,6 +317,7 @@ ignoring case.")
 stories. Default false: live tuples only.")
       (:name "limit" :type string :optional t
        :description "Most tuples to show. Default 20, at most 200."))
+  :roles '(king foreman)
   (let* ((category (rat-kingdom-fact--category (arg 'category)))
          (limit (rat-kingdom-fact--limit (arg 'limit)))
          (archived (rat-kingdom-fact--boolean (arg 'archived) "archived"))

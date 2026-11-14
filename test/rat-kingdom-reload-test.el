@@ -79,9 +79,11 @@
                        rat-kingdom-reaction--registry)))
       (should (rat-kingdom-reload-test--once-each
                (mapcar #'car rat-kingdom-workflow--table)))
-      (should (rat-kingdom-reload-test--once-each
-               (mapcar (lambda (tool) (plist-get tool :name))
-                       rat-kingdom-mcp--tools)))
+      ;; A name may be defined for several roles, but no role is
+      ;; offered it twice.
+      (dolist (role '(king rat foreman))
+        (should (rat-kingdom-reload-test--once-each
+                 (rat-kingdom-mcp-tool-names role))))
       (should (eql (length rat-kingdom-reaction--registry) reactions))
       (should (eql (length rat-kingdom-workflow--table) workflows))
       (should (eql (length rat-kingdom-mcp--tools) tools))

@@ -687,7 +687,7 @@ progress | %s at blocked (stopped) | default (claude) | - |" b)
                      1)))
       (dolist (name '("epic_start" "epic_pause" "epic_resume" "epic_cancel"
                       "epic_retry" "epic_show" "epic_diff" "epic_verdict"))
-        (should (eql (cl-count name rat-kingdom-mcp--tools
+        (should (eql (cl-count name (rat-kingdom-mcp--tools-for 'king)
                                :key (lambda (tool) (plist-get tool :name))
                                :test #'equal)
                      1)))

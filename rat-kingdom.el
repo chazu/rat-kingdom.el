@@ -77,6 +77,7 @@
 (require 'rat-kingdom-message)
 (require 'rat-kingdom-epic)
 (require 'rat-kingdom-plan)
+(require 'rat-kingdom-foreman)
 
 (defgroup rat-kingdom nil
   "Swarm orchestration for coding agents."
@@ -95,14 +96,17 @@
   "Recover the work that was in flight when Emacs last stopped.
 A worker that was cut off is replaced by a new one in the same
 worktree, and a check or setup that was running is run again, as is
-the check of an epic that was landing.  Turning on `rat-kingdom-mode'
-does this, so it is seldom needed by hand.  Return what
+the check of an epic that was landing.  An epic's foreman that was cut
+off takes up its session again.  Turning on `rat-kingdom-mode' does
+this, so it is seldom needed by hand.  Return what
 `rat-kingdom-story-reconcile' does, with `:landings', the ids of the
-epics whose landing check is run again."
+epics whose landing check is run again, and `:foremen', the ids of the
+foremen started again."
   (interactive)
   (let* ((space (rat-kingdom-space-default))
          (found (append (rat-kingdom-story-reconcile space)
-                        (list :landings (rat-kingdom-epic-reconcile space))))
+                        (list :landings (rat-kingdom-epic-reconcile space)
+                              :foremen (rat-kingdom-foreman-reconcile space))))
          (runs (plist-get found :runs))
          (checks (append (plist-get found :checks)
                          (plist-get found :landings)))
@@ -365,7 +369,8 @@ See `rat-kingdom-git-publish'."
     "rat-kingdom-mcp" "rat-kingdom-inspector" "rat-kingdom-agent-shell"
     "rat-kingdom-run" "rat-kingdom-workflow" "rat-kingdom-task"
     "rat-kingdom-story" "rat-kingdom-king" "rat-kingdom-fact"
-    "rat-kingdom-message" "rat-kingdom-epic" "rat-kingdom-plan" "rat-kingdom")
+    "rat-kingdom-message" "rat-kingdom-epic" "rat-kingdom-plan"
+    "rat-kingdom-foreman" "rat-kingdom")
   "The package's files, each after the files it requires.")
 
 (defun rat-kingdom--directory ()
