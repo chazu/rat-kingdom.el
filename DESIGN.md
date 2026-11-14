@@ -427,12 +427,16 @@ which worktrees share. It never writes `.gitignore`.
   `*Messages*`, and adds the line anyway, which does not affect tracked
   files. It does not run `git rm --cached`; that is the user's call.
 - `:track :beads` replaces `rat-kingdom-task-br-untracked`, which becomes
-  its default. It applies only to a br workspace rat-kingdom created
-  (section 10). A workspace that already existed before rat-kingdom is
-  still never touched. Registration records on the `repo` tuple that it
-  created the workspace (`:beads-created t`); for a repository
-  registered earlier, an exclude file that already has the `/.beads/`
-  line counts as that record.
+  its default. A br workspace that already existed before rat-kingdom is
+  still never touched by `br init` (section 10), but its exclude line
+  follows `:track` like any other: kept out by default, with the warning
+  above if Git already tracks it. A user who keeps `.beads` in Git sets
+  `:track (:beads t)`.
+- Built: `rat-kingdom-config-track-apply` (one repository, returning the
+  lines added and removed and any warnings, which `status` and
+  `repo_add` also show), `rat-kingdom-config-track-apply-all` (mode
+  start) and `rat-kingdom-config-repo-directory` (makes `.rk`, applying
+  `:track` first), for `config_set` to call.
 - An untracked `.rk` keeps `git status` in the user's checkout quiet, so
   `story_start` does not warn of uncommitted changes. A user who wants
   the configuration versioned with the code sets `:track (:rk t)` and
@@ -844,8 +848,8 @@ those registered earlier, when `rat-kingdom-mode` starts or the tasks are
 refreshed (`rat-kingdom-task-br-ensure`):
 
 - br must be installed; if it is not, registration fails, saying so.
-- A `.beads` that already exists is left alone, tracked, ignored or
-  neither.
+- A `.beads` that already exists is left alone: br is not run in it.
+  Only its exclude line follows `:track` (7.3).
 - Otherwise `br init --prefix PREFIX` runs in the checkout, and `br config
   get issue_prefix` must then answer PREFIX, since a user-level br
   configuration once overrode it. PREFIX is the repository's
@@ -855,9 +859,8 @@ refreshed (`rat-kingdom-task-br-ensure`):
 - The new workspace is untracked: `/.beads/` is added, once, to
   `info/exclude` in the repository's common Git directory, never to
   `.gitignore`, and `git status --porcelain` must then show nothing under
-  `.beads`. `rat-kingdom-task-br-untracked` set to nil leaves it to be
-  tracked instead. Planned: that option becomes the default of
-  `:track :beads` (7.3), which can change it later.
+  `.beads`, unless `:track :beads` (7.3), whose default comes from
+  `rat-kingdom-task-br-untracked`, says to track it instead.
 - If any step fails, the `.beads` it made and the exclude line it added
   are removed, and registration fails with the reason: no `repo` tuple is
   written and no target branch created. On mode start a failure is a

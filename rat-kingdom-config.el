@@ -57,6 +57,16 @@
 ;; argument list.  A policy is replaced whole by
 ;; `rat-kingdom-config-policy-set'; an empty one is removed.
 ;;
+;; :track.  `rat-kingdom-config-track-apply' makes a repository's
+;; info/exclude, in its common Git directory, have /.rk/ and /.beads/
+;; when :track says to keep them out, and not when it says to track
+;; them, touching no other line; `rat-kingdom-config-track-apply-all'
+;; does every repository.  Registering a repository and turning on
+;; `rat-kingdom-mode' apply it.  Nothing is ever committed or removed
+;; from the index; Git tracking files in a directory kept out is a
+;; warning.  `rat-kingdom-config-repo-directory' makes .rk, applying
+;; :track first.
+;;
 ;; Nothing here changes how the engine reads its settings yet.
 
 ;;; Code:
@@ -708,6 +718,124 @@ are: %s" role kind (string-join (rat-kingdom-agent-names) ", ")))
             (problem "The target %s is not a local branch of %s" target
                      (plist-get record :name))))))
     (nreverse problems)))
+
+;;;; :track
+
+(defconst rat-kingdom-config-track-directories
+  `((:rk ".rk" "/.rk/")
+    (:beads ".beads" ,rat-kingdom-task-br-exclude-line))
+  "The directories :track keeps in or out of Git.
+Each entry is (SUB-KEY DIRECTORY LINE): the :track sub-key, the
+directory at the top of the checkout, and the line in info/exclude
+that keeps it out.")
+
+(defvar rat-kingdom-config--track-warnings (make-hash-table :test #'equal)
+  "The warnings applying :track last gave, by repository name.")
+
+(defun rat-kingdom-config-track-warnings (repo)
+  "Return the warnings applying :track to the repository REPO last gave.
+REPO is its name.  Each is a string: Git tracks files in a directory
+that :track keeps out."
+  (gethash repo rat-kingdom-config--track-warnings))
+
+(defun rat-kingdom-config--track-tracked-warning (name directory files key)
+  "Return the warning that Git tracks FILES in DIRECTORY of NAME.
+KEY is DIRECTORY's :track sub-key."
+  (let ((count (length files)))
+    (format "Git already tracks %d file%s in %s of %s (%s%s), but :track %s \
+is nil, so it is meant to be kept out of Git.  Excluding it does not \
+affect tracked files, and rat-kingdom does not remove them from the index: \
+run git rm -r --cached %s and commit to stop tracking them, or set :track \
+\(%s t) to keep them."
+            count (if (= count 1) "" "s") directory (or name "the repository")
+            (car files) (if (> count 1) ", ..." "")
+            key directory key)))
+
+(defun rat-kingdom-config-track-apply (space repo)
+  "Make REPO's info/exclude say what its :track says.
+SPACE holds the configuration.  REPO is a repository's name or record.
+:track is read with `rat-kingdom-config-get'.  For each directory in
+`rat-kingdom-config-track-directories', a nil sub-key adds its line,
+/.rk/ or /.beads/, to the info/exclude in the repository's common Git
+directory, which linked worktrees share, if it is missing; t removes
+that line if it is there.  No other line, and no other byte of the
+file, changes.  Nothing is committed, and nothing is removed from the
+index: if Git already tracks files in a directory to be kept out, a
+warning says so, with `display-warning' the first time, and the line
+is added anyway.  The warnings are kept for
+`rat-kingdom-config-track-warnings'.
+
+Return a property list: `:added' and `:removed', the lines added and
+removed, and `:warnings', the warnings."
+  (let* ((record (or (rat-kingdom-config--repo space repo)
+                     (error "There is no repository called %s" repo)))
+         (name (plist-get record :name))
+         (top (rat-kingdom-git (or (plist-get record :path)
+                                   (error "The repository %s has no path" name))
+                               "rev-parse" "--show-toplevel"))
+         (file (rat-kingdom-git-exclude-file top))
+         (track (rat-kingdom-config-get space :track :repo record))
+         added removed warnings)
+    (pcase-dolist (`(,key ,directory ,line) rat-kingdom-config-track-directories)
+      (if (plist-get track key)
+          (when (rat-kingdom-git-unexclude file line)
+            (push line removed))
+        (when (rat-kingdom-git-exclude file line)
+          (push line added))
+        (when-let* ((files (split-string
+                            (rat-kingdom-git top "ls-files" "--" directory)
+                            "\n" t)))
+          (push (rat-kingdom-config--track-tracked-warning
+                 name directory files key)
+                warnings))))
+    (setq warnings (nreverse warnings))
+    (let ((known (and name (gethash name rat-kingdom-config--track-warnings))))
+      (dolist (warning warnings)
+        (unless (member warning known)
+          (display-warning 'rat-kingdom warning :warning))))
+    (when name
+      (if warnings
+          (puthash name warnings rat-kingdom-config--track-warnings)
+        (remhash name rat-kingdom-config--track-warnings)))
+    (list :added (nreverse added) :removed (nreverse removed)
+          :warnings warnings)))
+
+(defun rat-kingdom-config-track-apply-all (space)
+  "Apply :track, by `rat-kingdom-config-track-apply', to every repository.
+SPACE holds them.  A repository whose checkout is not there is
+skipped; one that fails otherwise is reported with a warning, and the
+others are still done.  Return an alist from the name of each
+repository done to what `rat-kingdom-config-track-apply' returned."
+  (let (results)
+    (dolist (repo (rat-kingdom-repo-list space))
+      (let ((name (plist-get repo :name))
+            (path (plist-get repo :path)))
+        (when (and path (file-directory-p path))
+          (condition-case err
+              (push (cons name (rat-kingdom-config-track-apply space repo))
+                    results)
+            (error
+             (display-warning
+              'rat-kingdom
+              (format "Could not apply :track to the repository %s: %s"
+                      name (error-message-string err))
+              :warning))))))
+    (nreverse results)))
+
+(defun rat-kingdom-config-repo-directory (space repo)
+  "Return REPO's .rk directory, making it if it is not there.
+SPACE holds the registration; REPO is a repository's name or record.
+Before the directory is made, :track is applied to REPO, so that a .rk
+kept out of Git never shows in `git status'.  This is for writing the
+repo layer; applying :track alone never makes the directory."
+  (let* ((record (or (rat-kingdom-config--repo space repo)
+                     (error "There is no repository called %s" repo)))
+         (directory (file-name-directory
+                     (rat-kingdom-config-repo-file record))))
+    (unless (file-directory-p directory)
+      (rat-kingdom-config-track-apply space record)
+      (make-directory directory t))
+    directory))
 
 (provide 'rat-kingdom-config)
 ;;; rat-kingdom-config.el ends here

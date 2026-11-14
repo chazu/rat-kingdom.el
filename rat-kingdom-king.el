@@ -43,6 +43,7 @@
 (require 'rat-kingdom-workflow)
 (require 'rat-kingdom-story)
 (require 'rat-kingdom-task)
+(require 'rat-kingdom-config)
 
 (defconst rat-kingdom-king-id "king"
   "The id of the king's run.")
@@ -311,7 +312,7 @@ that fails is reported and otherwise ignored."
      (if repos
          (mapconcat
           (lambda (repo)
-            (format "- %s at %s; target %s; check %s%s; workflow %s%s"
+            (format "- %s at %s; target %s; check %s%s; workflow %s%s%s"
                     (plist-get repo :name) (plist-get repo :path)
                     (plist-get repo :target)
                     (if (plist-get repo :check)
@@ -327,7 +328,12 @@ that fails is reported and otherwise ignored."
                                         (plist-get repo :name))))
                         (format "; it has no br workspace, so no tasks (tell \
 the user): %s" problem)
-                      "")))
+                      "")
+                    (mapconcat (lambda (warning)
+                                 (concat "; warning (tell the user): " warning))
+                               (rat-kingdom-config-track-warnings
+                                (plist-get repo :name))
+                               "")))
           repos "\n")
        "- none registered; use repo_add")
      (format "\n\nAgents: %s. New stories' workers run %s \
@@ -982,8 +988,10 @@ available to start stories from."
 change the settings of one already registered. Creates the target branch \
 from HEAD if it does not exist. Every repository needs a br (Rust Beads) \
 workspace for its tasks: if the checkout has no .beads directory one is \
-initialized, kept out of Git through info/exclude, and the answer says so. \
-An existing .beads is left alone. If br is missing or fails, nothing is \
+initialized, and the answer says so. An existing .beads is left alone. \
+.rk and .beads are kept out of Git through info/exclude, or not, as the \
+configuration's :track says; the answer warns if Git already tracks files \
+in one kept out (tell the user). If br is missing or fails, nothing is \
 registered."
     '((:name "path" :type string
        :description "Absolute path of the repository's checkout.")
@@ -1017,9 +1025,16 @@ be created. Default the repository's name."))
                    (plist-get repo :target)
                    (if (plist-get repo :task-initialized)
                        (format " Initialized a br workspace there with the \
-prefix %s, kept out of Git." (rat-kingdom-task-br-prefix repo))
+prefix %s, %s." (rat-kingdom-task-br-prefix repo)
+                               (if (plist-get (rat-kingdom-config-get
+                                               space :track
+                                               :repo (plist-get repo :name))
+                                              :beads)
+                                   "to be tracked in Git"
+                                 "kept out of Git"))
                      ""))
-           (rat-kingdom-story-warnings space (plist-get repo :name)))
+           (append (plist-get repo :track-warnings)
+                   (rat-kingdom-story-warnings space (plist-get repo :name))))
      "\nWarning: ")))
 
 (rat-kingdom-king--deftool "repo_sync"

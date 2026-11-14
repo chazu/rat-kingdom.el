@@ -135,6 +135,8 @@ by `rat-kingdom-story-test-fake-br' in the directory
                     (rat-kingdom-story-test-fake-br rat-kingdom-story-test--br)))
             (rat-kingdom-task-br-untracked t)
             (rat-kingdom-task--workspace-errors nil)
+            (rat-kingdom-config--files (make-hash-table :test #'equal))
+            (rat-kingdom-config--track-warnings (make-hash-table :test #'equal))
             (rat-kingdom-space-now-function
              (lambda () (or rat-kingdom-story-test--now (float-time))))
             (rat-kingdom-story-event-functions
