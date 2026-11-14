@@ -53,8 +53,9 @@
 ;;   M-x rat-kingdom-king-restart restart the king's session in place,
 ;;                                so it has its current tools
 ;;
-;; A worker is a Claude Code session in an agent-shell buffer, in its own
-;; worktree.  When it reports that it is done, its commit is merged in a
+;; A worker is a Claude Code or Codex session in an agent-shell buffer,
+;; in its own worktree; the story chooses which, by default
+;; `rat-kingdom-default-agent'.  When it reports that it is done, its commit is merged in a
 ;; candidate worktree, the repository's check runs, the king reviews it
 ;; if the workflow says so, and the repository's target branch
 ;; (rk/integration unless you say otherwise) is moved.  Your checkout is
@@ -228,16 +229,22 @@ starts and before the check, such as one that installs dependencies."
              (plist-get repo :name) (plist-get repo :target))))
 
 ;;;###autoload
-(defun rat-kingdom-start-story (repo title description)
-  "Give a worker in REPO one task: TITLE, with DESCRIPTION as its criteria."
+(defun rat-kingdom-start-story (repo title description &optional agent)
+  "Give a worker in REPO one task: TITLE, with DESCRIPTION as its criteria.
+AGENT names the agent the story's workers run, \"claude\" or \"codex\";
+nil means `rat-kingdom-default-agent'."
   (interactive
    (let ((names (mapcar (lambda (repo) (plist-get repo :name))
-                        (rat-kingdom-repo-list (rat-kingdom-space-default)))))
+                        (rat-kingdom-repo-list (rat-kingdom-space-default))))
+         (default (rat-kingdom-agent-name nil)))
      (unless names
        (user-error "Register a repository first: M-x rat-kingdom-add-repo"))
      (list (completing-read "Repository: " names nil t)
            (read-string "Task: ")
-           (read-string "Acceptance criteria: "))))
+           (read-string "Acceptance criteria: ")
+           (completing-read (format-prompt "Agent" default)
+                            (rat-kingdom-agent-names) nil t nil nil
+                            default))))
   (unless rat-kingdom-mode
     (rat-kingdom-mode 1))
   (let* ((space (rat-kingdom-space-default))
@@ -249,7 +256,8 @@ starts and before the check, such as one that installs dependencies."
     (message "Started %s"
              (rat-kingdom-story-start space repo title
                                       (and (not (string-blank-p description))
-                                           description)))))
+                                           description)
+                                      nil nil nil agent))))
 
 ;;;###autoload
 (defun rat-kingdom-move-story (story place &optional note)
