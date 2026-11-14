@@ -69,6 +69,16 @@
 ;;
 ;; The engine reads its settings through `rat-kingdom-config-get' and,
 ;; for :setup and :check, `rat-kingdom-story-commands'.
+;;
+;; The king's tools.  `rat-kingdom-config-show' is `config_show': each
+;; value with its layer, the files, what is ignored and what the merged
+;; result cannot resolve.  `rat-kingdom-config-set' is `config_set': it
+;; changes one key at the global, repo, epic or task layer, the value
+;; read from Emacs Lisp text by `rat-kingdom-config-read-value'.  It
+;; validates the layer and then the merged configuration of every
+;; repository, epic and task the change affects, and refuses, writing
+;; nothing, if the change would add a problem.  A file is rewritten
+;; whole, pretty-printed under `rat-kingdom-config-file-header'.
 
 ;;; Code:
 
@@ -837,6 +847,439 @@ repo layer; applying :track alone never makes the directory."
       (rat-kingdom-config-track-apply space record)
       (make-directory directory t))
     directory))
+
+;;;; Showing the configuration
+
+(defun rat-kingdom-config--value-text (key value)
+  "Return VALUE, the value of KEY or of one of its sub-keys, as text.
+It is printed as Emacs Lisp, except that a workflow name is bare."
+  (let ((print-length nil) (print-level nil) (print-escape-newlines t))
+    (if (and (eq key :workflow) (stringp value))
+        value
+      (prin1-to-string value))))
+
+(defun rat-kingdom-config--key-lines (key value origin)
+  "Return the lines describing KEY, with VALUE from ORIGIN, as a list.
+VALUE and ORIGIN are as `rat-kingdom-config-explain' gives them: for a
+property-list key, ORIGIN is a property list from sub-key to layer."
+  (cond
+   ((null value) (list (format "- %s not set" key)))
+   ((rat-kingdom-config-plist-key-p key)
+    (cl-loop for (sub sub-value) on value by #'cddr
+             collect (format "- %s %s %s (%s)" key sub
+                             (rat-kingdom-config--value-text key sub-value)
+                             (plist-get origin sub))))
+   (t (list (format "- %s %s (%s)" key
+                    (rat-kingdom-config--value-text key value) origin)))))
+
+(defun rat-kingdom-config--context-name (repo epic task)
+  "Return how the configuration of REPO, EPIC and TASK is named."
+  (concat repo
+          (if epic (format ", epic %s" epic) "")
+          (if task (format ", task %s" task) "")))
+
+(defun rat-kingdom-config--repo-record (space repo)
+  "Return the record of the repository named REPO in SPACE, or signal."
+  (unless (and (stringp repo) (not (string-blank-p repo)))
+    (error "Give the name of the repository"))
+  (or (rat-kingdom-repo-get space repo)
+      (error "There is no repository called %s; the repositories are: %s"
+             repo (mapconcat (lambda (record) (plist-get record :name))
+                             (rat-kingdom-repo-list space) ", "))))
+
+(cl-defun rat-kingdom-config-show (space repo &key epic task)
+  "Return the effective configuration of REPO, EPIC and TASK in SPACE, as text.
+REPO is a repository's name, EPIC and TASK ids.  There is one line per
+key, or per sub-key of a property-list key, with its value and the
+layer it came from; then the files the layers are read from, any
+configuration being ignored and why, anything the merged result
+cannot resolve, and any warning applying :track gave.  This is what
+the king's `config_show' answers."
+  (let* ((record (rat-kingdom-config--repo-record space repo))
+         (explained (rat-kingdom-config-explain space :repo record :epic epic
+                                                :task task))
+         (global (rat-kingdom-config-global-file))
+         (repo-file (rat-kingdom-config-repo-file record))
+         (sources (append (list global repo-file)
+                          (and epic (list (rat-kingdom-config--policy-source
+                                           repo 'epic epic)))
+                          (and task (list (rat-kingdom-config--policy-source
+                                           repo 'task task)))))
+         (errors (cl-remove-if-not (lambda (error)
+                                     (member (car error) sources))
+                                   (rat-kingdom-config-errors repo)))
+         (problems (rat-kingdom-config-validate-merged space repo :epic epic
+                                                       :task task))
+         (warnings (rat-kingdom-config-track-warnings repo)))
+    (cl-flet ((file-line (layer file)
+                (format "- %s: %s%s" layer file
+                        (if (file-exists-p file) "" " (not there)"))))
+      (concat
+       (format "Configuration of %s, each value with the layer it came \
+from:\n" (rat-kingdom-config--context-name repo epic task))
+       (mapconcat (lambda (entry)
+                    (string-join (apply #'rat-kingdom-config--key-lines entry)
+                                 "\n"))
+                  explained "\n")
+       "\n\nFiles:\n"
+       (file-line "global" global) "\n"
+       (file-line "repo" repo-file)
+       (if errors
+           (concat "\n\nIgnored, as a whole (fix it, or replace the key with \
+config_set):\n"
+                   (mapconcat (lambda (error)
+                                (format "- %s: %s" (car error) (cadr error)))
+                              errors "\n"))
+         "")
+       (if problems
+           (concat "\n\nProblems with the merged configuration:\n"
+                   (mapconcat (lambda (problem) (concat "- " problem))
+                              problems "\n"))
+         "")
+       (if warnings
+           (concat "\n\nWarnings from :track:\n"
+                   (mapconcat (lambda (warning) (concat "- " warning))
+                              warnings "\n"))
+         "")))))
+
+;;;; Changing the configuration
+
+(defconst rat-kingdom-config-settable-layers '(global repo epic task)
+  "The layers `rat-kingdom-config-set' writes.")
+
+(defconst rat-kingdom-config-file-header
+  ";; Written by rat-kingdom (config_set).  Comments here are not kept:
+;; each change rewrites this file whole.
+"
+  "The comment at the top of a configuration file rat-kingdom writes.")
+
+(defun rat-kingdom-config--keyword (name)
+  "Return NAME, a symbol or string with or without a colon, as a keyword."
+  (intern (concat ":" (string-remove-prefix
+                       ":" (string-trim (format "%s" name))))))
+
+(defun rat-kingdom-config-read-value (text)
+  "Return the value TEXT, Emacs Lisp, says: read with `read', never evaluated.
+TEXT holds one form, such as (\"npm\" \"test\"), (lint test), 7200 or
+\(:rk t); nil and () are nil.  Signal an error if it holds no form,
+more than one, or one that does not read."
+  (unless (and (stringp text) (not (string-blank-p text)))
+    (error "Give a value, as Emacs Lisp text; nil removes the key"))
+  (with-temp-buffer
+    (insert text)
+    (set-syntax-table emacs-lisp-mode-syntax-table)
+    (goto-char (point-min))
+    (let ((value (condition-case err
+                     (let ((read-circle nil))
+                       (read (current-buffer)))
+                   (end-of-file
+                    (error "The value %s is not complete: a list or string \
+is not closed" text))
+                   (error
+                    (error "The value %s does not read: %s" text
+                           (error-message-string err))))))
+      (forward-comment (buffer-size))
+      (unless (eobp)
+        (error "The value %s holds more than one form; give one, such as \
+\(lint test) or (\"make\" \"test\")" text))
+      value)))
+
+(defun rat-kingdom-config--print (plist)
+  "Return the configuration PLIST as text, one key to a line."
+  (let ((print-length nil) (print-level nil) (print-escape-newlines t))
+    (if (null plist)
+        "()\n"
+      (concat
+       "("
+       (mapconcat
+        (lambda (pair)
+          (let* ((key (car pair))
+                 (value (cdr pair))
+                 (name (symbol-name key)))
+            (concat
+             name " "
+             (if (and (rat-kingdom-config-plist-key-p key)
+                      (rat-kingdom-config--plist-p value))
+                 (concat "("
+                         (mapconcat
+                          (lambda (sub)
+                            (format "%s %s" (car sub)
+                                    (prin1-to-string (cdr sub))))
+                          (cl-loop for (sub sub-value) on value by #'cddr
+                                   collect (cons sub sub-value))
+                          (concat "\n" (make-string (+ 3 (length name)) ?\s)))
+                         ")")
+               (prin1-to-string value)))))
+        (cl-loop for (key value) on plist by #'cddr collect (cons key value))
+        "\n ")
+       ")\n"))))
+
+(defun rat-kingdom-config--comments-p (file)
+  "Return non-nil if FILE has comments other than rat-kingdom's header."
+  (with-temp-buffer
+    (insert-file-contents file)
+    (goto-char (point-min))
+    (when (looking-at (regexp-quote rat-kingdom-config-file-header))
+      (delete-region (point-min) (match-end 0)))
+    (set-syntax-table emacs-lisp-mode-syntax-table)
+    (goto-char (point-min))
+    (let (found)
+      (while (and (not found) (search-forward ";" nil t))
+        (setq found (nth 4 (syntax-ppss))))
+      (and found t))))
+
+(defun rat-kingdom-config--write-file (file plist)
+  "Write the configuration PLIST to FILE, replacing it whole."
+  (make-directory (file-name-directory file) t)
+  (let ((coding-system-for-write 'utf-8-unix))
+    (with-temp-file file
+      (insert rat-kingdom-config-file-header
+              (rat-kingdom-config--print plist))))
+  (remhash (expand-file-name file) rat-kingdom-config--files))
+
+(defun rat-kingdom-config--file-plist (file)
+  "Return the configuration in FILE as written, for changing it.
+Return nil if FILE is missing or holds nothing but comments.  Signal
+an error if it does not read as one property list."
+  (when (file-exists-p file)
+    (let ((form (condition-case err
+                    (rat-kingdom-config--parse file)
+                  (rat-kingdom-config-error
+                   (if (equal (cadr err) "it holds no property list")
+                       nil
+                     (error "%s does not read (%s); fix or remove it by hand \
+first" file (cadr err)))))))
+      (unless (rat-kingdom-config--plist-p form)
+        (error "%s does not hold a property list; fix or remove it by hand \
+first" file))
+      form)))
+
+(defun rat-kingdom-config--policy-plist (space repo kind id)
+  "Return the configuration of the policy of the KIND ID in REPO, as stored.
+SPACE holds it.  Signal an error if it does not read."
+  (when-let* ((tuple (rat-kingdom-config-policy-tuple space repo kind id)))
+    (let* ((text (plist-get (plist-get tuple :payload) :config))
+           (form (condition-case nil
+                     (and (stringp text) (car (read-from-string text)))
+                   (error :invalid))))
+      (unless (rat-kingdom-config--plist-p form)
+        (error "%s does not read; set the keys it needs again"
+               (rat-kingdom-config--policy-source repo kind id)))
+      form)))
+
+(defun rat-kingdom-config--plist-with (plist key value)
+  "Return PLIST with KEY's value replaced by VALUE, or KEY left out if nil.
+Keys whose value is nil are left out, and a new key goes last."
+  (let (result found)
+    (cl-loop for (k v) on plist by #'cddr
+             do (if (eq k key)
+                    (progn (setq found t)
+                           (when value (setq result (nconc result (list k value)))))
+                  (when v (setq result (nconc result (list k v))))))
+    (when (and value (not found))
+      (setq result (nconc result (list key value))))
+    result))
+
+(defun rat-kingdom-config--contexts (space repos)
+  "Return the configurations REPOS, names, have in SPACE, as (REPO EPIC TASK).
+For each repository, its own, and that of each epic and task with a
+policy in it."
+  (cl-loop
+   for repo in repos
+   append
+   (cons (list repo nil nil)
+         (delq nil
+               (mapcar (lambda (tuple)
+                         (let ((identity (plist-get tuple :identity)))
+                           (cond
+                            ((string-prefix-p "epic:" identity)
+                             (list repo (substring identity 5) nil))
+                            ((string-prefix-p "task:" identity)
+                             (list repo nil (substring identity 5))))))
+                       (rat-kingdom-space-scan space (list 'policy
+                                                           :scope repo)))))))
+
+(defun rat-kingdom-config--new-problems (space contexts layer plist)
+  "Return what PLIST at LAYER would break in CONTEXTS of SPACE, as strings.
+CONTEXTS is a list of (REPO EPIC TASK); REPO may be nil when there are
+no repositories.  A problem the configuration has already is not one
+the change makes, and is left out."
+  (cl-loop
+   for (repo epic task) in contexts
+   for before = (rat-kingdom-config-validate-merged space repo :epic epic
+                                                    :task task)
+   for after = (rat-kingdom-config-validate-merged space repo :epic epic
+                                                   :task task :layer layer
+                                                   :plist plist)
+   append (mapcar (lambda (problem)
+                    (if repo
+                        (format "In %s: %s"
+                                (rat-kingdom-config--context-name repo epic
+                                                                  task)
+                                problem)
+                      problem))
+                  (cl-set-difference after before :test #'equal))))
+
+(defun rat-kingdom-config--track-text (name result)
+  "Return what applying :track to the repository NAME did, from its RESULT.
+RESULT is what `rat-kingdom-config-track-apply' returns."
+  (let ((added (plist-get result :added))
+        (removed (plist-get result :removed)))
+    (concat
+     (format "Applied :track to %s: %s." name
+             (if (or added removed)
+                 (string-join
+                  (delq nil (list (and added
+                                       (format "added %s to info/exclude"
+                                               (string-join added " ")))
+                                  (and removed
+                                       (format "removed %s from info/exclude"
+                                               (string-join removed " ")))))
+                  "; ")
+               "info/exclude already said so"))
+     (mapconcat (lambda (warning) (concat "\nWarning (tell the user): " warning))
+                (plist-get result :warnings) ""))))
+
+(defun rat-kingdom-config--effective-text (space key repo epic task)
+  "Return KEY's effective value for REPO, EPIC and TASK in SPACE, as lines."
+  (string-join (apply #'rat-kingdom-config--key-lines
+                      (assq key (rat-kingdom-config-explain
+                                 space :repo repo :epic epic :task task)))
+               "\n"))
+
+(cl-defun rat-kingdom-config-set (space layer key value &key repo epic task
+                                        actor)
+  "Set the configuration KEY to VALUE at LAYER in SPACE, and say what changed.
+LAYER is global, repo, epic or task, a symbol or string.  REPO, a
+repository's name, is needed for every layer but global; EPIC or TASK,
+an id, for its layer.  KEY is a keyword, or its name as a string with
+or without the colon.  VALUE is in the form of a file, such as
+`rat-kingdom-config-read-value' reads; nil removes KEY from LAYER.  A
+value for :commands, :agents, :timeouts or :track replaces KEY's whole
+value at LAYER; the sub-keys it leaves out come from the layers below.
+
+Nothing is written unless the layer's whole configuration is sound
+and the merged configuration of every repository it affects, every
+one for global, and of their epics and tasks with policies, has no
+problem it did not have before; otherwise signal an error saying why.
+The global and repo layers are files, written whole and pretty-printed
+with `rat-kingdom-config-file-header'; .rk is made by
+`rat-kingdom-config-repo-directory', which applies :track first.  The
+epic and task layers are `policy' tuples, written as ACTOR, by default
+\"king\".  A change to :track is applied at once.  Return the answer
+of the king's `config_set'."
+  (let* ((layer (intern (string-trim (format "%s" layer))))
+         (_ (unless (memq layer rat-kingdom-config-settable-layers)
+              (error "The layer is global, repo, epic or task, not %s%s" layer
+                     (if (memq layer '(defaults registration))
+                         " (it is not written by config_set)"
+                       ""))))
+         (key (rat-kingdom-config--keyword key))
+         (entry (rat-kingdom-config--entry key))
+         (_ (unless (memq layer (plist-get (cdr entry) :layers))
+              (error "%s cannot be set at the %s layer, only at: %s" key layer
+                     (mapconcat #'symbol-name (plist-get (cdr entry) :layers)
+                                ", "))))
+         (record (unless (eq layer 'global)
+                   (rat-kingdom-config--repo-record space repo)))
+         (repo (plist-get record :name))
+         (id (pcase layer
+               ('epic (or epic (error "Give the id of the epic")))
+               ('task (or task (error "Give the id of the task")))))
+         (file (pcase layer
+                 ('global (rat-kingdom-config-global-file))
+                 ('repo (rat-kingdom-config-repo-file record))))
+         (where (pcase layer
+                  ('global (format "the global layer (%s)" file))
+                  ('repo (format "the repo layer of %s (%s)" repo file))
+                  (_ (rat-kingdom-config--policy-source repo layer id))))
+         (old (if file
+                  (rat-kingdom-config--file-plist file)
+                (rat-kingdom-config--policy-plist space repo layer id)))
+         (old-value (plist-get old key))
+         (new (rat-kingdom-config--plist-with old key value)))
+    (when-let* ((problems (rat-kingdom-config-validate new layer)))
+      (error "Refused, nothing was written: at the %s layer %s" layer
+             (string-join problems "; ")))
+    (if (equal new (rat-kingdom-config--plist-with old nil nil))
+        (format "%s already %s; nothing was written."
+                where
+                (if value
+                    (format "has %s %s" key
+                            (rat-kingdom-config--value-text key value))
+                  (format "does not set %s" key)))
+      (let* ((contexts (pcase layer
+                         ('global (or (rat-kingdom-config--contexts
+                                       space
+                                       (mapcar (lambda (record)
+                                                 (plist-get record :name))
+                                               (rat-kingdom-repo-list space)))
+                                      (list (list nil nil nil))))
+                         ('repo (rat-kingdom-config--contexts space (list repo)))
+                         ('epic (list (list repo id nil)))
+                         ('task (list (list repo nil id)))))
+             (problems (rat-kingdom-config--new-problems space contexts layer
+                                                         new)))
+        (when problems
+          (error "Refused, nothing was written: %s"
+                 (string-join problems "; ")))
+        (let ((comments (and file (file-exists-p file)
+                             (rat-kingdom-config--comments-p file)))
+              track)
+          (pcase layer
+            ('global (rat-kingdom-config--write-file file new))
+            ('repo
+             (rat-kingdom-config-repo-directory space record)
+             (rat-kingdom-config--write-file file new))
+            (_ (rat-kingdom-config-policy-set space repo layer id new
+                                              :actor (or actor "king"))))
+          (when (eq key :track)
+            (setq track
+                  (if (eq layer 'global)
+                      (mapcar (lambda (result)
+                                (rat-kingdom-config--track-text
+                                 (car result) (cdr result)))
+                              (rat-kingdom-config-track-apply-all space))
+                    (list (condition-case err
+                              (rat-kingdom-config--track-text
+                               repo (rat-kingdom-config-track-apply space
+                                                                    record))
+                            (error (format "Could not apply :track to %s: %s"
+                                           repo
+                                           (error-message-string err))))))))
+          (string-join
+           (append
+            (list
+             (concat
+              (if value
+                  (format "Set %s at %s to %s" key where
+                          (rat-kingdom-config--value-text key value))
+                (format "Removed %s from %s" key where))
+              (if old-value
+                  (format "; it was %s."
+                          (rat-kingdom-config--value-text key old-value))
+                (if value "; it was not set there." "."))
+              (if comments
+                  " The file had comments; they were not kept."
+                ""))
+             (if (eq layer 'global)
+                 (concat
+                  "In effect now, where nothing more specific sets it:\n"
+                  (rat-kingdom-config--effective-text space key nil nil nil)
+                  (mapconcat
+                   (lambda (record)
+                     (format "\nIn %s:\n%s" (plist-get record :name)
+                             (rat-kingdom-config--effective-text
+                              space key (plist-get record :name) nil nil)))
+                   (rat-kingdom-repo-list space) ""))
+               (format "In effect now for %s:\n%s"
+                       (rat-kingdom-config--context-name
+                        repo (and (eq layer 'epic) id) (and (eq layer 'task) id))
+                       (rat-kingdom-config--effective-text
+                        space key repo (and (eq layer 'epic) id)
+                        (and (eq layer 'task) id)))))
+            track)
+           "\n"))))))
 
 (provide 'rat-kingdom-config)
 ;;; rat-kingdom-config.el ends here
