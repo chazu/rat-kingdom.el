@@ -132,6 +132,7 @@ is the audit trail and can be replayed.
 | `stuck` | persistent | watchdog | a token that cannot move |
 | `repo` | persistent | user | a registered repository: path, target branch, check, setup |
 | `published` | persistent | king `publish`, user | a push receipt: repo (scope), branch, remote and URL, old and new remote commit, actor, time |
+| `epic` | persistent | king's epic tools, engine | a running epic, scoped to its repo and named by its br id: `:state` (`running`, `paused`, `done`, `cancelled`), `:title`, `:max-parallel`, `:held` (tasks not to be restarted by themselves, with reasons), `:merged`, `:started`, `:finished`; always replaced whole, in one transaction |
 
 ### 5.5 The rule: agents write, rules read
 
@@ -243,7 +244,8 @@ judge (king or user), `:merge`, `:gate` (wait for a tuple or a timer),
   in configuration. They run without a shell.
 
 Starting workflows: `story`, `story-lite` (no review), `research` (writes a
-doc, no code), `epic` (dispatches child stories in dependency order).
+doc, no code), `epic` (dispatches child stories in dependency order;
+built instead as dispatch by reactions on an `epic` tuple, section 10).
 
 ### 7.2 Not getting stuck
 
@@ -406,7 +408,8 @@ worker takes its old place ahead of the queue for a free worker, which is
 kept and served once the replaced workers have started. A
 check that was running is run again, and so is a setup that was running
 in a new worker worktree, which keeps its worker place. The king takes up its earlier
-session by its id. Sessions that end while Emacs is exiting are not
+session by its id. Running epics are dispatched again once the tasks are
+projected (section 10). Sessions that end while Emacs is exiting are not
 recorded as ended, so they are found interrupted on the next start.
 
 The plan this came from:
@@ -519,7 +522,7 @@ go, and it lets a role be denied built-in tools as well.
 
 | Role | Lifetime | Tools |
 |---|---|---|
-| king | long-lived, global, no worktree | built: `status` (with the tracker tasks available, each with its epic and agent), `repo_add`, `repo_sync`, `workflow_list`, `story_start` (optionally from a `task`, with an `agent`; a task's `rk-agent:` and `rk-workflow:` labels are the defaults), `story_show`, `story_diff`, `story_move`, `story_cancel`, `verdict`, `publish`, `query`, `fact_forget`, `task_create`, `epic_create` (section 10), `tell`. Planned: `config_set` |
+| king | long-lived, global, no worktree | built: `status` (with the tracker tasks available, each with its epic and agent), `repo_add`, `repo_sync`, `workflow_list`, `story_start` (optionally from a `task`, with an `agent`; a task's `rk-agent:` and `rk-workflow:` labels are the defaults), `story_show`, `story_diff`, `story_move`, `story_cancel`, `verdict`, `publish`, `query`, `fact_forget`, `task_create`, `epic_create`, `epic_start`, `epic_pause`, `epic_resume`, `epic_cancel`, `epic_retry`, `epic_show` (section 10), `tell`. Planned: `config_set` |
 | rat (worker) | one task | built: `finish`, `block`, `note_fact`, `inbox` |
 | researcher | one task | `finish_doc`, `note_fact`, `block` |
 | foreman | one epic, optional | `story_start`, `tell`, `verdict`, `query`, limited to its epic |
@@ -542,7 +545,8 @@ matched and whether the list was cut off. It never writes.
 `fact_forget` retracts one `fact` by id and refuses any other tuple.
 
 The king's chores from imp and rk2 (run the check, merge, close the task,
-clean the worktree, notice a finished worker) are reactions. Review
+clean the worktree, notice a finished worker, start an epic's next
+stories) are reactions. Review
 requests reach the king as messages at a turn boundary and never interrupt
 a conversation with the user.
 
@@ -637,8 +641,70 @@ them unless it is given `agent` or `workflow`. The king's instructions
 tell it to propose an epic's stories and dependencies to the user and call
 `epic_create` only once they agree.
 
-Not built yet: an epic token that starts ready tasks by itself, a view of
-an epic's progress, a feature branch per epic, a foreman.
+**Built: running an epic** (`rat-kingdom-epic.el`). An epic runs once the
+king calls `epic_start`; its instructions say to ask the user first, and
+that the stories of a running epic are started by the engine, not by the
+king, which reviews them as usual.
+
+- **The record.** An epic's state is one persistent `epic` tuple (5.4),
+  scoped to the repository and named by the br epic's id, so it survives
+  a restart. It is only ever replaced whole, in one transaction:
+  `running`, `paused`, `done` or `cancelled`, the title, an optional
+  `:max-parallel`, the held tasks with their reasons, the tasks merged
+  by its stories, and when it started and ended.
+- **Starting a story for a task** is one function,
+  `rat-kingdom-story-start-for-task`, used by `story_start` and by
+  dispatch: the title and the task's text from the `available` tuple or
+  the tracker, the agent and workflow from its labels, the `available`
+  tuple taken and the task claimed. A story started for an epic, or by
+  `story_start` for a task of an epic that has a record, carries
+  `:epic`. `rat-kingdom-story-start` refuses a task that already has a
+  story in progress, in the same transaction that takes the `available`
+  tuple and writes the token.
+- **Dispatch** (`rat-kingdom-epic-dispatch`) starts, for each running
+  epic, a story for each `available` task whose `:parent` is the epic,
+  that is not held and has no story, while the epic has fewer stories in
+  progress (parked ones included) than its `:max-parallel`. Each start
+  checks all of that again in the transaction that takes the tuple, so
+  dispatching twice, or from two triggers, never gives a task two
+  stories. The worker cap and its queue apply as to any story. Dispatch
+  runs from a reaction joining an `available` tuple with the running
+  `epic` tuple of its parent, which fires as dependents are projected
+  after a merge and again whenever the epic tuple is replaced; from
+  `epic_start`, `epic_resume` and `epic_retry`; after the task of an
+  ended story of the epic is settled
+  (`rat-kingdom-task-settled-functions`, from the timer that closes or
+  releases it, outside any transaction); and when `rat-kingdom-mode`
+  starts, after reconciling and projecting.
+- **Ends.** On each story event (`rat-kingdom-story-event-functions`,
+  inside the transaction, before the task is settled) for a story with
+  `:epic`: a merged story's task is recorded as merged. A story that
+  ends without a merge, moved to a final place by hand or cancelled
+  (`story_cancel` now raises a `cancelled` event), has its task added to
+  `:held` with the reason before the release can project it, so it is
+  not started again until `epic_retry` clears it. So has a task whose
+  story could not be started. A story that parks adds to the king's one
+  message about it (through `rat-kingdom-king-news-functions`) its task
+  and the tasks of the epic waiting on it, directly or through others,
+  from the tasks' `:depends-on`. When every task of the epic is closed,
+  the epic is `done`, the br epic is closed with "All N tasks merged",
+  and the king is told "Epic E (title) is done: N stories merged."
+- **Pause, resume, cancel.** `epic_pause` stops dispatch; stories in
+  progress carry on. `epic_resume` dispatches again. `epic_cancel` marks
+  the epic cancelled first, so that nothing is held or started, then
+  cancels each story of it in progress as `story_cancel` does, which
+  releases its task. The br epic and its tasks are left open, and a
+  cancelled epic can be started again.
+- **The view.** `status` has an Epics section
+  (`rat-kingdom-king-status-functions`) for each running or paused epic:
+  its state, merged/total, its stories in progress and where each is,
+  the tasks held up behind a stopped story, the held tasks, and how many
+  tasks wait on others. Each story's line names its epic, and
+  `story_show` gives its task and epic. `epic_show` gives the full table:
+  each task's id, title, status, story, agent and what it waits on.
+
+Not built yet: a feature branch per epic, a foreman, the epic plan
+surface.
 
 ## 11. Integration and publication
 
@@ -858,9 +924,13 @@ wait longer for review than for implementation.
    king plans work with `task_create` and `epic_create`
    (`rat-kingdom-epic.el`): an epic and its tasks with dependencies, checked
    in full before anything is written, started by nothing. Its instructions
-   list its tools from those defined. Still to come: an epic token that
-   dispatches ready tasks, an epic status view, feature branches per epic,
-   the foreman, and the epic plan surface (4).
+   list its tools from those defined. Running an epic is built: an `epic`
+   tuple per epic, `epic_start`, `epic_pause`, `epic_resume`,
+   `epic_cancel`, `epic_retry` and `epic_show`, dispatch of ready tasks
+   by the engine as their dependencies merge, held tasks, holdups told to
+   the king, the Epics section of `status`, and dispatch resumed after a
+   restart, tested with the in-memory adapter. Still to come: feature
+   branches per epic, the foreman, and the epic plan surface (4).
 
    **Facts** (built: `rat-kingdom-fact.el`): the worker's `note_fact`,
    facts in every worker's brief through

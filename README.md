@@ -9,8 +9,9 @@ parallel. You talk to a king; it starts stories; each story follows a
 workflow from a worker through a check and a review to a merge into an
 integration branch; work cut off by an Emacs restart is recovered. Tasks
 come from a br (Rust Beads) workspace in each repository, and the king can
-plan an epic there as tasks with dependencies. An epic's ready tasks are
-not yet started on their own, and there is no research workflow yet. The
+plan an epic there as tasks with dependencies and, once you agree, run it:
+the engine starts each task's story as the task becomes ready. There is
+no research workflow yet, nor a feature branch per epic. The
 path through real agents has been run once for a worker and not yet for
 the king.
 
@@ -123,11 +124,65 @@ parent and the tasks depended on must already exist.
 
 Neither tool starts anything. A task becomes available when the tasks it
 depends on are closed, as their stories are merged, and `status` lists it
-under Available tasks with its epic and agent. Work starts only when the
-king starts a story for it with `story_start` and its `task`. The task's
-agent and workflow are kept as the br labels `rk-agent:NAME` and
-`rk-workflow:NAME`, and `story_start` uses them unless it is given
-others. An epic itself is never available.
+under Available tasks with its epic and agent. Work starts when the epic
+is run (next section), or when the king starts a story for one task with
+`story_start` and its `task`. The task's agent and workflow are kept as
+the br labels `rk-agent:NAME` and `rk-workflow:NAME`, and a story started
+for the task uses them unless it is given others. An epic itself is never
+available.
+
+### Epics
+
+**Plan.** The king proposes the epic's stories and their dependencies,
+and creates them with `epic_create` once you agree (above). Nothing runs
+yet.
+
+**Start.** The king asks you before it calls `epic_start` with the
+repository, the epic's id and, if you want, `max_parallel`, the most
+stories of the epic in progress at once. From then on the engine starts a
+story for each task of the epic as soon as the task is available: at
+first those that depend on nothing, then each task once every task it
+depends on is merged. A diamond a → (b, c) → d runs a, then b and c side
+by side, then d. The worker cap still applies: a story beyond it waits
+for a free worker as any other does. `epic_start` answers with the
+stories it started, the ready tasks that wait for a place, and every task
+still waiting with what it waits on. The epic's state is kept in the
+space as one `epic` tuple, so a restart of Emacs keeps it; when
+`rat-kingdom-mode` starts again, after recovering the stories that were
+cut off, the running epics carry on, and no task is ever given a second
+story.
+
+**Review.** The king reviews each story as it always does. It does not
+start the epic's stories; the engine does. When every task of the epic is
+closed, the epic is done: the br epic is closed ("All 4 tasks merged")
+and the king is told.
+
+**Holdups.** When a story of the epic stops (its worker blocked, its
+setup failed, or it ran out of workers), the king is told once: which
+story and task, why, and which other tasks of the epic now wait on it,
+directly or through others. They stay waiting until it is merged; the
+king can give it a new worker with `story_move`.
+
+**Retry.** A story of the epic that ends without being merged, because it
+was cancelled or moved to its end by hand, releases its task, but the
+epic holds the task, so that the engine does not just start it again. So
+does a task whose story could not be started, say because its
+`rk-workflow:` label names no workflow. The king is told, and
+`epic_retry` with the epic and the task lets the engine start it again.
+
+**Pause, resume, cancel.** `epic_pause` starts nothing more while the
+stories in progress carry on; `epic_resume` starts what is ready.
+`epic_cancel` cancels every story of the epic in progress, as
+`story_cancel` does, and starts nothing more. The br epic and its tasks
+stay open in the tracker, for you to close, or to run again with
+`epic_start`.
+
+**Watching.** `status` has an Epics section for each epic that is running
+or paused: its state, how many of its tasks are merged, its stories in
+progress and where each is, the tasks held up behind a stopped story, the
+held tasks, and how many tasks still wait on others. Each story's line
+names its epic. `epic_show` gives one epic in full: a table of its tasks
+with each one's status, story, agent and what it waits on.
 
 ### Choosing the agent
 
@@ -200,8 +255,10 @@ fetches its tools afresh.
 Turning on `rat-kingdom-mode`, which `rat-kingdom-king` does, recovers
 what the last Emacs left in flight. A worker that was cut off is replaced
 by a new one in the same worktree, told to look at what is there. A check
-or setup that was running runs again. The king takes up its earlier
-session; `C-u M-x rat-kingdom-king` starts a new one instead.
+or setup that was running runs again. Running epics carry on: the stories
+their ready tasks have room for are started, and none twice. The king
+takes up its earlier session; `C-u M-x rat-kingdom-king` starts a new one
+instead.
 
 ### Telling a worker something
 

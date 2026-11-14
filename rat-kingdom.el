@@ -135,8 +135,9 @@ While this is on, stories move: workers are started, their results
 checked, reviewed and merged.  Turning it on first recovers whatever
 an earlier Emacs left in flight, makes sure every registered repository
 has a br workspace, then shows each repository's ready tasks as
-`available' in the space.  A repository whose workspace cannot be made
-is reported and skipped."
+`available' in the space, and starts the stories running epics have
+room for.  A repository whose workspace cannot be made is reported and
+skipped."
   :global t
   :group 'rat-kingdom
   (when (timerp rat-kingdom--watch-timer)
@@ -150,6 +151,8 @@ is reported and skipped."
           (rat-kingdom-task-ensure-all space))
         (with-demoted-errors "rat-kingdom: projecting tasks: %S"
           (rat-kingdom-task-project-all space))
+        (with-demoted-errors "rat-kingdom: running epics: %S"
+          (rat-kingdom-epic-recover space))
         (rat-kingdom-reaction-attach space)
         (rat-kingdom--start-watch))
     (rat-kingdom-reaction-detach (rat-kingdom-space-default))

@@ -82,9 +82,13 @@ Your tools are those of the rat-kingdom server: {tools}.
 
 To plan an epic, propose its stories and the dependencies between them to \
 the user first, and call `epic_create` only once they agree. `epic_create` \
-and `task_create` only record tasks in the tracker: they start nothing. Work \
-begins when you start a story for a ready task with `story_start`, which \
-stays a separate step.
+and `task_create` only record tasks in the tracker: they start nothing. Once \
+the user has approved the plan, ask them before you call `epic_start`. While \
+an epic runs, the engine itself starts a story for each of its tasks as the \
+task becomes ready, and you review those stories as usual; you do not start \
+them. If one stops or is cancelled, you are told what waits on it; \
+`epic_retry` lets the engine start a held task again. `epic_pause`, \
+`epic_resume` and `epic_cancel` are for when the user asks.
 
 Rules:
 - Do not write code yourself, and do not edit files in the repositories. \
@@ -99,7 +103,8 @@ is merged.
 - A message that begins with [rat-kingdom] comes from the engine, not from \
 the user. Act on it: review when asked, look into a story that stopped, and \
 tell the user briefly what happened. Do not start new stories on the \
-strength of such a message alone.
+strength of such a message alone. A running epic is the exception: the \
+engine starts its stories, not you.
 - When asked to review, read the diff with `story_diff` and the worker's \
 report with `story_show`, judge it against the story, and give a `verdict`: \
 pass, or fix with notes exact enough for a worker to act on.
@@ -200,7 +205,10 @@ See `rat-kingdom-king-story-note-functions'."
               (_ ""))
             (rat-kingdom-king--age
              (- now (or (plist-get payload :entered) now)))
-            (rat-kingdom-king--agent payload)
+            (concat (rat-kingdom-king--agent payload)
+                    (if-let* ((epic (plist-get payload :epic)))
+                        (format ", epic %s" epic)
+                      ""))
             (mapconcat (lambda (note) (concat ", " note))
                        (rat-kingdom-king--story-notes space story 'status) "")
             (plist-get payload :title)
@@ -254,6 +262,22 @@ REPOS are the records of the registered repositories."
       "- none")
      (t "- none (no repository has a task tracker)"))))
 
+(defvar rat-kingdom-king-status-functions nil
+  "Functions that add sections to what `status' says.
+Each is called with the space and returns a section, a heading line and
+its lines, or nil.  The sections follow the stories in progress, in the
+order of this list.  Add to it with `add-hook', so that reloading does
+not add a function twice.")
+
+(defun rat-kingdom-king--status-sections (space)
+  "Return the sections `rat-kingdom-king-status-functions' give for SPACE."
+  (let (sections)
+    (dolist (function rat-kingdom-king-status-functions)
+      (with-demoted-errors "rat-kingdom: status function: %S"
+        (when-let* ((section (funcall function space)))
+          (push section sections))))
+    (nreverse sections)))
+
 (defun rat-kingdom-king-status (space)
   "Return a text describing the repositories, stories and tasks in SPACE.
 The ready tasks of every repository are projected first; a tracker
@@ -296,6 +320,8 @@ the user): %s" problem)
          (mapconcat (lambda (story) (rat-kingdom-king--story-line space story))
                     stories "\n")
        "- none")
+     (mapconcat (lambda (section) (concat "\n\n" (string-trim-right section)))
+                (rat-kingdom-king--status-sections space) "")
      "\n\nAvailable tasks:\n"
      (rat-kingdom-king--available space repos)
      (if failures
@@ -339,6 +365,23 @@ The second value, in a cons, is non-nil if it is archived."
                         (plist-get payload :title))
                 (and (plist-get payload :description)
                      (format "Description: %s" (plist-get payload :description)))
+                (and (plist-get payload :task)
+                     (format "Task: %s%s" (plist-get payload :task)
+                             (if-let* ((epic (plist-get payload :epic)))
+                                 (format ", of the epic %s%s" epic
+                                         (if-let* ((record
+                                                    (rat-kingdom-space-rd
+                                                     space
+                                                     (list 'epic
+                                                           :scope
+                                                           (plist-get story :scope)
+                                                           :identity epic))))
+                                             (format " (%s)"
+                                                     (plist-get
+                                                      (plist-get record :payload)
+                                                      :title))
+                                           ""))
+                               "")))
                 (format "Agent: %s" (rat-kingdom-king--agent payload))
                 (format "Workflow %s; at %s%s%s"
                         (plist-get payload :workflow) (plist-get payload :at)
@@ -435,11 +478,32 @@ clean)")
 
 ;;;; News for the king
 
+(defvar rat-kingdom-king-news-functions nil
+  "Functions that add to the king's news of what happened to a story.
+Each is called with the space, the event and the story's token, as
+`rat-kingdom-story-event-functions' are, inside the same transaction,
+and returns a paragraph to add to the news, or nil.  For an event the
+king is not otherwise told of, such as `cancelled', a paragraph makes
+news of it.  Add to it with `add-hook', so that reloading does not add
+a function twice.")
+
+(defun rat-kingdom-king--news-notes (space event story)
+  "Return the paragraphs `rat-kingdom-king-news-functions' add.
+Each is called with SPACE, EVENT and STORY."
+  (let (notes)
+    (dolist (function rat-kingdom-king-news-functions)
+      (with-demoted-errors "rat-kingdom: news function: %S"
+        (when-let* ((note (funcall function space event story)))
+          (push note notes))))
+    (nreverse notes)))
+
 (defun rat-kingdom-king--news (space event story)
-  "Leave the king a message in SPACE that EVENT happened to the token STORY."
+  "Leave the king a message in SPACE that EVENT happened to the token STORY.
+The paragraphs of `rat-kingdom-king-news-functions' are added to it."
   (let* ((payload (plist-get story :payload))
          (id (plist-get story :identity))
          (name (rat-kingdom-story--title story))
+         (notes (rat-kingdom-king--news-notes space event story))
          (text
           (pcase event
             ('done
@@ -462,7 +526,12 @@ note saying what to do differently), or end it with story_cancel."
 story_diff and story_show for %s, then give a verdict."
                        name id)))
             ('stuck
-             (format "%s looks stuck. %s" name (plist-get payload :reason))))))
+             (format "%s looks stuck. %s" name (plist-get payload :reason)))
+            ('cancelled
+             (and notes (format "%s was cancelled." name)))))
+         (text (if (and text notes)
+                   (string-join (cons text notes) "\n")
+                 text)))
     (when text
       (rat-kingdom-space-out space 'message :scope (plist-get story :scope)
                              :payload (list :to rat-kingdom-king-id
@@ -752,28 +821,6 @@ ever moves the target forward."
     '((:name "repo" :type string :description "The repository's name."))
   (rat-kingdom-story-sync space (arg 'repo)))
 
-(defun rat-kingdom-king--task (space repo id)
-  "Return the task ID of the repository REPO in SPACE, for a new story.
-The task is a property list with at least `:title' and `:description',
-taken from its `available' tuple or else from the tracker.  Signal an
-error if REPO has no tracker, the tracker has no such task, or a story
-already works on it."
-  (let ((adapter (or (rat-kingdom-task-adapter space repo)
-                     (error "The repository %s has no task tracker, so it \
-has no task %s; leave out task and give a title and description" repo id))))
-    (when-let* ((story (rat-kingdom-space-rd
-                        space (list 'story :scope repo :task id))))
-      (error "The story %s already works on the task %s; see story_show"
-             (plist-get story :identity) id))
-    (or (plist-get (rat-kingdom-space-rd
-                    space (list 'available :scope repo :identity id))
-                   :payload)
-        (condition-case err
-            (or (rat-kingdom-task-show adapter id)
-                (error "No such task"))
-          (error (error "The tracker of %s has no task %s (%s); see \
-Available tasks in status" repo id (error-message-string err)))))))
-
 (rat-kingdom-king--deftool "story_start"
     "Start a story: one task for one worker in one repository. The worker \
 starts at once in its own worktree. Returns the story's id and any warnings \
@@ -801,28 +848,30 @@ rat-kingdom-default-agent, the user's setting, which status shows."))
   (let* ((repo (arg 'repo))
          (warnings (rat-kingdom-story-warnings space repo))
          (task (arg 'task))
-         (found (and task (rat-kingdom-king--task space repo task)))
-         (title (or (arg 'title) (plist-get found :title)
-                    (error "Give a title, or a task to take it from")))
-         (description
-          (cond ((not task)
-                 (or (arg 'description)
-                     (error "Give a description, or a task to take it from")))
-                ((and (not (arg 'description)) (plist-get found :description)))
-                (t (concat (and (arg 'description)
-                                (concat (arg 'description) "\n\n"))
-                           (format "This story works on the tracker task \
-%s: %s" task (plist-get found :title))))))
+         (found (and task (rat-kingdom-story-task space repo task)))
          (labelled (and found (list :agent (and (not (arg 'agent))
                                                 (rat-kingdom-task-agent found))
                                     :workflow (and (not (arg 'workflow))
                                                    (rat-kingdom-task-workflow
                                                     found)))))
-         (id (rat-kingdom-story-start
-              space repo title description nil
-              (or (arg 'workflow) (plist-get labelled :workflow))
-              task
-              (or (arg 'agent) (plist-get labelled :agent))))
+         ;; A task of an epic that has been run is counted with it.
+         (epic (when-let* ((parent (plist-get found :parent))
+                           ((rat-kingdom-space-rd
+                             space (list 'epic :scope repo
+                                         :identity parent))))
+                 parent))
+         (id (if task
+                 (rat-kingdom-story-start-for-task
+                  space repo task :found found
+                  :title (arg 'title) :description (arg 'description)
+                  :agent (arg 'agent) :workflow (arg 'workflow) :epic epic)
+               (rat-kingdom-story-start
+                space repo
+                (or (arg 'title)
+                    (error "Give a title, or a task to take it from"))
+                (or (arg 'description)
+                    (error "Give a description, or a task to take it from"))
+                nil (arg 'workflow) nil (arg 'agent))))
          (payload (plist-get (rat-kingdom-story-get space id) :payload))
          (from-labels (delq nil (list (and (plist-get labelled :workflow)
                                            "workflow")
@@ -834,10 +883,12 @@ will be told when it needs you or is merged."
                    id (if task (format " for the task %s" task) "")
                    (plist-get payload :workflow)
                    (plist-get payload :agent)
-                   (if from-labels
-                       (format " (the %s from the task's labels)"
-                               (string-join from-labels " and "))
-                     ""))
+                   (concat
+                    (if from-labels
+                        (format " (the %s from the task's labels)"
+                                (string-join from-labels " and "))
+                      "")
+                    (if epic (format ", as a story of the epic %s" epic) "")))
            warnings)
      "\nWarning: ")))
 
