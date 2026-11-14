@@ -566,6 +566,8 @@ them by merged stories. The br epic T-1 is closed."
                (lambda () (push 'reconcile calls)))
               ((symbol-function 'rat-kingdom-task-ensure-all)
                (lambda (_space) (push 'ensure calls)))
+              ((symbol-function 'rat-kingdom-config-track-apply-all)
+               (lambda (_space) (push 'track calls)))
               ((symbol-function 'rat-kingdom-task-project-all)
                (lambda (_space) (push 'project calls)))
               ((symbol-function 'rat-kingdom-epic-recover)
@@ -579,7 +581,7 @@ them by merged stories. The br epic T-1 is closed."
           (progn
             (rat-kingdom-mode 1)
             (should (equal (reverse calls)
-                           '(reconcile ensure project (epics space) attach))))
+                           '(reconcile ensure track project (epics space) attach))))
         (rat-kingdom-mode -1)))))
 
 ;;;; Views

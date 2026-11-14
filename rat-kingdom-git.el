@@ -101,9 +101,82 @@ Signal `rat-kingdom-git-error' if it fails."
   (rat-kingdom-git-ok-p directory "merge-base" "--is-ancestor"
                         ancestor descendant))
 
+;;;; info/exclude
+
+;; rat-kingdom keeps its own directories out of Git with lines in
+;; info/exclude, never in .gitignore.  These functions add and remove
+;; one exact line and leave every other byte of the file as it was: the
+;; file is read and written without any decoding or conversion.
+
+(defun rat-kingdom-git-exclude-file (directory)
+  "Return the info/exclude file of the Git repository DIRECTORY is in.
+It is in the common Git directory, which linked worktrees share."
+  (let ((top (rat-kingdom-git directory "rev-parse" "--show-toplevel")))
+    (expand-file-name "info/exclude"
+                      (expand-file-name
+                       (rat-kingdom-git top "rev-parse" "--git-common-dir")
+                       top))))
+
+(defun rat-kingdom-git--exclude-read (file)
+  "Insert the bytes of FILE, if it exists, into a unibyte current buffer."
+  (set-buffer-multibyte nil)
+  (when (file-exists-p file)
+    (insert-file-contents-literally file)))
+
+(defun rat-kingdom-git--exclude-write (file)
+  "Write the current buffer's bytes to FILE as they are."
+  (let ((coding-system-for-write 'no-conversion))
+    (write-region nil nil file nil 'silent)))
+
+(defun rat-kingdom-git-excluded-p (file line)
+  "Return non-nil if the exclude FILE has LINE, exactly, as one of its lines."
+  (and (file-exists-p file)
+       (with-temp-buffer
+         (rat-kingdom-git--exclude-read file)
+         (member (encode-coding-string line 'utf-8)
+                 (split-string (buffer-string) "\n")))))
+
+(defun rat-kingdom-git-exclude (file line)
+  "Add LINE to the end of the exclude FILE unless it has it.
+Create FILE and its directory if need be.  If FILE does not end in a
+newline, one is added before LINE.  Nothing else changes.  Return
+non-nil if LINE was added."
+  (unless (rat-kingdom-git-excluded-p file line)
+    (make-directory (file-name-directory file) t)
+    (with-temp-buffer
+      (rat-kingdom-git--exclude-read file)
+      (goto-char (point-max))
+      (unless (or (bobp) (eq (char-before) ?\n))
+        (insert "\n"))
+      (insert (encode-coding-string line 'utf-8) "\n")
+      (rat-kingdom-git--exclude-write file))
+    t))
+
+(defun rat-kingdom-git-unexclude (file line)
+  "Take every line of the exclude FILE that is exactly LINE out of it.
+Each goes with its newline; nothing else changes.  Return non-nil if
+there was one."
+  (when (file-exists-p file)
+    (with-temp-buffer
+      (rat-kingdom-git--exclude-read file)
+      (goto-char (point-min))
+      (let ((pattern (concat "^" (regexp-quote (encode-coding-string line 'utf-8))
+                             "\\(?:\n\\|\\'\\)"))
+            (case-fold-search nil)
+            (removed nil))
+        (while (re-search-forward pattern nil t)
+          (replace-match "" t t)
+          (setq removed t))
+        (when removed
+          (rat-kingdom-git--exclude-write file))
+        removed))))
+
 ;;;; Repositories
 
-(declare-function rat-kingdom-task-br-ensure "rat-kingdom-task" (repo))
+(declare-function rat-kingdom-task-br-ensure "rat-kingdom-task"
+                  (repo &optional space))
+(declare-function rat-kingdom-config-track-apply "rat-kingdom-config"
+                  (space repo))
 
 (cl-defun rat-kingdom-repo-add (space path
                                       &key name target check setup workflow
@@ -122,10 +195,18 @@ record.
 Every registered repository has a br workspace for its tasks.  If the
 checkout has none, one is created by `rat-kingdom-task-br-ensure',
 with TASK-PREFIX, by default NAME, as its issue prefix, and kept out of
-Git; the record returned then has `:task-initialized' t, which is not
-stored.  If that fails, nothing is registered, no target branch is
-created, and the error is signalled."
+Git unless the configuration's :track :beads says to track it; the
+record returned then has `:task-initialized' t, which is not stored.
+If that fails, nothing is registered, no target branch is created, and
+the error is signalled.
+
+The configuration's :track is then applied, by
+`rat-kingdom-config-track-apply': /.rk/ and /.beads/ are added to or
+taken out of the repository's info/exclude.  If it warns that Git
+already tracks files in a directory meant to be kept out, the record
+returned has the warnings as `:track-warnings', which is not stored."
   (require 'rat-kingdom-task)
+  (require 'rat-kingdom-config)
   (let* ((top (rat-kingdom-git path "rev-parse" "--show-toplevel"))
          (name (or name (file-name-nondirectory (directory-file-name top))))
          (target (or target rat-kingdom-git-default-target))
@@ -140,8 +221,10 @@ created, and the error is signalled."
       (error "A task prefix may not be empty"))
     (unless (rat-kingdom-git-ok-p top "rev-parse" "--verify" "--quiet" "HEAD")
       (error "%s has no commits yet" top))
-    (let ((initialized (rat-kingdom-task-br-ensure
-                        (list :name name :path top :task-prefix task-prefix))))
+    (let* ((record (list :name name :path top :task-prefix task-prefix))
+           (initialized (rat-kingdom-task-br-ensure record space))
+           (warnings (plist-get (rat-kingdom-config-track-apply space record)
+                                :warnings)))
       (unless (rat-kingdom-git-ok-p top "rev-parse" "--verify" "--quiet"
                                     (concat "refs/heads/" target))
         (rat-kingdom-git top "branch" target "HEAD"))
@@ -153,7 +236,8 @@ created, and the error is signalled."
                                             :task-prefix task-prefix)
                              :actor "user")
       (append (rat-kingdom-repo-get space name)
-              (and initialized (list :task-initialized t))))))
+              (and initialized (list :task-initialized t))
+              (and warnings (list :track-warnings warnings))))))
 
 (defun rat-kingdom-repo-get (space name)
   "Return the record of the repository NAME in SPACE, or nil.

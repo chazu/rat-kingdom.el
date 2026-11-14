@@ -315,7 +315,7 @@ configuration as a whole is said briefly."
          (config (rat-kingdom-config-merged space :repo name))
          (worker (plist-get (plist-get config :agents) :worker))
          (problems (rat-kingdom-config-validate-merged space name)))
-    (format "- %s at %s; target %s; check %s%s; workflow %s%s%s%s"
+    (format "- %s at %s; target %s; check %s%s; workflow %s%s%s%s%s"
             name (plist-get repo :path)
             (plist-get config :target)
             (if (plist-get config :check)
@@ -337,7 +337,11 @@ configuration as a whole is said briefly."
             (if-let* ((problem (rat-kingdom-task-workspace-error name)))
                 (format "; it has no br workspace, so no tasks (tell \
 the user): %s" problem)
-              ""))))
+              "")
+            (mapconcat (lambda (warning)
+                         (concat "; warning (tell the user): " warning))
+                       (rat-kingdom-config-track-warnings name)
+                       ""))))
 
 (defun rat-kingdom-king--config-errors (repos)
   "Return the configuration being ignored, as a section of status, or \"\".
@@ -1041,8 +1045,10 @@ available to start stories from."
 change the settings of one already registered. Creates the target branch \
 from HEAD if it does not exist. Every repository needs a br (Rust Beads) \
 workspace for its tasks: if the checkout has no .beads directory one is \
-initialized, kept out of Git through info/exclude, and the answer says so. \
-An existing .beads is left alone. If br is missing or fails, nothing is \
+initialized, and the answer says so. An existing .beads is left alone. \
+.rk and .beads are kept out of Git through info/exclude, or not, as the \
+configuration's :track says; the answer warns if Git already tracks files \
+in one kept out (tell the user). If br is missing or fails, nothing is \
 registered."
     '((:name "path" :type string
        :description "Absolute path of the repository's checkout.")
@@ -1076,9 +1082,16 @@ be created. Default the repository's name."))
                    (rat-kingdom-story-repo-target space (plist-get repo :name))
                    (if (plist-get repo :task-initialized)
                        (format " Initialized a br workspace there with the \
-prefix %s, kept out of Git." (rat-kingdom-task-br-prefix repo))
+prefix %s, %s." (rat-kingdom-task-br-prefix repo)
+                               (if (plist-get (rat-kingdom-config-get
+                                               space :track
+                                               :repo (plist-get repo :name))
+                                              :beads)
+                                   "to be tracked in Git"
+                                 "kept out of Git"))
                      ""))
-           (rat-kingdom-story-warnings space (plist-get repo :name)))
+           (append (plist-get repo :track-warnings)
+                   (rat-kingdom-story-warnings space (plist-get repo :name))))
      "\nWarning: ")))
 
 (rat-kingdom-king--deftool "repo_sync"

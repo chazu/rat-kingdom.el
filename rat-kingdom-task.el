@@ -47,9 +47,11 @@
 ;; `br init --prefix PREFIX', checks that the prefix took, and keeps
 ;; .beads out of Git by adding /.beads/ to info/exclude in the
 ;; repository's common Git directory, never to .gitignore, so that
-;; `git status' does not change; `rat-kingdom-task-br-untracked' turns
-;; that off.  A .beads directory that is already there is left exactly
-;; as it is.
+;; `git status' does not change, unless the configuration's :track
+;; :beads, whose default is `rat-kingdom-task-br-untracked', says to
+;; track it.  br init never runs where a .beads directory is already
+;; there; the exclude line follows :track either way
+;; (`rat-kingdom-config-track-apply').
 ;;
 ;; `rat-kingdom-task-project' makes the space show a repository's ready
 ;; tasks as `available' tuples.  A story started from a task takes its
@@ -328,65 +330,35 @@ It is unassigned and open again."
 ;;;; The workspace of a repository
 
 (defcustom rat-kingdom-task-br-untracked t
-  "Non-nil means a br workspace rat-kingdom creates is kept out of Git.
-When rat-kingdom initializes br in a repository that has no .beads
-directory, it adds the line /.beads/ to the info/exclude file in the
-repository's common Git directory, so that nothing br writes shows in
-`git status'.  Nothing is written to .gitignore, and no tracked file
-changes.  Set this to nil to track .beads yourself.  A workspace that
-already exists is never touched, whatever this says."
+  "Non-nil means .beads is kept out of Git unless configured otherwise.
+This is the default of the configuration's :track :beads (DESIGN.md,
+section 7.3): non-nil here is nil there.  Kept out, the line /.beads/
+is in the info/exclude file in the repository's common Git directory,
+so that nothing br writes shows in `git status'.  Nothing is written to
+.gitignore, and no tracked file changes.  Set this to nil to track
+.beads yourself.  br init never runs where a workspace already exists,
+whatever this says; its exclude line follows :track all the same, see
+`rat-kingdom-config-track-apply'."
   :type 'boolean
   :group 'rat-kingdom)
 
-(defun rat-kingdom-task-br--exclude-file (top)
-  "Return the info/exclude file of the Git repository whose checkout is TOP.
-It is in the common Git directory, which linked worktrees share."
-  (expand-file-name "info/exclude"
-                    (expand-file-name
-                     (rat-kingdom-git top "rev-parse" "--git-common-dir")
-                     top)))
+(defconst rat-kingdom-task-br-exclude-line "/.beads/"
+  "The line in info/exclude that keeps a br workspace out of Git.")
 
-(defconst rat-kingdom-task-br--exclude-line "/.beads/"
-  "The line that keeps a br workspace out of Git.")
+(declare-function rat-kingdom-config-get "rat-kingdom-config"
+                  (space key &rest keys))
 
-(defun rat-kingdom-task-br--excluded-p (file)
-  "Return non-nil if the exclude FILE already has the .beads line."
-  (and (file-exists-p file)
-       (with-temp-buffer
-         (insert-file-contents file)
-         (member rat-kingdom-task-br--exclude-line
-                 (split-string (buffer-string) "\n")))))
-
-(defun rat-kingdom-task-br--exclude (file)
-  "Add the .beads line to the exclude FILE unless it has it.
-Create FILE and its directory if need be.  Return non-nil if the line
-was added."
-  (unless (rat-kingdom-task-br--excluded-p file)
-    (make-directory (file-name-directory file) t)
-    (with-temp-buffer
-      (when (file-exists-p file)
-        (insert-file-contents file))
-      (goto-char (point-max))
-      (unless (or (bobp) (eq (char-before) ?\n))
-        (insert "\n"))
-      (insert rat-kingdom-task-br--exclude-line "\n")
-      (let ((coding-system-for-write 'utf-8-unix))
-        (write-region nil nil file nil 'silent)))
-    t))
-
-(defun rat-kingdom-task-br--unexclude (file)
-  "Take the .beads line out of the exclude FILE again."
-  (when (file-exists-p file)
-    (with-temp-buffer
-      (insert-file-contents file)
-      (goto-char (point-max))
-      (when (re-search-backward
-             (concat "^" (regexp-quote rat-kingdom-task-br--exclude-line)
-                     "\n")
-             nil t)
-        (replace-match "")
-        (let ((coding-system-for-write 'utf-8-unix))
-          (write-region nil nil file nil 'silent))))))
+(defun rat-kingdom-task-br--untracked-p (repo space)
+  "Return non-nil if a br workspace made for REPO is to be kept out of Git.
+With SPACE, it is what the configuration's :track :beads says for the
+repository record REPO, whose default is `rat-kingdom-task-br-untracked';
+without, that option."
+  (if space
+      (progn
+        (require 'rat-kingdom-config)
+        (not (plist-get (rat-kingdom-config-get space :track :repo repo)
+                        :beads)))
+    rat-kingdom-task-br-untracked))
 
 (defun rat-kingdom-task-br-prefix (repo)
   "Return the issue prefix for a br workspace of the repository record REPO.
@@ -403,7 +375,7 @@ It is REPO's `:task-prefix', else its name."
 Return nil if it was made, or found, the last time it was ensured."
   (cdr (assoc repo rat-kingdom-task--workspace-errors)))
 
-(defun rat-kingdom-task-br-ensure (repo)
+(defun rat-kingdom-task-br-ensure (repo &optional space)
   "Make sure the repository REPO has a br workspace.
 REPO is a repository record or the path of a checkout.  br is
 required: if it cannot be found, signal `rat-kingdom-task-error'
@@ -412,9 +384,11 @@ saying so.
 If the checkout has a .beads directory, leave it as it is, tracked,
 ignored or neither, and return nil.  Otherwise run `br init' there
 with the prefix `rat-kingdom-task-br-prefix' gives, check that br
-took it, and, if `rat-kingdom-task-br-untracked' is non-nil, add
-/.beads/ to the repository's info/exclude and check that `git status'
-shows nothing under .beads.  Return non-nil.
+took it, and, if .beads is to be kept out of Git, add /.beads/ to the
+repository's info/exclude and check that `git status' shows nothing
+under .beads.  Return non-nil.  With SPACE, whether it is kept out is
+what the configuration's :track :beads says for REPO; without, what
+`rat-kingdom-task-br-untracked' says.
 
 If any of that fails, the .beads directory and the exclude line made
 here are removed again, and the error, with br's or Git's message, is
@@ -423,7 +397,7 @@ signalled.  If REPO is a record, the error is also remembered for
   (let* ((repo (if (stringp repo) (list :path repo) repo))
          (name (plist-get repo :name)))
     (condition-case err
-        (prog1 (rat-kingdom-task-br--ensure repo)
+        (prog1 (rat-kingdom-task-br--ensure repo space)
           (when name
             (setq rat-kingdom-task--workspace-errors
                   (assoc-delete-all name rat-kingdom-task--workspace-errors))))
@@ -434,9 +408,10 @@ signalled.  If REPO is a record, the error is also remembered for
                (error-message-string err)))
        (signal (car err) (cdr err))))))
 
-(defun rat-kingdom-task-br--ensure (repo)
+(defun rat-kingdom-task-br--ensure (repo space)
   "Make sure the repository record REPO has a br workspace.
-See `rat-kingdom-task-br-ensure'."
+SPACE, if non-nil, holds its configuration.  See
+`rat-kingdom-task-br-ensure'."
   (let* ((path (or (plist-get repo :path)
                    (error "The repository %s has no path"
                           (plist-get repo :name))))
@@ -446,8 +421,8 @@ See `rat-kingdom-task-br-ensure'."
          (prefix (rat-kingdom-task-br-prefix repo)))
     (rat-kingdom-task-br--executable)
     (unless (file-directory-p beads)
-      (let ((exclude (and rat-kingdom-task-br-untracked
-                          (rat-kingdom-task-br--exclude-file top)))
+      (let ((exclude (and (rat-kingdom-task-br--untracked-p repo space)
+                          (rat-kingdom-git-exclude-file top)))
             (added nil)
             (done nil))
         (unwind-protect
@@ -464,7 +439,8 @@ See `rat-kingdom-task-br-ensure'."
                           (list (format "br init --prefix %s in %s left the \
 prefix %S; a br configuration may be overriding it" prefix top found)))))
               (when exclude
-                (setq added (rat-kingdom-task-br--exclude exclude))
+                (setq added (rat-kingdom-git-exclude
+                             exclude rat-kingdom-task-br-exclude-line))
                 (let ((status (rat-kingdom-git top "status" "--porcelain"
                                                "--ignored=no" "--" ".beads")))
                   (unless (string-empty-p status)
@@ -476,7 +452,8 @@ shows in git status after excluding it:\n%s" top status))))))
             (when (file-directory-p beads)
               (delete-directory beads t))
             (when added
-              (rat-kingdom-task-br--unexclude exclude)))))
+              (rat-kingdom-git-unexclude
+               exclude rat-kingdom-task-br-exclude-line)))))
       t)))
 
 (defun rat-kingdom-task-ensure-all (space)
@@ -489,10 +466,9 @@ created."
     (dolist (repo (rat-kingdom-repo-list space))
       (let ((name (plist-get repo :name)))
         (condition-case err
-            (when (rat-kingdom-task-br-ensure repo)
+            (when (rat-kingdom-task-br-ensure repo space)
               (push name created)
-              (message "rat-kingdom: created a br workspace for %s, kept out \
-of Git" name))
+              (message "rat-kingdom: created a br workspace for %s" name))
           (error
            (display-warning
             'rat-kingdom
