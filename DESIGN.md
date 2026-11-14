@@ -535,7 +535,7 @@ go, and it lets a role be denied built-in tools as well.
 
 | Role | Lifetime | Tools |
 |---|---|---|
-| king | long-lived, global, no worktree | built: `status` (with the tracker tasks available, each with its epic and agent), `repo_add`, `repo_sync`, `workflow_list`, `story_start` (optionally from a `task`, with an `agent`; a task's `rk-agent:` and `rk-workflow:` labels are the defaults), `story_show`, `story_diff`, `story_move`, `story_cancel`, `verdict`, `publish`, `query`, `fact_forget`, `task_create`, `epic_create`, `epic_start` (optionally with a `feature_branch`), `epic_pause`, `epic_resume`, `epic_cancel`, `epic_retry`, `epic_show`, `epic_diff`, `epic_verdict` (section 10), `tell`; `story_start` also takes a rarely needed `target`. Planned: `config_set` |
+| king | long-lived, global, no worktree | built: `status` (with the tracker tasks available, each with its epic and agent), `repo_add`, `repo_sync`, `workflow_list`, `story_start` (optionally from a `task`, with an `agent`; a task's `rk-agent:` and `rk-workflow:` labels are the defaults), `story_show`, `story_diff`, `story_move`, `story_cancel`, `verdict`, `publish`, `query`, `fact_forget`, `task_create`, `epic_create`, `epic_propose` (the epic plan surface, 14.1), `epic_start` (optionally with a `feature_branch`), `epic_pause`, `epic_resume`, `epic_cancel`, `epic_retry`, `epic_show`, `epic_diff`, `epic_verdict` (section 10), `tell`; `story_start` also takes a rarely needed `target`. Planned: `config_set` |
 | rat (worker) | one task | built: `finish`, `block`, `note_fact`, `inbox` |
 | researcher | one task | `finish_doc`, `note_fact`, `block` |
 | foreman | one epic, optional | `story_start`, `tell`, `verdict`, `query`, limited to its epic |
@@ -927,16 +927,50 @@ and reject, folds, tabs, pickers, progress bars and status tones. It has
 no graph component, so a workflow is shown as rows in places, not as a
 drawn net.
 
-**To verify:** the elisp entry points for driving a surface and receiving
-its actions without an agent. `examples/k8s-rollout.el` in a2ui.el does
-this with a scripted agent.
+**Checked, 2026-11-13:** a surface is driven from elisp with no agent
+behind it, as `examples/k8s-rollout.el` in a2ui.el does: a session from
+`a2ui-session-create` whose `:send-action-fn` receives each button press
+as an A2UI action message, `a2ui-vui-attach` to render it,
+`a2ui-apply-message` for createSurface, updateComponents and
+updateDataModel, and `a2ui-show-surface` to display it through
+`a2ui-vui-display-action`. A button's action carries in its context the
+data paths it names, so the handler gets what the user entered without
+reading the surface. a2ui stays an optional dependency: it is loaded
+when a surface is first shown.
+
+**Built: the epic plan (4)**, in `rat-kingdom-plan.el`. The king calls
+`epic_propose` with the arguments `epic_create` takes. The plan is
+checked as `epic_create` checks it and shown in the surface "Epic plan:
+TITLE", replacing one of that title; the tool returns at once, and says
+that a2ui is missing if it is. The surface has the repository, title
+and description as Markdown; a Section per wave (wave 1 the stories
+with no dependencies, wave N those whose dependencies are all in
+earlier waves), with a Card per story holding an include CheckBox, its
+key, its title and description as TextFields, what it depends on, and
+Pickers for its agent and workflow (the workflow sets the review mode),
+the proposed values selected and blank meaning the default; the
+options "start right away" (off) and "max parallel" (empty for no
+limit); and Approve, Cancel, and Send back with a notes field. Nothing
+is written until Approve: it drops the stories left out, refuses with
+the reason shown on the surface if a kept story depends on one left out
+or the edited plan fails `rat-kingdom-epic-check`, then calls
+`rat-kingdom-epic-create` and, if asked, `rat-kingdom-epic-start`, and
+shows the epic's id and tasks. Every outcome (approved with what was
+created and whether it started, sent back with the notes, dismissed by
+Cancel or by deleting the surface, or the tracker failing partway) is a
+`message` to the king, delivered between its turns. A plan the user
+started from the surface counts as their approval to run it. The
+surface is shown off the selected window, so it never takes the place
+of the buffer the user is typing in. Not yet: a feature-branch option,
+which waits for `epic_start` to have one, and keeping an open plan
+across an Emacs restart.
 
 | # | Surface | Shows | Actions | Kind |
 |---|---|---|---|---|
 | 1 | Factory floor | one table per epic: each story's place, worker, time in place (warning tone near its timeout), check result; a progress bar per epic | open the shell, tell, move, show diff | engine |
 | 2 | Attention queue | everything waiting on a person: review requests, stuck tokens, blocked runs, failed checks, oldest first | verdict, resume, move to a picked place, discard | engine |
 | 3 | Review card | one `review`: the worker's summary, what integration verified beside what the worker reported, the diff | pass, or fix with notes; writes a `verdict` tuple | engine |
-| 4 | Epic plan | the king's proposed stories with dependencies, grouped into waves; per story a checkbox, workflow and review mode | edit, approve and dispatch, send back with notes | king |
+| 4 | Epic plan (built) | the repository, title and description; the king's proposed stories grouped into waves, each with an include checkbox, its key, editable title and description, what it depends on, and pickers for its agent and its workflow (which sets the review mode); options to start right away and limit stories in parallel | approve (create, and start if asked), send back with notes, cancel | engine, opened by the king's `epic_propose` |
 | 5 | Design doc review | the doc, its status, the facts it cites, a notes field | revise (a message to its author), approve and ask the king for an epic | engine |
 | 6 | Story timeline | one story's history from the operations log: place changes, attempts, messages, checks, verdicts | open any attempt's transcript, move the token | engine |
 | 7 | Policy editor | the effective configuration for a repo or epic, with the layer each value came from | change review mode, workflow, worker limit, commands; validated before it is saved | engine or king |
@@ -999,13 +1033,17 @@ wait longer for review than for implementation.
    `epic_cancel`, `epic_retry` and `epic_show`, dispatch of ready tasks
    by the engine as their dependencies merge, held tasks, holdups told to
    the king, the Epics section of `status`, and dispatch resumed after a
-   restart, tested with the in-memory adapter. A feature branch per epic
-   is built: `epic_start` with `feature_branch`, stories with a target of
-   their own, landing through one check and the king's `epic_verdict`
-   after `epic_diff`, conflicts and failed checks returned as tasks on the
-   epic's branch, and an interrupted landing check run again on reconcile,
-   tested with real Git. Still to come: the foreman, and the epic plan
-   surface (4).
+   restart, tested with the in-memory adapter. The epic plan surface (4)
+   is built (`rat-kingdom-plan.el`): the king's `epic_propose` shows the
+   plan in a2ui, where the user edits it and approves it, sends it back
+   or dismisses it, and the king is told; nothing is created before
+   Approve. Tested with a2ui stubbed, and with the real a2ui where it can
+   be loaded. A feature branch per epic is built: `epic_start` with
+   `feature_branch`, stories with a target of their own, landing through
+   one check and the king's `epic_verdict` after `epic_diff`, conflicts
+   and failed checks returned as tasks on the epic's branch, and an
+   interrupted landing check run again on reconcile, tested with real
+   Git. Still to come: the foreman.
 
    **Facts** (built: `rat-kingdom-fact.el`): the worker's `note_fact`,
    facts in every worker's brief through

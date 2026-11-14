@@ -470,7 +470,9 @@ chore")
                         "epic_create"))
           (should (member name names)))
         ;; The paragraph on planning an epic.
-        (should (string-search "propose its stories and the dependencies \
+        (should (string-search "To plan an epic, prefer `epic_propose`"
+                               text))
+        (should (string-search "propose the stories and the dependencies \
 between them to the user first, and call `epic_create` only once they agree"
                                text))
         (should (string-search "they start nothing" text)))
