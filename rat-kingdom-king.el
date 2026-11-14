@@ -41,6 +41,7 @@
 (require 'rat-kingdom-mcp)
 (require 'rat-kingdom-run)
 (require 'rat-kingdom-workflow)
+(require 'rat-kingdom-config)
 (require 'rat-kingdom-story)
 (require 'rat-kingdom-task)
 
@@ -297,6 +298,72 @@ not add a function twice.")
           (push section sections))))
     (nreverse sections)))
 
+(defun rat-kingdom-king--run-text (value)
+  "Return the setup or check VALUE, from the configuration, as text.
+VALUE is an argument list or a list of command names."
+  (if (stringp (car value))
+      (combine-and-quote-strings value)
+    (mapconcat #'symbol-name value " ")))
+
+(defun rat-kingdom-king--repo-line (space repo)
+  "Return the line of status that describes REPO, a repository record, in SPACE.
+Its target, check, setup and workflow are the configured ones
+\(rat-kingdom-config.el); the agent its workers run is named if it is
+not the one configured for every repository.  What is wrong with its
+configuration as a whole is said briefly."
+  (let* ((name (plist-get repo :name))
+         (config (rat-kingdom-config-merged space :repo name))
+         (worker (plist-get (plist-get config :agents) :worker))
+         (problems (rat-kingdom-config-validate-merged space name)))
+    (format "- %s at %s; target %s; check %s%s; workflow %s%s%s%s"
+            name (plist-get repo :path)
+            (plist-get config :target)
+            (if (plist-get config :check)
+                (rat-kingdom-king--run-text (plist-get config :check))
+              "none")
+            (if (plist-get config :setup)
+                (concat "; setup "
+                        (rat-kingdom-king--run-text (plist-get config :setup)))
+              "")
+            (plist-get config :workflow)
+            (if (equal worker (plist-get (rat-kingdom-config-get space :agents)
+                                         :worker))
+                ""
+              (format "; workers run %s" worker))
+            (if problems
+                (format "; its configuration is wrong (tell the user): %s"
+                        (string-join problems "; "))
+              "")
+            (if-let* ((problem (rat-kingdom-task-workspace-error name)))
+                (format "; it has no br workspace, so no tasks (tell \
+the user): %s" problem)
+              ""))))
+
+(defun rat-kingdom-king--config-errors (repos)
+  "Return the configuration being ignored, as a section of status, or \"\".
+That is what `rat-kingdom-config-errors' knows of the global file and
+of the repositories REPOS, records, and their epics and tasks."
+  (if-let* ((global (rat-kingdom-config-global-file))
+            (errors
+             (append
+              (cl-remove-if-not (lambda (error) (equal (car error) global))
+                                (rat-kingdom-config-errors))
+              (cl-remove-if-not
+               (lambda (error)
+                 (or (string-suffix-p "/.rk/config.eld" (car error))
+                     (string-prefix-p "the policy of " (car error))))
+               (cl-remove-duplicates
+                (mapcan (lambda (repo)
+                          (rat-kingdom-config-errors (plist-get repo :name)))
+                        repos)
+                :test #'equal)))))
+      (concat "\n\nConfiguration ignored (tell the user; fixing the file \
+is enough):\n"
+              (mapconcat (lambda (error)
+                           (format "- %s: %s" (car error) (cadr error)))
+                         errors "\n"))
+    ""))
+
 (defun rat-kingdom-king-status (space)
   "Return a text describing the repositories, stories and tasks in SPACE.
 The ready tasks of every repository are projected first; a tracker
@@ -309,31 +376,15 @@ that fails is reported and otherwise ignored."
     (concat
      "Repositories:\n"
      (if repos
-         (mapconcat
-          (lambda (repo)
-            (format "- %s at %s; target %s; check %s%s; workflow %s%s"
-                    (plist-get repo :name) (plist-get repo :path)
-                    (plist-get repo :target)
-                    (if (plist-get repo :check)
-                        (combine-and-quote-strings (plist-get repo :check))
-                      "none")
-                    (if (plist-get repo :setup)
-                        (concat "; setup " (combine-and-quote-strings
-                                            (plist-get repo :setup)))
-                      "")
-                    (or (plist-get repo :workflow)
-                        rat-kingdom-story-default-workflow)
-                    (if-let* ((problem (rat-kingdom-task-workspace-error
-                                        (plist-get repo :name))))
-                        (format "; it has no br workspace, so no tasks (tell \
-the user): %s" problem)
-                      "")))
-          repos "\n")
+         (mapconcat (lambda (repo) (rat-kingdom-king--repo-line space repo))
+                    repos "\n")
        "- none registered; use repo_add")
      (format "\n\nAgents: %s. New stories' workers run %s \
-(rat-kingdom-default-agent) unless story_start names another."
+(rat-kingdom-default-agent, unless configured) unless story_start names \
+another."
              (string-join (rat-kingdom-agent-names) ", ")
-             rat-kingdom-default-agent)
+             (plist-get (rat-kingdom-config-get space :agents) :worker))
+     (rat-kingdom-king--config-errors repos)
      "\n\nStories in progress:\n"
      (if stories
          (mapconcat (lambda (story) (rat-kingdom-king--story-line space story))
@@ -452,8 +503,16 @@ see `rat-kingdom-king-story-start'."
                      (format "Check: %s%s%s"
                              (plist-get checked :value)
                              (if (plist-get checked :check)
-                                 (format " (%s)" (combine-and-quote-strings
-                                                  (plist-get checked :check)))
+                                 (format
+                                  " (%s)"
+                                  (if (and (equal (plist-get checked :value)
+                                                  "pass")
+                                           (plist-get checked :names))
+                                      (string-join (plist-get checked :names)
+                                                   ", ")
+                                    (rat-kingdom-story-command-text
+                                     (plist-get checked :check)
+                                     (plist-get checked :command))))
                                " (the repository has no check; the merge was \
 clean)")
                              (if (and (equal (plist-get checked :value) "fail")
@@ -1014,7 +1073,7 @@ be created. Default the repository's name."))
     (string-join
      (cons (format "Registered %s at %s. Finished work is merged into %s.%s"
                    (plist-get repo :name) (plist-get repo :path)
-                   (plist-get repo :target)
+                   (rat-kingdom-story-repo-target space (plist-get repo :name))
                    (if (plist-get repo :task-initialized)
                        (format " Initialized a br workspace there with the \
 prefix %s, kept out of Git." (rat-kingdom-task-br-prefix repo))

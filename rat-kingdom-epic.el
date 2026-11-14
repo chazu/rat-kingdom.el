@@ -97,6 +97,7 @@
 (require 'rat-kingdom-workflow)
 (require 'rat-kingdom-task)
 (require 'rat-kingdom-agent-shell)
+(require 'rat-kingdom-config)
 (require 'rat-kingdom-story)
 (require 'rat-kingdom-king)
 
@@ -713,10 +714,11 @@ A held task is not started by dispatch until `epic_retry' clears it."
 
 (defun rat-kingdom-epic--target (space record)
   "Return the branch the epic RECORD in SPACE lands on.
-That is the `:target' it was started with, or else its repository's."
+That is the `:target' it was started with, or else its repository's,
+from its configuration (`rat-kingdom-story-repo-target')."
   (or (rat-kingdom-epic--payload record :target)
-      (plist-get (rat-kingdom-repo-get space (plist-get record :scope))
-                 :target)))
+      (and (rat-kingdom-repo-get space (plist-get record :scope))
+           (rat-kingdom-story-repo-target space (plist-get record :scope)))))
 
 (defun rat-kingdom-epic--tell (space repo text &optional epic)
   "Leave the king a message in SPACE, about REPO, saying TEXT.
@@ -1044,7 +1046,8 @@ cause, then epic_resume lands it again."
 (defun rat-kingdom-epic--land (space repo id from)
   "Begin landing the epic ID of REPO in SPACE, if it is in a state of FROM.
 Its feature branch is merged into its target in a fresh candidate
-worktree, and the repository's setup and check run there, by
+worktree, and the setup and check configured for the repository and
+the epic run there (`rat-kingdom-story-commands'), by
 `rat-kingdom-story-check-candidate', as for a story.  The outcome is a
 `checked' tuple named by the epic, which
 `rat-kingdom-epic-landing-checked' takes from there.  The epic is
@@ -1072,7 +1075,8 @@ registered" repo)))
            (rat-kingdom-epic--payload record :candidate)
            (format "Merge the epic %s: %s" id
                    (rat-kingdom-epic--payload record :title))
-           (plist-get repo-record :check) (plist-get repo-record :setup)))
+           (rat-kingdom-story-commands space :check repo id)
+           (rat-kingdom-story-commands space :setup repo id)))
       (error
        (rat-kingdom-epic--stop-landing
         space repo id (format "its check could not be begun: %s"
@@ -1131,13 +1135,15 @@ merges cleanly into %s, which has moved on since." name target branch target))
         (format "The epic %s cannot land on %s: with its branch %s merged \
 into %s, the repository's setup %s exited with %s, so the check did not run."
                 name target branch target
-                (combine-and-quote-strings (plist-get checked :setup))
+                (rat-kingdom-story-command-text (plist-get checked :setup)
+                                                (plist-get checked :command))
                 (plist-get checked :exit)))
        (_
         (format "The epic %s cannot land on %s: with its branch %s merged \
 into %s, the check %s exited with %s."
                 name target branch target
-                (combine-and-quote-strings (plist-get checked :check))
+                (rat-kingdom-story-command-text (plist-get checked :check)
+                                                (plist-get checked :command))
                 (plist-get checked :exit))))
      (format "\n\nMerge %s into your branch (git merge %s), %s, make sure the \
 repository's check passes, and commit. Your branch is cut from %s and your \
@@ -1786,7 +1792,7 @@ first sentence, and CLOSING, if given, the last paragraph."
                                                   :awaiting)
                                        rat-kingdom-story-free-worker)
                                 (format "queued for a free worker: at most %s \
-workers run at once" rat-kingdom-story-max-workers))
+workers run at once" (rat-kingdom-config-get space :max-workers)))
                                (t (rat-kingdom-epic--story-place story))))))
                   started "\n"))
               "No story was started now.")
@@ -1897,7 +1903,7 @@ not %s"
       (error "The epic %s has no tasks; plan them with epic_create or \
 task_create" id))
     (let* ((target (and feature-branch
-                        (plist-get (rat-kingdom-repo-get space repo) :target)))
+                        (rat-kingdom-story-repo-target space repo)))
            (branch (and feature-branch (rat-kingdom-epic-branch-name id))))
       (when branch
         (rat-kingdom-epic--prepare-branch
