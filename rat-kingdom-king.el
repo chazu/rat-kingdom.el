@@ -134,13 +134,17 @@ reload only says that `rat-kingdom-king-restart' is needed."
         ((< seconds 5400) (format "%dm" (/ seconds 60)))
         (t (format "%.1fh" (/ seconds 3600.0)))))
 
+(defun rat-kingdom-king--agent (payload)
+  "Return the agent of the story whose token has PAYLOAD."
+  (or (plist-get payload :agent) rat-kingdom-agent-shell-fallback-agent))
+
 (defun rat-kingdom-king--story-line (space story)
   "Return one line describing the token STORY in SPACE."
   (let* ((payload (plist-get story :payload))
          (run (and (plist-get payload :run)
                    (rat-kingdom-run-get space (plist-get payload :run))))
          (now (funcall rat-kingdom-space-now-function)))
-    (format "- %s [%s] %s%s, %s: %s%s%s"
+    (format "- %s [%s] %s%s, %s, %s: %s%s%s"
             (plist-get story :identity) (plist-get story :scope)
             (plist-get payload :at)
             (pcase (plist-get payload :phase)
@@ -155,6 +159,7 @@ reload only says that `rat-kingdom-king-restart' is needed."
               (_ ""))
             (rat-kingdom-king--age
              (- now (or (plist-get payload :entered) now)))
+            (rat-kingdom-king--agent payload)
             (plist-get payload :title)
             (if-let* ((reason (plist-get payload :reason))
                       ((equal (plist-get payload :phase) "parked")))
@@ -230,6 +235,10 @@ the user): %s" problem)
                       "")))
           repos "\n")
        "- none registered; use repo_add")
+     (format "\n\nAgents: %s. New stories' workers run %s \
+(rat-kingdom-default-agent) unless story_start names another."
+             (string-join (rat-kingdom-agent-names) ", ")
+             rat-kingdom-default-agent)
      "\n\nStories in progress:\n"
      (if stories
          (mapconcat (lambda (story) (rat-kingdom-king--story-line space story))
@@ -278,6 +287,7 @@ The second value, in a cons, is non-nil if it is archived."
                         (plist-get payload :title))
                 (and (plist-get payload :description)
                      (format "Description: %s" (plist-get payload :description)))
+                (format "Agent: %s" (rat-kingdom-king--agent payload))
                 (format "Workflow %s; at %s%s%s"
                         (plist-get payload :workflow) (plist-get payload :at)
                         (pcase (plist-get payload :phase)
@@ -518,6 +528,8 @@ none.  Signal an error if the king is already running."
                                  :actor "user")
       (rat-kingdom-run-create
        space :id rat-kingdom-king-id :role 'king :worktree directory
+       ;; A session is taken up by the agent that started it.
+       :agent (and session (plist-get old :agent))
        :resume session :prompt prompt)
       (rat-kingdom-run-update space rat-kingdom-king-id
                               :fingerprint fingerprint))))
@@ -721,7 +733,12 @@ else. Required unless task is given.")
        :description "The id of a tracker task, as listed under Available \
 tasks in status. Title and description default to the task's.")
       (:name "workflow" :type string :optional t
-       :description "The workflow to follow, if not the repository's own."))
+       :description "The workflow to follow, if not the repository's own.")
+      (:name "agent" :type string :optional t
+       :description "Chooses the agent the story's workers run: claude \
+for Claude Code, or codex for OpenAI Codex in full-access mode. Every \
+worker the story is given, after a failed check or a review too, runs it. \
+Default rat-kingdom-default-agent, the user's setting, which status shows."))
   (let* ((repo (arg 'repo))
          (warnings (rat-kingdom-story-warnings space repo))
          (task (arg 'task))
@@ -738,14 +755,14 @@ tasks in status. Title and description default to the task's.")
                            (format "This story works on the tracker task \
 %s: %s" task (plist-get found :title))))))
          (id (rat-kingdom-story-start space repo title description nil
-                                      (arg 'workflow) task)))
+                                      (arg 'workflow) task (arg 'agent)))
+         (payload (plist-get (rat-kingdom-story-get space id) :payload)))
     (string-join
-     (cons (format "Started %s%s with the workflow %s. You will be told when \
-it needs you or is merged."
+     (cons (format "Started %s%s with the workflow %s and the agent %s. You \
+will be told when it needs you or is merged."
                    id (if task (format " for the task %s" task) "")
-                   (plist-get (plist-get (rat-kingdom-story-get space id)
-                                         :payload)
-                              :workflow))
+                   (plist-get payload :workflow)
+                   (plist-get payload :agent))
            warnings)
      "\nWarning: ")))
 

@@ -49,6 +49,11 @@
 ;; running states, a story is archived, the watchdog looks, or Emacs
 ;; reconciles.
 ;;
+;; A story names the agent its workers run, `:agent' on its token,
+;; fixed when it starts: "claude" or "codex", or another kind of
+;; rat-kingdom-agent-shell.el.  Every worker it is given, after a failed
+;; check, a review or a restart too, runs that agent.
+;;
 ;; `rat-kingdom-story-reconcile' is the recovery after Emacs stopped
 ;; with work in flight (DESIGN.md, section 8.4): a worker that was cut
 ;; off is replaced by a new one in the same worktree, and a check that
@@ -62,6 +67,7 @@
 (require 'rat-kingdom-reaction)
 (require 'rat-kingdom-git)
 (require 'rat-kingdom-run)
+(require 'rat-kingdom-agent-shell)
 (require 'rat-kingdom-workflow)
 (require 'rat-kingdom-task)
 
@@ -232,17 +238,20 @@ CHANGES is merged into its payload."
     id))
 
 (defun rat-kingdom-story-start (space repo title &optional description id
-                                      workflow task)
+                                      workflow task agent)
   "Start a story in SPACE for the repository REPO and return its id.
 TITLE says what to do in a line; DESCRIPTION gives the acceptance
 criteria.  ID names the story; one is made up if it is nil.  WORKFLOW
 names its workflow; by default the repository's, and failing that
 `rat-kingdom-story-default-workflow'.  TASK, if given, is the id of
 the tracker's task the story works on: its `available' tuple is taken
-and the task is claimed for the story."
+and the task is claimed for the story.  AGENT names the agent every
+worker of the story runs, \"claude\" or \"codex\"; by default
+`rat-kingdom-default-agent'.  An unknown agent is an error."
   (let ((record (or (rat-kingdom-repo-get space repo)
                     (error "No repository called %s is registered" repo)))
-        (id (or id (rat-kingdom-story--new-id space))))
+        (id (or id (rat-kingdom-story--new-id space)))
+        (agent (rat-kingdom-agent-name agent)))
     (when (rat-kingdom-space-rd space (list 'story :identity id))
       (error "There is already a story called %s" id))
     (let* ((name (rat-kingdom-workflow--name
@@ -263,7 +272,7 @@ and the task is claimed for the story."
          :payload (append
                    (list :workflow name :at (plist-get workflow :start)
                          :phase "enter" :title title :description description
-                         :attempt 0
+                         :agent agent :attempt 0
                          :entered (funcall rat-kingdom-space-now-function))
                    (and task (list :task task)))
          :actor "user"))
@@ -429,6 +438,7 @@ started when it succeeds, by `rat-kingdom-story-set-up'."
               (rat-kingdom-run-create
                space :id run-id :repo (plist-get repo :name) :story id
                :role (plist-get step :with)
+               :agent (plist-get payload :agent)
                :worktree worktree :branch branch :target target
                :prompt (rat-kingdom-story--prompt
                         story run-id worktree branch target

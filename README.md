@@ -16,7 +16,10 @@ agents has been run once for a worker and not yet for the king.
 
 You need [agent-shell](https://github.com/xenodium/agent-shell) set up for
 Claude Code, and `br`, the Rust Beads issue tracker, on `exec-path` (or
-named by `rat-kingdom-task-br-program`).
+named by `rat-kingdom-task-br-program`). For Codex workers you also need
+agent-shell's Codex support set up:
+[codex-acp](https://github.com/agentclientprotocol/codex-acp) installed
+and `agent-shell-openai-authentication` set.
 
 ```elisp
 (add-to-list 'load-path "/path/to/rat-kingdom.el")
@@ -32,8 +35,8 @@ never while you have something half typed.
 
 What happens to a story:
 
-1. A worker, another Claude Code session, starts in the background in a
-   worktree under `~/.emacs.d/rat-kingdom/worktrees/`, on a branch
+1. A worker, another Claude Code session or a Codex one, starts in the
+   background in a worktree under `~/.emacs.d/rat-kingdom/worktrees/`, on a branch
    `rats/S-xxxx` cut from the repository's target branch, `rk/integration`.
 2. When the worker reports that it is done, its commit is merged in a
    scratch worktree and the repository's check, if it has one, runs there.
@@ -88,18 +91,54 @@ rat-kingdom-tasks-refresh` make the workspace of every registered
 repository that lacks one. One that fails is reported as a warning and in
 the king's `status`, and the others carry on.
 
+### Choosing the agent
+
+Each story's workers run Claude Code or OpenAI Codex. Tell the king which
+("start a story in app, with codex, to …"): `story_start` takes `agent`,
+`claude` or `codex`. Left out, it is `rat-kingdom-default-agent`, which is
+`claude` unless you change it. `M-x rat-kingdom-start-story` asks, with
+that as the default. The king itself is always Claude Code.
+
+The story keeps its agent. A worker that replaces another, after a failed
+check, a merge conflict, a review that asks for changes or an Emacs restart,
+runs the same agent, even if the default has changed since. `status` and
+`story_show` say which agent each story has.
+
+Codex runs in full access, the equivalent of `codex --yolo`: the codex-acp
+session mode `agent-full-access`, which never asks for approval and has no
+sandbox. rat-kingdom sets this on the sessions it starts. Your own
+`agent-shell-openai-default-session-mode-id` is not changed. Codex reaches
+rat-kingdom's tools (`finish`, `block`) through the same HTTP MCP endpoint
+as Claude. codex-acp supports HTTP MCP servers.
+
+`rat-kingdom-agent-shell-define-agent` adds another agent kind, or replaces
+a built-in one. It takes a name and a function that returns an agent-shell
+config.
+
 ### Pushing
 
-No agent rat-kingdom starts, worker or king, can push, whatever Claude
-Code's permission mode. Each agent's process is started with Git
+No agent rat-kingdom starts, worker or king, Claude or Codex, can push,
+whatever its permission mode. Each agent's process is started with Git
 configuration in its environment (`GIT_CONFIG_COUNT`) that rewrites every
 push URL to a remote helper that does not exist, so `git push` fails with
-`rat-kingdom-refuses-to-push`, `--no-verify` or not. Its session is also
-started with Claude tool rules denying `git push` and `gh`, and Emacs
+`rat-kingdom-refuses-to-push`, `--no-verify` or not. A Claude session is
+also started with Claude tool rules denying `git push` and `gh`, and Emacs
 refuses any permission request to run them. Nothing is written to your
 Git configuration or hooks, so your own pushes are unaffected. A remote
-with an explicit `pushurl` is not rewritten by Git; the other two layers
-cover it.
+with an explicit `pushurl` is not rewritten by Git. For Claude the other
+two layers cover that case.
+
+For Codex, the environment is the only layer. Codex ignores Claude's tool
+rules, and in full-access mode it never asks permission, so Emacs has
+nothing to refuse. Codex's `gh` is not blocked either, beyond
+`GH_PROMPT_DISABLED`, and neither is a push to a remote with a `pushurl`.
+Codex passes its environment to the commands it runs unless your
+`~/.codex/config.toml` filters it. Do not set
+`shell_environment_policy.inherit` to `core` or `none` for Codex workers:
+that drops `GIT_CONFIG_*` and with it the block. Setting
+`ignore_default_excludes = false` drops the `GIT_CONFIG_KEY_n` variables,
+so every Git command in Codex then fails, pushes included. See DESIGN.md,
+section 12.
 
 The one way to push is the king's `publish` tool, which pushes one local
 branch to the branch of the same name on one remote. The king is told to

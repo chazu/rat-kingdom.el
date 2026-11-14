@@ -65,7 +65,9 @@ Nil means `rat-kingdom-run-default-backend'.
 `:start' is called with the run's record and its prompt.  It starts an
 agent in the run's worktree, sends it the prompt, and returns a handle.
 If the record has `:resume', a session id, it should take that session
-up again instead of starting a new one.  It should arrange for
+up again instead of starting a new one.  `:agent' in the record names
+the kind of agent to run, such as \"claude\" or \"codex\"; nil means the
+backend's default.  It should arrange for
 `rat-kingdom-run-exited' to be called if the agent's session ends, and
 for `rat-kingdom-run-idle-functions' to run when the agent ends a turn.
 `:stop' is called with the handle.  `:send' is called with the handle
@@ -144,21 +146,26 @@ A record is the tuple's payload with `:id', `:repo' and `:story'."
            space (if story (list 'run :owner story) '(run)))))
 
 (cl-defun rat-kingdom-run-create (space &key id (repo "system") story role
-                                        worktree branch target prompt resume)
+                                        agent worktree branch target prompt
+                                        resume)
   "Record a new run in SPACE, to be started by `rat-kingdom-run-launch'.
-ID names the run.  It belongs to STORY in REPO, plays ROLE, and works
-in WORKTREE on BRANCH, which was cut from TARGET.  PROMPT is what its
-agent is told.  RESUME is the id of an agent session to take up again.
-A run of that name that is over is replaced.  Return the record."
+ID names the run.  It belongs to STORY in REPO, plays ROLE, runs the
+agent AGENT, and works in WORKTREE on BRANCH, which was cut from
+TARGET.  AGENT names an agent kind, such as \"claude\" or \"codex\"; nil
+leaves it to the backend, which for agent-shell means Claude Code.
+PROMPT is what its agent is told.  RESUME is the id of an agent
+session to take up again, which must be one AGENT started.  A run of
+that name that is over is replaced.  Return the record."
   (when-let* ((old (rat-kingdom-run-get space id)))
     (when (or (rat-kingdom-run-live-p id)
               (equal (plist-get old :state) "starting"))
       (error "There is already a run called %s" id)))
   (rat-kingdom-space-put
    space 'run :scope repo :identity id :owner story
-   :payload (list :state "starting" :role (format "%s" role)
-                  :worktree worktree :branch branch :target target
-                  :prompt prompt :resume resume)
+   :payload (append (list :state "starting" :role (format "%s" role))
+                    (and agent (list :agent (format "%s" agent)))
+                    (list :worktree worktree :branch branch :target target
+                          :prompt prompt :resume resume))
    :actor "engine")
   (rat-kingdom-run-get space id))
 

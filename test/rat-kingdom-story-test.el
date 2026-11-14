@@ -412,6 +412,64 @@ Return what finish answered."
                       :value)
                      "pass")))))
 
+(defun rat-kingdom-story-test--agent (run-id)
+  "Return the agent the run RUN-ID was started with."
+  (plist-get (car (cl-find run-id rat-kingdom-story-test--started
+                           :key (lambda (entry) (plist-get (car entry) :id))
+                           :test #'equal))
+             :agent))
+
+(ert-deftest rat-kingdom-story-test-workers-run-the-story-s-agent ()
+  (rat-kingdom-story-test-with-repo (space path)
+    (rat-kingdom-repo-add space path
+                          :check '("sh" "-c" "test -f wanted.txt"))
+    ;; Named, the agent is recorded on the story and given to its worker.
+    (rat-kingdom-story-start space "demo" "Add the wanted file" nil "S-1"
+                             nil nil "codex")
+    (should (equal (rat-kingdom-story-test--get space "S-1" :agent) "codex"))
+    (rat-kingdom-reaction-run space)
+    (should (equal (rat-kingdom-story-test--agent "S-1.1") "codex"))
+    (should (equal (plist-get (rat-kingdom-run-get space "S-1.1") :agent)
+                   "codex"))
+    ;; A failed check gives the story a new worker with the same agent.
+    (rat-kingdom-story-test--work space "S-1" "other.txt")
+    (rat-kingdom-story-test--settle space "S-1")
+    (should (equal (rat-kingdom-story-test--get space "S-1" :run) "S-1.2"))
+    (should (equal (rat-kingdom-story-test--agent "S-1.2") "codex"))
+    ;; So does a worker cut off by a restart, even if the default has
+    ;; changed meanwhile.
+    (let ((file (expand-file-name "space.db" rat-kingdom-directory))
+          (rat-kingdom-default-agent 'claude))
+      (rat-kingdom-space-close space)
+      (setq space (rat-kingdom-space-open file)
+            rat-kingdom-space--default space)
+      (clrhash rat-kingdom-run--handles)
+      (clrhash rat-kingdom-mcp--grants)
+      (should (equal (plist-get (rat-kingdom-story-reconcile space) :runs)
+                     '("S-1.2")))
+      (rat-kingdom-reaction-run space)
+      (should (equal (rat-kingdom-story-test--get space "S-1" :run) "S-1.3"))
+      (should (equal (rat-kingdom-story-test--agent "S-1.3") "codex")))
+    ;; Unnamed, it is `rat-kingdom-default-agent', Claude out of the box.
+    (rat-kingdom-story-start space "demo" "Another" nil "S-2")
+    (should (equal (rat-kingdom-story-test--get space "S-2" :agent) "claude"))
+    (let ((rat-kingdom-default-agent 'codex))
+      (rat-kingdom-story-start space "demo" "A third" nil "S-3")
+      (should (equal (rat-kingdom-story-test--get space "S-3" :agent) "codex"))
+      (rat-kingdom-story-start space "demo" "A fourth" nil "S-4"
+                               nil nil 'claude)
+      (should (equal (rat-kingdom-story-test--get space "S-4" :agent)
+                     "claude")))
+    ;; An unknown agent is refused, naming the known ones, and nothing
+    ;; is started.
+    (let ((err (should-error (rat-kingdom-story-start space "demo" "No" nil
+                                                      "S-5" nil nil "gpt"))))
+      (should (string-search "no agent called gpt"
+                             (error-message-string err)))
+      (should (string-search "claude, codex" (error-message-string err))))
+    (should-not (rat-kingdom-story-get space "S-5"))
+    (should-not (rat-kingdom-reaction-failures space))))
+
 (ert-deftest rat-kingdom-story-test-gives-up-after-enough-workers ()
   (rat-kingdom-story-test-with-repo (space path)
     (rat-kingdom-repo-add space path :check '("false"))
