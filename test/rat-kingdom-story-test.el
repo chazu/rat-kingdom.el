@@ -54,7 +54,10 @@ Each call appends its arguments, one line, to calls in DIRECTORY.
 issue file and a config naming P, or naming the text of the file
 force-prefix in DIRECTORY if there is one; it fails if DIRECTORY has a
 file init-fails.  `config get issue_prefix' prints the config's prefix
-as JSON.  Anything else prints an empty JSON list."
+as JSON.  `create' prints a new issue whose id is the prefix and the
+number of creates so far, as demo-1, demo-2; the create whose number is
+in the file create-fails-at fails, and so does every `dep' after there
+is a file dep-fails.  Anything else prints an empty JSON list."
   (let ((program (expand-file-name "br" directory)))
     (with-temp-file program
       (insert "#!/bin/sh\n"
@@ -75,6 +78,18 @@ as JSON.  Anything else prints an empty JSON list."
               "config)\n"
               "  printf '{\"key\":\"issue_prefix\",\"value\":\"%s\"}\\n' "
               "\"$(cat .beads/prefix)\" ;;\n"
+              "create)\n"
+              "  echo x >> \"$dir/created\"\n"
+              "  n=$(grep -c '' \"$dir/created\")\n"
+              "  if [ \"$n\" = \"$(cat \"$dir/create-fails-at\" 2>/dev/null)\" ]; then\n"
+              "    echo 'Error: database is locked' >&2; exit 4; fi\n"
+              "  printf '{\"id\":\"%s-%s\",\"status\":\"open\"}\\n' "
+              "\"$(cat .beads/prefix)\" \"$n\" ;;\n"
+              "dep)\n"
+              "  if [ -e \"$dir/dep-fails\" ]; then\n"
+              "    echo 'Error: cycle detected' >&2; exit 5; fi\n"
+              "  printf '{\"status\":\"ok\",\"issue_id\":\"%s\",\"depends_on_id\":\"%s\"}\\n' "
+              "\"$3\" \"$4\" ;;\n"
               "*) echo '[]' ;;\n"
               "esac\n"))
     (set-file-modes program #o755)
