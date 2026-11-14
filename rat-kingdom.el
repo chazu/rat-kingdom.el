@@ -130,8 +130,10 @@ again (%s), %d to set up again (%s)"
   "React to what is written to the rat-kingdom space.
 While this is on, stories move: workers are started, their results
 checked, reviewed and merged.  Turning it on first recovers whatever
-an earlier Emacs left in flight, then shows each repository's ready
-tasks as `available' in the space."
+an earlier Emacs left in flight, makes sure every registered repository
+has a br workspace, then shows each repository's ready tasks as
+`available' in the space.  A repository whose workspace cannot be made
+is reported and skipped."
   :global t
   :group 'rat-kingdom
   (when (timerp rat-kingdom--watch-timer)
@@ -141,6 +143,8 @@ tasks as `available' in the space."
       (let ((space (rat-kingdom-space-default)))
         (rat-kingdom-reaction--ensure-table space)
         (rat-kingdom-reconcile)
+        (with-demoted-errors "rat-kingdom: making br workspaces: %S"
+          (rat-kingdom-task-ensure-all space))
         (with-demoted-errors "rat-kingdom: projecting tasks: %S"
           (rat-kingdom-task-project-all space))
         (rat-kingdom-reaction-attach space)
@@ -211,22 +215,39 @@ PATTERN, if given, is a story pattern the story must match."
            nil t)))))
 
 ;;;###autoload
-(defun rat-kingdom-add-repo (path &optional check setup)
+(defun rat-kingdom-add-repo (path &optional check setup task-prefix)
   "Register the repository at PATH, with CHECK as its merge check.
 CHECK is a command as a list of strings, run without a shell in a
 candidate worktree; work is merged only if it succeeds.  SETUP is a
 command of the same kind run in each new worktree before a worker
-starts and before the check, such as one that installs dependencies."
+starts and before the check, such as one that installs dependencies.
+If the checkout has no br workspace, one is created with TASK-PREFIX,
+by default the repository's name, as its issue prefix, and kept out
+of Git; see `rat-kingdom-task-br-ensure'."
   (interactive
-   (list (read-directory-name "Repository: " nil nil t)
-         (rat-kingdom--read-command
-          "Check before merging (empty for none), e.g. make check: ")
-         (rat-kingdom--read-command
-          "Setup in each new worktree (empty for none), e.g. npm ci: ")))
+   (let ((path (read-directory-name "Repository: " nil nil t)))
+     (list path
+           (rat-kingdom--read-command
+            "Check before merging (empty for none), e.g. make check: ")
+           (rat-kingdom--read-command
+            "Setup in each new worktree (empty for none), e.g. npm ci: ")
+           (unless (file-directory-p
+                    (expand-file-name
+                     ".beads" (rat-kingdom-git path "rev-parse"
+                                               "--show-toplevel")))
+             (let ((prefix (read-string
+                            "Prefix of the new br workspace (empty for the \
+repository's name): ")))
+               (and (not (string-blank-p prefix)) prefix))))))
   (let ((repo (rat-kingdom-repo-add (rat-kingdom-space-default) path
-                                    :check check :setup setup)))
-    (message "Registered %s; finished work is merged into %s"
-             (plist-get repo :name) (plist-get repo :target))))
+                                    :check check :setup setup
+                                    :task-prefix task-prefix)))
+    (message "Registered %s; finished work is merged into %s%s"
+             (plist-get repo :name) (plist-get repo :target)
+             (if (plist-get repo :task-initialized)
+                 (format "; created its br workspace, prefix %s, kept out of Git"
+                         (rat-kingdom-task-br-prefix repo))
+               ""))))
 
 ;;;###autoload
 (defun rat-kingdom-start-story (repo title description &optional agent)

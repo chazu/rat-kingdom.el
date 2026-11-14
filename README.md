@@ -7,15 +7,18 @@ through. See [DESIGN.md](DESIGN.md).
 **Status:** early, and usable for one story at a time or a few in
 parallel. You talk to a king; it starts stories; each story follows a
 workflow from a worker through a check and a review to a merge into an
-integration branch; work cut off by an Emacs restart is recovered. There
-are no epics, task tracker or research workflow yet. The path through real
+integration branch; work cut off by an Emacs restart is recovered. Tasks
+come from a br (Rust Beads) workspace in each repository. There are no
+epics or research workflow yet. The path through real
 agents has been run once for a worker and not yet for the king.
 
 ## Using it
 
 You need [agent-shell](https://github.com/xenodium/agent-shell) set up for
-Claude Code. For Codex workers you also need agent-shell's Codex support set
-up: [codex-acp](https://github.com/agentclientprotocol/codex-acp) installed
+Claude Code, and `br`, the Rust Beads issue tracker, on `exec-path` (or
+named by `rat-kingdom-task-br-program`). For Codex workers you also need
+agent-shell's Codex support set up:
+[codex-acp](https://github.com/agentclientprotocol/codex-acp) installed
 and `agent-shell-openai-authentication` set.
 
 ```elisp
@@ -62,6 +65,31 @@ output.
 
 Finished work lands on the target branch only. Your checkout is not
 touched and nothing is pushed. Merge or discard that branch yourself.
+
+### Tasks
+
+br is required: every registered repository has a br workspace, the
+`.beads` directory of your own checkout, and that is where rat-kingdom
+reads its ready tasks, claims them for stories and closes them when the
+work is merged. br is never run in a worker's worktree.
+
+Registering a repository whose checkout has no `.beads` runs
+`br init --prefix PREFIX` there and checks that br kept the prefix. The
+prefix is the repository's name unless you give another: `task_prefix` to
+the king's `repo_add`, or the prefix prompt of `M-x rat-kingdom-add-repo`.
+The new workspace is kept out of Git: `/.beads/` is added, once, to
+`info/exclude` in the repository's common Git directory (shared by its
+linked worktrees), never to `.gitignore`, so `git status` does not change.
+Set `rat-kingdom-task-br-untracked` to nil if you would sooner track
+`.beads` yourself. A `.beads` that is already there, tracked or not, is
+left exactly as it is.
+
+If br is not installed, refuses the prefix or keeps a different one,
+registration fails with br's message and nothing is registered; whatever
+br had made is removed. Turning on `rat-kingdom-mode` and `M-x
+rat-kingdom-tasks-refresh` make the workspace of every registered
+repository that lacks one. One that fails is reported as a warning and in
+the king's `status`, and the others carry on.
 
 ### Choosing the agent
 
@@ -157,8 +185,8 @@ its own.
 
 ## Requirements
 
-Emacs 29.1 or later, built with SQLite support, and Git. Starting an
-agent needs agent-shell.
+Emacs 29.1 or later, built with SQLite support, Git, and br (Rust Beads)
+for tasks. Starting an agent needs agent-shell.
 
 ## The tuplespace
 

@@ -485,8 +485,36 @@ ready(repo) → tasks      show(id)      create(...)      close(id, reason)
 claim(id, run)           release(id)   comment(id, text)
 ```
 
-The first adapter is Rust Beads (`br`), one canonical workspace per repo,
-as in rk2. A tuplespace-native adapter can follow.
+The adapter is Rust Beads (`br`), and br is required: every registered
+repository has one canonical workspace, the `.beads` directory of the
+user's main checkout, as in rk2. br runs there and never in a worker's
+worktree. `rat-kingdom-task-adapter-function` stays as the extension point,
+so tests can use an in-memory adapter and a tuplespace-native adapter can
+follow.
+
+A repository with no workspace gets one when it is registered, and, for
+those registered earlier, when `rat-kingdom-mode` starts or the tasks are
+refreshed (`rat-kingdom-task-br-ensure`):
+
+- br must be installed; if it is not, registration fails, saying so.
+- A `.beads` that already exists is left alone, tracked, ignored or
+  neither.
+- Otherwise `br init --prefix PREFIX` runs in the checkout, and `br config
+  get issue_prefix` must then answer PREFIX, since a user-level br
+  configuration once overrode it. PREFIX is the repository's
+  `:task-prefix`, set through `repo_add` or `rat-kingdom-add-repo`, or else
+  its name. A prefix br rejects is reported with br's message; no other is
+  tried.
+- The new workspace is untracked: `/.beads/` is added, once, to
+  `info/exclude` in the repository's common Git directory, never to
+  `.gitignore`, and `git status --porcelain` must then show nothing under
+  `.beads`. `rat-kingdom-task-br-untracked` set to nil leaves it to be
+  tracked instead.
+- If any step fails, the `.beads` it made and the exclude line it added
+  are removed, and registration fails with the reason: no `repo` tuple is
+  written and no target branch created. On mode start a failure is a
+  warning and a note in the king's `status` for that repository; the
+  others are still ensured and the engine starts.
 
 The adapter projects ready tasks into the space as `available` tuples.
 When integration closes a task, its dependents become ready and are
@@ -697,7 +725,9 @@ wait longer for review than for implementation.
    `rat-kingdom-king.el`; the task adapter interface, its `br` adapter
    and the `available` projection are built: `rat-kingdom-task.el`):
    king role and tools, news delivered between turns, tasks behind an
-   adapter, tested with a fake `br`. Ready tasks are projected as
+   adapter, tested with a fake `br`. br is required: registration and mode
+   start create a missing workspace, kept out of Git through
+   `info/exclude`. Ready tasks are projected as
    `available` when `rat-kingdom-mode` starts and on
    `rat-kingdom-tasks-refresh`; a story started from a task takes its
    tuple and claims it, and merging closes it and projects its

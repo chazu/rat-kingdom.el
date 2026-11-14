@@ -319,15 +319,217 @@ reach the task tracker."
     (accept-process-output nil 0.01)))
 
 (ert-deftest rat-kingdom-task-test-default-adapter ()
+  ;; Every repository has br, whether or not its workspace is there yet.
   (let ((root (file-name-as-directory (make-temp-file "rat-kingdom-task" t))))
     (unwind-protect
         (let ((repo (list :name "demo" :path root)))
-          (should-not (rat-kingdom-task-default-adapter repo))
+          (should (equal (rat-kingdom-task-br-directory
+                          (rat-kingdom-task-default-adapter repo))
+                         root))
           (make-directory (expand-file-name ".beads" root))
           (should (equal (rat-kingdom-task-br-directory
                           (rat-kingdom-task-default-adapter repo))
                          root)))
       (delete-directory root t))))
+
+;;;; Making a workspace
+
+(defmacro rat-kingdom-task-test-with-checkout (path &rest body)
+  "Run BODY with PATH bound to a fresh Git checkout with one commit.
+br is the fake of `rat-kingdom-story-test-fake-br', in the directory
+`rat-kingdom-story-test--br'."
+  (declare (indent 1) (debug t))
+  (let ((root (make-symbol "root")))
+    `(let* ((,root (file-name-as-directory
+                    (file-truename (make-temp-file "rat-kingdom-task" t))))
+            (rat-kingdom-story-test--br (expand-file-name "fake-br/" ,root))
+            (rat-kingdom-task-br-program
+             (progn (make-directory rat-kingdom-story-test--br)
+                    (rat-kingdom-story-test-fake-br rat-kingdom-story-test--br)))
+            (rat-kingdom-task-br-untracked t)
+            (rat-kingdom-task--workspace-errors nil)
+            (,path (expand-file-name "demo/" ,root)))
+       (unwind-protect
+           (progn
+             (make-directory ,path)
+             (rat-kingdom-task-test--checkout ,path)
+             ,@body)
+         (delete-directory ,root t)))))
+
+(defun rat-kingdom-task-test--checkout (path)
+  "Make PATH a Git repository with one commit."
+  (rat-kingdom-git path "init" "-q" "-b" "main")
+  (rat-kingdom-git path "config" "user.name" "Test")
+  (rat-kingdom-git path "config" "user.email" "test@example.com")
+  (with-temp-file (expand-file-name "README" path)
+    (insert "demo\n"))
+  (rat-kingdom-git path "add" "-A")
+  (rat-kingdom-git path "commit" "-q" "-m" "Initial commit"))
+
+(defun rat-kingdom-task-test--exclude (path)
+  "Return the text of the info/exclude of the checkout PATH, or nil."
+  (let ((file (expand-file-name
+               "info/exclude"
+               (expand-file-name (rat-kingdom-git path "rev-parse"
+                                                  "--git-common-dir")
+                                 path))))
+    (and (file-exists-p file)
+         (with-temp-buffer
+           (insert-file-contents file)
+           (buffer-string)))))
+
+(defun rat-kingdom-task-test--excluded (path)
+  "Return how many times info/exclude of the checkout PATH excludes .beads."
+  (cl-count "/.beads/" (split-string (or (rat-kingdom-task-test--exclude path) "")
+                                     "\n")
+            :test #'equal))
+
+(defun rat-kingdom-task-test--status (path)
+  "Return what `git status --porcelain' says in PATH."
+  (rat-kingdom-git path "status" "--porcelain"))
+
+(ert-deftest rat-kingdom-task-test-ensure-creates-untracked ()
+  (rat-kingdom-task-test-with-checkout path
+    (should (eql (rat-kingdom-task-test--excluded path) 0))
+    (should (rat-kingdom-task-br-ensure (list :name "demo" :path path)))
+    (should (equal (rat-kingdom-story-test-br-calls rat-kingdom-story-test--br)
+                   '("init --prefix demo" "config get issue_prefix --json")))
+    (should (file-directory-p (expand-file-name ".beads" path)))
+    (should (file-exists-p (expand-file-name ".beads/beads.db" path)))
+    (should (eql (rat-kingdom-task-test--excluded path) 1))
+    ;; Git's own exclude file keeps its comments; nothing else changed.
+    (should (string-prefix-p "# git ls-files"
+                             (rat-kingdom-task-test--exclude path)))
+    (should-not (file-exists-p (expand-file-name ".gitignore" path)))
+    (should (equal (rat-kingdom-task-test--status path) ""))
+    (should-not (rat-kingdom-task-workspace-error "demo"))
+    ;; Ensured again, it is there: br is not run, nothing is added.
+    (should-not (rat-kingdom-task-br-ensure path))
+    (should (eql (length (rat-kingdom-story-test-br-calls
+                          rat-kingdom-story-test--br))
+                 2))
+    (should (eql (rat-kingdom-task-test--excluded path) 1))
+    (should (equal (rat-kingdom-task-test--status path) ""))))
+
+(ert-deftest rat-kingdom-task-test-ensure-prefix-and-exclude-file ()
+  (rat-kingdom-task-test-with-checkout path
+    ;; No info/exclude at all: it is made.  An identical line already
+    ;; there is not added again.
+    (delete-directory (expand-file-name ".git/info" path) t)
+    (should (rat-kingdom-task-br-ensure
+             (list :name "demo" :path path :task-prefix "dm")))
+    (should (equal (car (rat-kingdom-story-test-br-calls
+                         rat-kingdom-story-test--br))
+                   "init --prefix dm"))
+    (should (equal (rat-kingdom-task-test--exclude path) "/.beads/\n"))
+    (should (equal (rat-kingdom-task-test--status path) ""))
+    (delete-directory (expand-file-name ".beads" path) t)
+    (should (rat-kingdom-task-br-ensure (list :name "demo" :path path)))
+    (should (equal (rat-kingdom-task-test--exclude path) "/.beads/\n"))
+    (should (equal (rat-kingdom-task-test--status path) ""))
+    ;; A path inside the checkout means the checkout.
+    (delete-directory (expand-file-name ".beads" path) t)
+    (make-directory (expand-file-name "sub" path))
+    (should (rat-kingdom-task-br-ensure (expand-file-name "sub" path)))
+    (should (file-directory-p (expand-file-name ".beads" path)))
+    (should-not (file-exists-p (expand-file-name "sub/.beads" path)))
+    (should (equal (rat-kingdom-task-test--status path) ""))
+    ;; The prefix is the one given, else the name, else the directory's.
+    (should (equal (rat-kingdom-task-br-prefix '(:name "x" :path "/a/b"))
+                   "x"))
+    (should (equal (rat-kingdom-task-br-prefix '(:path "/a/b/")) "b"))))
+
+(ert-deftest rat-kingdom-task-test-ensure-linked-worktree ()
+  (rat-kingdom-task-test-with-checkout path
+    (let ((linked (expand-file-name "../linked/" path)))
+      (rat-kingdom-git path "worktree" "add" "-q" "-b" "other" linked)
+      (should (rat-kingdom-task-br-ensure (list :name "linked" :path linked)))
+      (should (file-directory-p (expand-file-name ".beads" linked)))
+      (should-not (file-directory-p (expand-file-name ".beads" path)))
+      ;; The line is in the common Git directory, not the worktree's own.
+      (should (eql (rat-kingdom-task-test--excluded path) 1))
+      (should-not (file-exists-p
+                   (expand-file-name ".git/worktrees/linked/info/exclude" path)))
+      (should (equal (rat-kingdom-task-test--status linked) ""))
+      (should (equal (rat-kingdom-task-test--status path) "")))))
+
+(ert-deftest rat-kingdom-task-test-ensure-leaves-existing-workspace ()
+  (rat-kingdom-task-test-with-checkout path
+    ;; An untracked .beads that is not excluded stays that way.
+    (make-directory (expand-file-name ".beads" path))
+    (with-temp-file (expand-file-name ".beads/issues.jsonl" path))
+    (let ((exclude (rat-kingdom-task-test--exclude path)))
+      (should-not (rat-kingdom-task-br-ensure (list :name "demo" :path path)))
+      (should-not (rat-kingdom-story-test-br-calls rat-kingdom-story-test--br))
+      (should (equal (rat-kingdom-task-test--exclude path) exclude))
+      (should (equal (rat-kingdom-task-test--status path) "?? .beads/"))
+      ;; A tracked one too.
+      (rat-kingdom-git path "add" ".beads")
+      (rat-kingdom-git path "commit" "-q" "-m" "Track beads")
+      (should-not (rat-kingdom-task-br-ensure path))
+      (should-not (rat-kingdom-story-test-br-calls rat-kingdom-story-test--br))
+      (should (equal (rat-kingdom-task-test--exclude path) exclude))
+      (should (equal (rat-kingdom-git path "ls-files" ".beads")
+                     ".beads/issues.jsonl")))))
+
+(ert-deftest rat-kingdom-task-test-ensure-without-br ()
+  (rat-kingdom-task-test-with-checkout path
+    (let* ((rat-kingdom-task-br-program
+            (expand-file-name "no-such-br" rat-kingdom-story-test--br))
+           (err (should-error (rat-kingdom-task-br-ensure
+                               (list :name "demo" :path path))
+                              :type 'rat-kingdom-task-error)))
+      (should (string-match-p "requires br, Rust Beads" (cadr err)))
+      (should (string-match-p "no-such-br" (cadr err)))
+      (should (string-match-p "requires br"
+                              (rat-kingdom-task-workspace-error "demo")))
+      (should-not (file-exists-p (expand-file-name ".beads" path)))
+      (should (eql (rat-kingdom-task-test--excluded path) 0))
+      ;; Even a workspace that is there is no use without br.
+      (make-directory (expand-file-name ".beads" path))
+      (should-error (rat-kingdom-task-br-ensure path)
+                    :type 'rat-kingdom-task-error))
+    ;; With br, the error is forgotten.
+    (should-not (rat-kingdom-task-br-ensure (list :name "demo" :path path)))
+    (should-not (rat-kingdom-task-workspace-error "demo"))))
+
+(ert-deftest rat-kingdom-task-test-ensure-prefix-mismatch ()
+  (rat-kingdom-task-test-with-checkout path
+    (with-temp-file (expand-file-name "force-prefix" rat-kingdom-story-test--br)
+      (insert "bd"))
+    (let ((err (should-error (rat-kingdom-task-br-ensure
+                              (list :name "demo" :path path))
+                             :type 'rat-kingdom-task-error)))
+      (should (string-match-p "--prefix demo" (cadr err)))
+      (should (string-match-p "\"bd\"" (cadr err))))
+    ;; What br made is gone, and nothing was excluded.
+    (should-not (file-exists-p (expand-file-name ".beads" path)))
+    (should (eql (rat-kingdom-task-test--excluded path) 0))
+    (should (equal (rat-kingdom-task-test--status path) ""))))
+
+(ert-deftest rat-kingdom-task-test-ensure-init-fails ()
+  (rat-kingdom-task-test-with-checkout path
+    (with-temp-file (expand-file-name "init-fails" rat-kingdom-story-test--br))
+    (let ((err (should-error (rat-kingdom-task-br-ensure
+                              (list :name "demo" :path path :task-prefix "x y"))
+                             :type 'rat-kingdom-task-error)))
+      ;; br's own message, and no other prefix tried.
+      (should (string-match-p "br init --prefix x y: Error: invalid prefix"
+                              (cadr err))))
+    (should (equal (rat-kingdom-story-test-br-calls rat-kingdom-story-test--br)
+                   '("init --prefix x y")))
+    (should-not (file-exists-p (expand-file-name ".beads" path)))
+    (should (eql (rat-kingdom-task-test--excluded path) 0))))
+
+(ert-deftest rat-kingdom-task-test-ensure-tracked-when-asked ()
+  (rat-kingdom-task-test-with-checkout path
+    (let ((rat-kingdom-task-br-untracked nil)
+          (exclude (rat-kingdom-task-test--exclude path)))
+      (should (rat-kingdom-task-br-ensure (list :name "demo" :path path)))
+      (should (file-directory-p (expand-file-name ".beads" path)))
+      (should (equal (rat-kingdom-task-test--exclude path) exclude))
+      (should (eql (rat-kingdom-task-test--excluded path) 0))
+      (should (equal (rat-kingdom-task-test--status path) "?? .beads/")))))
 
 (ert-deftest rat-kingdom-task-test-project ()
   (rat-kingdom-task-test-with-tracker (space fake)
