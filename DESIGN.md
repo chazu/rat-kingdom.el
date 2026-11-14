@@ -464,6 +464,21 @@ evaluated.
 - A token whose workflow has gone, because its file was removed and
   nothing of that name is left, cannot move; the watchdog reports it as
   stuck (7.2).
+- Built (`rat-kingdom-config.el`): `rat-kingdom-config-workflows`
+  returns a repository's view, each workflow with its origin (`repo`,
+  `global` or `built-in`) and file; `rat-kingdom-config-workflow`
+  resolves one name for a repository. The engine looks a story's
+  workflow up by name, for its repository, each time it moves the token,
+  as it always did for built-in workflows; nothing is pinned when a story
+  starts, so an edited file applies from the next move. A file may have
+  no key but `:name` and those `rat-kingdom-workflow-define` takes.
+  `workflow_list` takes an optional `repo`: without it, the workflows of
+  every repository and then what each registered one has, with its own
+  files' workflows described; with it, that repository's view. Each
+  workflow says where it comes from and what it shadows, and ignored
+  workflow files follow. `story_start`, `repo_add`, `epic_create`,
+  `task_create`, the plan surface and the check of `:workflow` all use
+  the repository's view.
 
 **King tools.**
 
