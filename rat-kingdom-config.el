@@ -69,6 +69,16 @@
 ;;
 ;; The engine reads its settings through `rat-kingdom-config-get' and,
 ;; for :setup and :check, `rat-kingdom-story-commands'.
+;;
+;; Workflow files.  A workflow can be a file holding the property list
+;; `rat-kingdom-workflow-define' takes, with :name: workflows/*.eld in
+;; `rat-kingdom-directory' for every repository, .rk/workflows/*.eld in
+;; a repository's checkout for that one.  They are read, cached and
+;; reported as configuration files are.  `rat-kingdom-config-workflows'
+;; gives a repository's view (its files, then the global ones, then the
+;; built-in workflows), and `rat-kingdom-config-workflow' resolves one
+;; name in it.  The engine looks a story's workflow up there each time
+;; it moves the token, so a changed file applies from the next move.
 
 ;;; Code:
 
@@ -370,10 +380,12 @@ what it contributes: nil if it was invalid.")
 at line %d" (line-number-at-pos)))))
       form)))
 
-(defun rat-kingdom-config-read-file (file layer &optional repo)
-  "Return the configuration in FILE, for LAYER, as a property list.
-REPO is the name of the repository it affects, or nil for every one.
-FILE is read with `read', never evaluated, and only again when its
+(defun rat-kingdom-config--read-cached (file repo convert)
+  "Return what CONVERT makes of the one form in FILE, read when it changed.
+REPO is the name of the repository FILE affects, or nil for every one.
+CONVERT is a function of the form that returns what FILE contributes,
+or signals `rat-kingdom-config-error' saying why it is invalid.  FILE
+is read with `read', never evaluated, and only again when its
 modification time or size changes.  Return nil if FILE is missing,
 which is no error, or if it is invalid: then the reason is recorded
 for `rat-kingdom-config-errors'."
@@ -391,15 +403,10 @@ for `rat-kingdom-config-errors'."
      ((and cached (equal (car cached) stamp))
       (cdr cached))
      (t
-      (let ((plist
+      (let ((value
              (condition-case err
-                 (let* ((form (rat-kingdom-config--parse file))
-                        (problems (rat-kingdom-config-validate form layer)))
-                   (when problems
-                     (signal 'rat-kingdom-config-error
-                             (list (string-join problems "; "))))
-                   (rat-kingdom-config--clear-error file)
-                   (rat-kingdom-config--normalize form))
+                 (prog1 (funcall convert (rat-kingdom-config--parse file))
+                   (rat-kingdom-config--clear-error file))
                (rat-kingdom-config-error
                 (rat-kingdom-config--record-error file repo (cadr err))
                 nil)
@@ -407,8 +414,185 @@ for `rat-kingdom-config-errors'."
                 (rat-kingdom-config--record-error
                  file repo (error-message-string err))
                 nil))))
-        (puthash file (cons stamp plist) rat-kingdom-config--files)
-        plist)))))
+        (puthash file (cons stamp value) rat-kingdom-config--files)
+        value)))))
+
+(defun rat-kingdom-config-read-file (file layer &optional repo)
+  "Return the configuration in FILE, for LAYER, as a property list.
+REPO is the name of the repository it affects, or nil for every one.
+FILE is read with `read', never evaluated, and only again when its
+modification time or size changes.  Return nil if FILE is missing,
+which is no error, or if it is invalid: then the reason is recorded
+for `rat-kingdom-config-errors'."
+  (rat-kingdom-config--read-cached
+   file repo
+   (lambda (form)
+     (when-let* ((problems (rat-kingdom-config-validate form layer)))
+       (signal 'rat-kingdom-config-error (list (string-join problems "; "))))
+     (rat-kingdom-config--normalize form))))
+
+;;;; Workflow files
+
+(defconst rat-kingdom-config-workflow-keys
+  '(:name :doc :places :start :final :failure :steps)
+  "The keys a workflow file may have.
+They are `:name' and the keys `rat-kingdom-workflow-define' takes.")
+
+(defun rat-kingdom-config-workflow-directory ()
+  "Return the directory of the workflow files for every repository."
+  (file-name-as-directory (expand-file-name "workflows" rat-kingdom-directory)))
+
+(defun rat-kingdom-config-repo-workflow-directory (repo)
+  "Return the directory of the workflow files of REPO, a repository record."
+  (file-name-as-directory
+   (expand-file-name ".rk/workflows" (plist-get repo :path))))
+
+(defun rat-kingdom-config-workflow-problems (form)
+  "Return what is wrong with FORM as the contents of a workflow file.
+Return a list of strings, or nil if FORM is sound: a property list of
+`rat-kingdom-config-workflow-keys' with a `:name', a symbol or string,
+whose other keys `rat-kingdom-workflow-validate' finds sound, as
+`rat-kingdom-workflow-define' would."
+  (if (not (rat-kingdom-config--plist-p form))
+      (list (format "A workflow file holds a property list such as \
+\(:name quick :places (ready done blocked) ...), not %S" form))
+    (let (problems seen)
+      (cl-loop for (key) on form by #'cddr
+               do (cond
+                   ((not (memq key rat-kingdom-config-workflow-keys))
+                    (push (format "%S is not a workflow key; the keys are %s"
+                                  key (mapconcat #'symbol-name
+                                                 rat-kingdom-config-workflow-keys
+                                                 " "))
+                          problems))
+                   ((memq key seen)
+                    (push (format "%s is given twice" key) problems)))
+               (push key seen))
+      (if (null (plist-get form :name))
+          (push "It has no :name" problems)
+        (when-let* ((problem (rat-kingdom-config--workflow-problem
+                              (plist-get form :name))))
+          (push (concat ":name " problem) problems)))
+      (when (and (plist-get form :doc) (not (stringp (plist-get form :doc))))
+        (push (format ":doc is a string, not %S" (plist-get form :doc))
+              problems))
+      (unless problems
+        (let ((spec (cl-loop for (key value) on form by #'cddr
+                             unless (eq key :name) append (list key value))))
+          (setq problems
+                (reverse
+                 (condition-case err
+                     (rat-kingdom-workflow-validate spec)
+                   (error (list (format "It is not a workflow: %s"
+                                        (error-message-string err)))))))))
+      (nreverse problems))))
+
+(defun rat-kingdom-config--read-workflow-file (file repo)
+  "Return the workflow in FILE, normalized, or nil if FILE is invalid.
+REPO is the name of the repository FILE is for, or nil for every one.
+FILE is read as `rat-kingdom-config-read-file' reads, and an invalid
+one is recorded for `rat-kingdom-config-errors' in the same way."
+  (rat-kingdom-config--read-cached
+   file repo
+   (lambda (form)
+     (when-let* ((problems (rat-kingdom-config-workflow-problems form)))
+       (signal 'rat-kingdom-config-error (list (string-join problems "; "))))
+     (let ((name (plist-get form :name)))
+       (rat-kingdom-workflow--normalize
+        (if (stringp name) name (symbol-name name))
+        (cl-loop for (key value) on form by #'cddr
+                 unless (eq key :name) append (list key value)))))))
+
+(defun rat-kingdom-config--workflow-files (directory repo)
+  "Return the workflows defined by the files in DIRECTORY.
+REPO is the name of the repository DIRECTORY is for, or nil for every
+one.  The files are the *.eld files in DIRECTORY, not hidden ones.
+Return an alist from workflow name to (WORKFLOW FILE), in the order of
+the files' names.  An invalid file is left out, and so are two or more
+files that define the same name; each is recorded for
+`rat-kingdom-config-errors'.  Errors recorded before for files that
+are gone are forgotten."
+  (let* ((directory (file-name-as-directory (expand-file-name directory)))
+         (files (and (file-directory-p directory)
+                     (cl-remove-if-not
+                      #'file-regular-p
+                      (directory-files directory t "\\`[^.].*\\.eld\\'"))))
+         read)
+    (maphash (lambda (source _entry)
+               (when (and (equal (file-name-directory source) directory)
+                          (not (member source files)))
+                 (rat-kingdom-config--clear-error source)
+                 (remhash source rat-kingdom-config--files)))
+             (copy-hash-table rat-kingdom-config--errors))
+    (dolist (file files)
+      (when-let* ((workflow (rat-kingdom-config--read-workflow-file file repo)))
+        (push (list (plist-get workflow :name) workflow file) read)))
+    (setq read (nreverse read))
+    (cl-loop
+     for entry in read
+     for others = (cl-remove-if-not
+                   (lambda (other) (and (not (eq other entry))
+                                        (equal (car other) (car entry))))
+                   read)
+     if others
+     do (rat-kingdom-config--record-error
+         (nth 2 entry) repo
+         (format "The workflow %s is also defined in %s; all are ignored"
+                 (car entry)
+                 (mapconcat (lambda (other) (nth 2 other)) others ", ")))
+     else
+     do (rat-kingdom-config--clear-error (nth 2 entry))
+     and collect entry)))
+
+(defun rat-kingdom-config-workflows (space &optional repo)
+  "Return the workflows a story in REPO can follow, in SPACE.
+REPO is a repository's name or record; without it, or if it is not
+registered, the workflows every repository has.  A workflow comes from
+REPO's .rk/workflows/*.eld, else from the global workflow files in
+`rat-kingdom-config-workflow-directory', else it is one defined with
+`rat-kingdom-workflow-define', such as the built-in story and
+story-lite: a repo file shadows a global or built-in workflow of the
+same name, for REPO only, and a global file replaces a built-in one.
+Files are read again when they change.
+
+Return a list of (WORKFLOW ORIGIN FILE), sorted by name, where ORIGIN
+is `repo', `global' or `built-in' and FILE the file it was read from,
+nil for a built-in one."
+  (let* ((record (and repo (rat-kingdom-config--repo space repo)))
+         (table (mapcar (lambda (workflow)
+                          (list (plist-get workflow :name) workflow
+                                'built-in nil))
+                        (rat-kingdom-workflow-list))))
+    (cl-flet ((add (entries origin)
+                (pcase-dolist (`(,name ,workflow ,file) entries)
+                  (setf (alist-get name table nil nil #'equal)
+                        (list workflow origin file)))))
+      (add (rat-kingdom-config--workflow-files
+            (rat-kingdom-config-workflow-directory) nil)
+           'global)
+      (when (plist-get record :path)
+        (add (rat-kingdom-config--workflow-files
+              (rat-kingdom-config-repo-workflow-directory record)
+              (plist-get record :name))
+             'repo)))
+    (mapcar #'cdr
+            (sort table (lambda (a b) (string< (car a) (car b)))))))
+
+(defun rat-kingdom-config-workflow (space name &optional repo)
+  "Return the workflow called NAME, a symbol or string, for REPO in SPACE.
+REPO is a repository's name or record, or nil for the workflows every
+repository has.  The workflow is resolved as
+`rat-kingdom-config-workflows' says.  Return nil if there is none."
+  (when (and name (not (equal name "")))
+    (let ((name (rat-kingdom-workflow--name name)))
+      (car (cl-find name (rat-kingdom-config-workflows space repo)
+                    :key (lambda (entry) (plist-get (car entry) :name))
+                    :test #'equal)))))
+
+(defun rat-kingdom-config-workflow-names (space &optional repo)
+  "Return the names of the workflows of REPO in SPACE, as text."
+  (mapconcat (lambda (entry) (plist-get (car entry) :name))
+             (rat-kingdom-config-workflows space repo) ", "))
 
 ;;;; Policies
 
@@ -696,10 +880,10 @@ of the repository.  Return nil if all is well."
     (cl-flet ((problem (format-string &rest args)
                 (push (apply #'format format-string args) problems)))
       (when-let* ((workflow (plist-get merged :workflow)))
-        (unless (rat-kingdom-workflow-get workflow)
+        (unless (rat-kingdom-config-workflow space workflow (or record repo))
           (problem "There is no workflow called %s; there are: %s" workflow
-                   (mapconcat (lambda (workflow) (plist-get workflow :name))
-                              (rat-kingdom-workflow-list) ", "))))
+                   (rat-kingdom-config-workflow-names space
+                                                      (or record repo)))))
       (cl-loop for (role kind) on (plist-get merged :agents) by #'cddr
                unless (member (format "%s" kind) (rat-kingdom-agent-names))
                do (problem ":agents %s: there is no agent called %s; there \

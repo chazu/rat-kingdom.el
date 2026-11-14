@@ -130,13 +130,16 @@ or spaces."
     (format "there is no agent called %s; there are: %s"
             agent (string-join (rat-kingdom-agent-names) ", "))))
 
-(defun rat-kingdom-epic--workflow-problem (workflow)
-  "Return what is wrong with the workflow name WORKFLOW, or nil."
+(defun rat-kingdom-epic--workflow-problem (workflow &optional space repo)
+  "Return what is wrong with the workflow name WORKFLOW, or nil.
+With SPACE and REPO, a repository's name, WORKFLOW must resolve for
+REPO, which may have workflow files of its own; otherwise it must be
+one every repository has."
   (unless (or (rat-kingdom-epic--blank-p workflow)
-              (rat-kingdom-workflow-get workflow))
+              (rat-kingdom-config-workflow space workflow (and space repo)))
     (format "there is no workflow called %s; there are: %s"
-            workflow (mapconcat (lambda (workflow) (plist-get workflow :name))
-                                (rat-kingdom-workflow-list) ", "))))
+            workflow (rat-kingdom-config-workflow-names space
+                                                        (and space repo)))))
 
 (defun rat-kingdom-epic--priority-problem (value)
   "Return what is wrong with VALUE as a priority, or nil.
@@ -240,7 +243,7 @@ description" index))
             :priority (get 'priority)
             :index index))))
 
-(defun rat-kingdom-epic-check (stories)
+(defun rat-kingdom-epic-check (stories &optional space repo)
   "Check the plan STORIES and return its stories, in an order to create.
 STORIES is a list of alists, as JSON objects arrive from a tool call,
 or a JSON text of such an array.  Each has `key', `title' and
@@ -254,7 +257,9 @@ Signal an error naming every problem found, if any: a story that is not
 an object, a missing, blank or repeated key, a blank title or
 description, a dependency on a key that is not in the plan, a cycle of
 dependencies, an unknown agent or workflow, or a priority that is not
-from 0 to 4."
+from 0 to 4.  A workflow is known if it resolves for REPO, a
+repository's name, in SPACE, when they are given, and otherwise if
+every repository has it."
   (when (stringp stories)
     (setq stories (condition-case err
                       (json-parse-string stories :object-type 'alist
@@ -297,7 +302,7 @@ from 0 to 4."
                               (plist-get plan :agent))))
             (problem "%s" agent))
           (when-let* ((workflow (rat-kingdom-epic--workflow-problem
-                                 (plist-get plan :workflow))))
+                                 (plist-get plan :workflow) space repo)))
             (problem "%s" workflow))
           (when-let* ((priority (rat-kingdom-epic--priority-problem
                                  (plist-get plan :priority))))
@@ -364,7 +369,7 @@ tracker fails partway, signal an error saying what was created."
   (when (rat-kingdom-epic--blank-p description)
     (error "Nothing was created: the epic's description is blank"))
   (let* ((adapter (rat-kingdom-epic--adapter space repo))
-         (plans (rat-kingdom-epic-check stories))
+         (plans (rat-kingdom-epic-check stories space repo))
          (epic nil)
          (created nil)                  ; in the order they were made
          (edges nil)                    ; newest first
@@ -498,7 +503,7 @@ error that names it."
                   (rat-kingdom-epic--priority-problem
                    (plist-get options :priority))
                   (rat-kingdom-epic--agent-problem agent)
-                  (rat-kingdom-epic--workflow-problem workflow)
+                  (rat-kingdom-epic--workflow-problem workflow space repo)
                   (and parent (member parent depends)
                        (format "%s is the parent; it cannot also be depended \
 on" parent)))

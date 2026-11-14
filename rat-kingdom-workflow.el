@@ -45,6 +45,12 @@
 ;;
 ;; Names are stored as strings, because that is how a token read back
 ;; from the space names its place.
+;;
+;; The workflows defined here are the built-in ones.  Workflows can also
+;; be files, for every repository or for one (DESIGN.md, section 7.3);
+;; rat-kingdom-config.el reads them, and `rat-kingdom-config-workflow'
+;; resolves a name for a repository.  The engine looks workflows up
+;; there, not with `rat-kingdom-workflow-get'.
 
 ;;; Code:
 
@@ -226,7 +232,9 @@ Return the workflow."
     workflow))
 
 (defun rat-kingdom-workflow-get (name)
-  "Return the workflow called NAME, a symbol or string, or nil."
+  "Return the workflow called NAME, a symbol or string, or nil.
+Only workflows defined with `rat-kingdom-workflow-define' are known
+here; `rat-kingdom-config-workflow' also knows workflow files."
   (alist-get (rat-kingdom-workflow--name name) rat-kingdom-workflow--table
              nil nil #'equal))
 
@@ -249,11 +257,14 @@ Return the workflow."
   "Return non-nil if PLACE is a final place of WORKFLOW."
   (member place (plist-get workflow :final)))
 
-(defun rat-kingdom-workflow-describe (workflow)
-  "Return a few lines of text describing WORKFLOW."
+(defun rat-kingdom-workflow-describe (workflow &optional origin)
+  "Return a few lines of text describing WORKFLOW.
+ORIGIN, if given, is text saying where it comes from, on its own line
+after the first."
   (concat
    (format "%s: %s\n" (plist-get workflow :name)
            (or (plist-get workflow :doc) "no description"))
+   (if origin (format "  (%s)\n" origin) "")
    (mapconcat
     (lambda (step)
       (format "  %s: at %s, %s%s; %s"

@@ -175,9 +175,15 @@ a candidate its setup and then its check.")
   "Return the tokens of the stories in SPACE, or only those in REPO."
   (rat-kingdom-space-scan space (if repo (list 'story :scope repo) '(story))))
 
-(defun rat-kingdom-story--workflow (story)
-  "Return the workflow of the token STORY, or nil if it is not defined."
-  (rat-kingdom-workflow-get (plist-get (plist-get story :payload) :workflow)))
+(defun rat-kingdom-story--workflow (space story)
+  "Return the workflow of the token STORY in SPACE, or nil if it is not defined.
+It is resolved for the story's repository, by
+`rat-kingdom-config-workflow': its own workflow files, then the global
+ones, then the built-in workflows.  It is looked up each time, so a
+workflow whose file changes applies from the token's next move."
+  (rat-kingdom-config-workflow
+   space (plist-get (plist-get story :payload) :workflow)
+   (plist-get story :scope)))
 
 (defun rat-kingdom-story--repo (space story)
   "Return the record of the repository of the token STORY in SPACE."
@@ -323,7 +329,7 @@ CHANGES is merged into its payload."
 
 (defun rat-kingdom-story--fail (space story reason)
   "Send the taken token STORY in SPACE to its failure place, with REASON."
-  (let* ((workflow (rat-kingdom-story--workflow story))
+  (let* ((workflow (rat-kingdom-story--workflow space story))
          (failure (and workflow (plist-get workflow :failure))))
     (if (or (null failure)
             (equal failure (plist-get (plist-get story :payload) :at)))
@@ -380,12 +386,11 @@ branch that is not checked out (`rat-kingdom-story-check-target')."
            (name (rat-kingdom-workflow--name
                   (or workflow
                       (rat-kingdom-story-config space where :workflow))))
-           (workflow (or (rat-kingdom-workflow-get name)
+           (workflow (or (rat-kingdom-config-workflow space name repo)
                          (error "There is no workflow called %s; there are: %s"
                                 name
-                                (mapconcat (lambda (workflow)
-                                             (plist-get workflow :name))
-                                           (rat-kingdom-workflow-list) ", ")))))
+                                (rat-kingdom-config-workflow-names space
+                                                                   repo)))))
       (rat-kingdom-space-with-transaction space
         (when task
           (when-let* ((other (rat-kingdom-space-rd
@@ -1067,7 +1072,7 @@ another branch there, then move this story back to %s"
   "Begin the step of the taken token STORY, which has arrived at a place.
 At a final place the story is archived.  At a place no step is taken
 from, the token is parked."
-  (let* ((workflow (rat-kingdom-story--workflow story))
+  (let* ((workflow (rat-kingdom-story--workflow space story))
          (place (plist-get (plist-get story :payload) :at))
          (step (and workflow (rat-kingdom-workflow-step workflow place))))
     (cond
@@ -1097,16 +1102,16 @@ from, the token is parked."
           (format "Step %s could not be begun: %s" (plist-get step :name)
                   (error-message-string err)))))))))
 
-(defun rat-kingdom-story--step (story)
-  "Return the step the waiting token STORY is in, or nil."
-  (when-let* ((workflow (rat-kingdom-story--workflow story)))
+(defun rat-kingdom-story--step (space story)
+  "Return the step the waiting token STORY in SPACE is in, or nil."
+  (when-let* ((workflow (rat-kingdom-story--workflow space story)))
     (rat-kingdom-workflow-step-named
      workflow (plist-get (plist-get story :payload) :step))))
 
 (defun rat-kingdom-story--leave (space story outcome &rest changes)
   "Move the waiting token STORY in SPACE to where OUTCOME of its step leads.
 CHANGES is merged into its payload."
-  (if-let* ((step (rat-kingdom-story--step story)))
+  (if-let* ((step (rat-kingdom-story--step space story)))
       (apply #'rat-kingdom-story--goto space story (plist-get step outcome)
              changes)
     (rat-kingdom-story--fail
@@ -1244,7 +1249,7 @@ touched.  NOTE says why and reaches the next worker.  ACTOR is who
 moved it.  The step taken from PLACE then begins as usual."
   (let* ((story (or (rat-kingdom-story-get space id)
                     (error "There is no story called %s" id)))
-         (workflow (or (rat-kingdom-story--workflow story)
+         (workflow (or (rat-kingdom-story--workflow space story)
                        (error "The workflow of %s is not defined" id)))
          (place (rat-kingdom-workflow--name place))
          (rat-kingdom-story--actor (or actor "user")))
@@ -1330,8 +1335,8 @@ check.  A step of another kind has the limit
 (defun rat-kingdom-story-watch (space)
   "Report as stuck each story in SPACE that will not move by itself.
 That is a story whose step or setup has run past its time, whose check
-or setup is not running, whose worker is gone, or which no reaction has
-picked up.
+or setup is not running, whose worker is gone, whose workflow is no
+longer defined, or which no reaction has picked up.
 A story queued for a free worker is not stuck; the queue is served
 first, in case a worker is free.  Return how many were newly reported."
   (rat-kingdom-story-dequeue space)
@@ -1341,12 +1346,18 @@ first, in case a worker is free.  Return how many were newly reported."
       (let* ((payload (plist-get story :payload))
              (id (plist-get story :identity))
              (waited (- now (or (plist-get payload :entered) now)))
-             (step (rat-kingdom-story--step story))
+             (step (rat-kingdom-story--step space story))
              (awaiting (plist-get payload :awaiting))
              (limit (rat-kingdom-story--time-limit space story step
                                                    awaiting))
              (reason
               (pcase (plist-get payload :phase)
+                ((and (or "enter" "wait")
+                      (guard (not (rat-kingdom-story--workflow space story))))
+                 (format "Its workflow %s is not defined for %s any more, \
+so it cannot move. Restore the workflow's file, or cancel the story."
+                         (plist-get payload :workflow)
+                         (plist-get story :scope)))
                 ("enter"
                  (and (> waited 60)
                       (format "It arrived at %s %d seconds ago and no step \

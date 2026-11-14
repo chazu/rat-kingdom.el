@@ -317,9 +317,9 @@ nil means `rat-kingdom-default-agent'."
   "Put STORY at PLACE of its workflow, with NOTE saying why."
   (interactive
    (let* ((story (rat-kingdom--read-story "Move story: "))
+          (space (rat-kingdom-space-default))
           (workflow (rat-kingdom-story--workflow
-                     (rat-kingdom-story-get (rat-kingdom-space-default)
-                                            story))))
+                     space (rat-kingdom-story-get space story))))
      (list story
            (completing-read "To: " (plist-get workflow :places) nil t)
            (read-string "Note for the next worker (may be empty): "))))
