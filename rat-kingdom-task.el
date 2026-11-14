@@ -10,12 +10,14 @@
 ;;; Commentary:
 
 ;; Tasks live in a tracker outside rat-kingdom and are reached through
-;; an adapter.  An adapter belongs to one repository and answers seven
+;; an adapter.  An adapter belongs to one repository and answers nine
 ;; generic functions:
 ;;
 ;;   `rat-kingdom-task-ready'     the tasks ready to be worked on
 ;;   `rat-kingdom-task-show'      one task
 ;;   `rat-kingdom-task-create'    a new task; returns its id
+;;   `rat-kingdom-task-depend'    record that one task waits for another
+;;   `rat-kingdom-task-children'  the tasks of an epic
 ;;   `rat-kingdom-task-close'     close a task, with a reason
 ;;   `rat-kingdom-task-claim'     mark a task as taken by a run
 ;;   `rat-kingdom-task-release'   give a claimed task back
@@ -23,7 +25,14 @@
 ;;
 ;; A task is a property list with at least `:id', `:title',
 ;; `:description', `:status' and `:priority', whatever the tracker
-;; calls them.
+;; calls them, and, where the tracker knows them, `:type', `:labels'
+;; (a list of strings), `:parent' (the id of its epic) and
+;; `:depends-on' (the ids of the tasks it waits for).
+;;
+;; A task may say which agent and which workflow a story working on it
+;; should have, with the labels rk-agent:NAME and rk-workflow:NAME.
+;; `rat-kingdom-task-labels' makes them and `rat-kingdom-task-agent'
+;; and `rat-kingdom-task-workflow' read them back.
 ;;
 ;; The adapter is Rust Beads, the `br' program, and br is required:
 ;; every registered repository has a br workspace, its checkout's .beads
@@ -71,11 +80,19 @@
 (cl-defgeneric rat-kingdom-task-show (adapter id)
   "Return the task ID from ADAPTER's tracker.")
 
-(cl-defgeneric rat-kingdom-task-create (adapter title &key description priority type parent)
+(cl-defgeneric rat-kingdom-task-create (adapter title &key description priority type parent labels)
   "Create a task called TITLE in ADAPTER's tracker and return its id.
 DESCRIPTION is its text, PRIORITY a number from 0, the most urgent, to
-4, TYPE its kind such as \"task\" or \"bug\", and PARENT the id of the
-task it belongs to.")
+4, TYPE its kind such as \"task\", \"bug\" or \"epic\", PARENT the id
+of the epic it belongs to, and LABELS a list of strings.")
+
+(cl-defgeneric rat-kingdom-task-depend (adapter id depends-on)
+  "Record in ADAPTER's tracker that the task ID depends on DEPENDS-ON.
+ID is not ready until DEPENDS-ON is closed.")
+
+(cl-defgeneric rat-kingdom-task-children (adapter epic)
+  "Return the tasks whose parent is EPIC in ADAPTER's tracker.
+Each is a task with `:status', `:labels' and `:depends-on'.")
 
 (cl-defgeneric rat-kingdom-task-close (adapter id reason)
   "Close the task ID in ADAPTER's tracker, saying REASON.")
@@ -88,6 +105,38 @@ task it belongs to.")
 
 (cl-defgeneric rat-kingdom-task-comment (adapter id text)
   "Add the comment TEXT to the task ID in ADAPTER's tracker.")
+
+;;;; What a task says about its story
+
+(defconst rat-kingdom-task-agent-label "rk-agent:"
+  "The prefix of the label naming the agent a task's story runs.")
+
+(defconst rat-kingdom-task-workflow-label "rk-workflow:"
+  "The prefix of the label naming the workflow a task's story follows.")
+
+(defun rat-kingdom-task-labels (agent workflow)
+  "Return the labels that give a task the AGENT and the WORKFLOW.
+Either may be nil, and is then left out."
+  (append (and agent (list (format "%s%s" rat-kingdom-task-agent-label agent)))
+          (and workflow (list (format "%s%s" rat-kingdom-task-workflow-label
+                                      workflow)))))
+
+(defun rat-kingdom-task--label (task prefix)
+  "Return what follows PREFIX in the first label of TASK that has it."
+  (cl-some (lambda (label)
+             (and (stringp label)
+                  (string-prefix-p prefix label)
+                  (> (length label) (length prefix))
+                  (substring label (length prefix))))
+           (plist-get task :labels)))
+
+(defun rat-kingdom-task-agent (task)
+  "Return the agent TASK's rk-agent: label names, or nil."
+  (rat-kingdom-task--label task rat-kingdom-task-agent-label))
+
+(defun rat-kingdom-task-workflow (task)
+  "Return the workflow TASK's rk-workflow: label names, or nil."
+  (rat-kingdom-task--label task rat-kingdom-task-workflow-label))
 
 ;;;; Rust Beads
 
@@ -155,7 +204,10 @@ arrays as lists.  Signal `rat-kingdom-task-error' if it fails."
                             :null-object nil :false-object nil))))
 
 (defun rat-kingdom-task-br--task (issue)
-  "Return the task the br ISSUE describes."
+  "Return the task the br ISSUE describes.
+`br show' gives an issue's `parent' and its `dependencies'; those of
+the type blocks are the tasks it depends on.  `br ready' and
+`br create' give neither."
   (list :id (plist-get issue :id)
         :title (plist-get issue :title)
         :description (plist-get issue :description)
@@ -163,12 +215,38 @@ arrays as lists.  Signal `rat-kingdom-task-error' if it fails."
         :priority (plist-get issue :priority)
         :type (plist-get issue :issue_type)
         :assignee (plist-get issue :assignee)
-        :labels (plist-get issue :labels)))
+        :labels (plist-get issue :labels)
+        :parent (plist-get issue :parent)
+        :depends-on (delq nil
+                          (mapcar (lambda (dependency)
+                                    (and (equal (plist-get dependency
+                                                           :dependency_type)
+                                                "blocks")
+                                         (plist-get dependency :id)))
+                                  (plist-get issue :dependencies)))))
+
+(defun rat-kingdom-task-br--show-all (adapter ids)
+  "Return the br issues IDS of ADAPTER's workspace, from one `br show'."
+  (and ids (apply #'rat-kingdom-task-br--run adapter "show" ids)))
 
 (cl-defmethod rat-kingdom-task-ready ((adapter rat-kingdom-task-br))
-  "Return the tasks `br ready' lists in ADAPTER's workspace."
-  (mapcar #'rat-kingdom-task-br--task
-          (rat-kingdom-task-br--run adapter "ready")))
+  "Return the tasks `br ready' lists in ADAPTER's workspace.
+`br ready' does not say what a task's epic is, so the tasks are then
+read with one `br show'.  If that fails, they are returned as
+`br ready' gave them."
+  (let* ((ready (rat-kingdom-task-br--run adapter "ready"))
+         (shown (condition-case nil
+                    (rat-kingdom-task-br--show-all
+                     adapter (mapcar (lambda (issue) (plist-get issue :id))
+                                     ready))
+                  (rat-kingdom-task-error nil))))
+    (mapcar (lambda (issue)
+              (rat-kingdom-task-br--task
+               (or (cl-find (plist-get issue :id) shown
+                            :key (lambda (full) (plist-get full :id))
+                            :test #'equal)
+                   issue)))
+            ready)))
 
 (cl-defmethod rat-kingdom-task-show ((adapter rat-kingdom-task-br) id)
   "Return the task ID from `br show' in ADAPTER's workspace."
@@ -177,19 +255,53 @@ arrays as lists.  Signal `rat-kingdom-task-error' if it fails."
        (signal 'rat-kingdom-task-error (list (format "br show %s: no such task" id))))))
 
 (cl-defmethod rat-kingdom-task-create ((adapter rat-kingdom-task-br) title
-                                       &key description priority type parent)
+                                       &key description priority type parent
+                                       labels)
   "Create the task TITLE with `br create' in ADAPTER's workspace.
-Return its id.  DESCRIPTION, PRIORITY, TYPE and PARENT are as for
-the generic function.  Free text is passed as --option=value, so
-text that begins with a dash is not taken for an option."
+Return its id.  DESCRIPTION, PRIORITY, TYPE, PARENT and LABELS are as
+for the generic function.  Free text is passed as --option=value, so
+text that begins with a dash is not taken for an option.  br takes
+labels separated by commas, so a label with a comma is an error."
+  (dolist (label labels)
+    (when (string-search "," label)
+      (signal 'rat-kingdom-task-error
+              (list (format "A br label cannot contain a comma: %s" label)))))
   (plist-get (apply #'rat-kingdom-task-br--run adapter "create"
                     (concat "--title=" title)
                     (append
                      (and description (list (concat "--description=" description)))
                      (and priority (list "--priority" (format "%s" priority)))
                      (and type (list "--type" type))
-                     (and parent (list "--parent" parent))))
+                     (and parent (list "--parent" parent))
+                     (and labels (list (concat "--labels="
+                                               (string-join labels ","))))))
              :id))
+
+(cl-defmethod rat-kingdom-task-depend ((adapter rat-kingdom-task-br) id depends-on)
+  "Record in ADAPTER's workspace that the task ID waits for DEPENDS-ON.
+That is `br dep add ID DEPENDS-ON': br takes the issue that depends
+first, then the one it depends on.  The dependency's type is blocks."
+  (rat-kingdom-task-br--run adapter "dep" "add" id depends-on)
+  nil)
+
+(cl-defmethod rat-kingdom-task-children ((adapter rat-kingdom-task-br) epic)
+  "Return the tasks whose parent is EPIC in ADAPTER's workspace.
+`br show EPIC' lists them as dependents of the type parent-child; one
+more `br show' reads them in full.  They come in the order of their
+ids, which br numbers EPIC.1, EPIC.2 and so on as they are made."
+  (let* ((issue (or (car (rat-kingdom-task-br--run adapter "show" epic))
+                    (signal 'rat-kingdom-task-error
+                            (list (format "br show %s: no such task" epic)))))
+         (ids (delq nil (mapcar (lambda (dependent)
+                                  (and (equal (plist-get dependent
+                                                         :dependency_type)
+                                              "parent-child")
+                                       (plist-get dependent :id)))
+                                (plist-get issue :dependents)))))
+    (mapcar #'rat-kingdom-task-br--task
+            (sort (rat-kingdom-task-br--show-all adapter ids)
+                  (lambda (a b) (string-version-lessp (plist-get a :id)
+                                                      (plist-get b :id)))))))
 
 (cl-defmethod rat-kingdom-task-close ((adapter rat-kingdom-task-br) id reason)
   "Close the task ID with `br close' in ADAPTER's workspace, saying REASON."
@@ -428,8 +540,12 @@ failed, in which case SPACE is not touched."
 
 (defun rat-kingdom-task--project (space repo ready)
   "Make the `available' tuples of REPO in SPACE match the tasks READY.
-Return how many there are."
+An epic is not work for one story, so it is never available.  Return
+how many there are."
   (rat-kingdom-space-with-transaction space
+    (setq ready (cl-remove "epic" ready
+                           :key (lambda (task) (plist-get task :type))
+                           :test #'equal))
     (let ((ids (mapcar (lambda (task) (plist-get task :id)) ready)))
       (dolist (tuple (rat-kingdom-space-scan space (list 'available :scope repo)))
         (unless (member (plist-get tuple :identity) ids)
@@ -443,10 +559,15 @@ Return how many there are."
                      space (list 'story :scope repo :task id)))
           (rat-kingdom-space-out
            space 'available :scope repo :identity id
-           :payload (list :title (plist-get task :title)
-                          :description (plist-get task :description)
-                          :priority (plist-get task :priority)
-                          :type (plist-get task :type))
+           :payload (append
+                     (list :title (plist-get task :title)
+                           :description (plist-get task :description)
+                           :priority (plist-get task :priority)
+                           :type (plist-get task :type))
+                     (and (plist-get task :parent)
+                          (list :parent (plist-get task :parent)))
+                     (and (plist-get task :labels)
+                          (list :labels (plist-get task :labels))))
            :actor "tasks"))))
     (length (rat-kingdom-space-scan space (list 'available :scope repo)))))
 

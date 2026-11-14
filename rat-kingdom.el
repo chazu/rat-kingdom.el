@@ -75,6 +75,7 @@
 (require 'rat-kingdom-king)
 (require 'rat-kingdom-fact)
 (require 'rat-kingdom-message)
+(require 'rat-kingdom-epic)
 
 (defgroup rat-kingdom nil
   "Swarm orchestration for coding agents."
@@ -355,7 +356,7 @@ See `rat-kingdom-git-publish'."
     "rat-kingdom-mcp" "rat-kingdom-inspector" "rat-kingdom-agent-shell"
     "rat-kingdom-run" "rat-kingdom-workflow" "rat-kingdom-task"
     "rat-kingdom-story" "rat-kingdom-king" "rat-kingdom-fact"
-    "rat-kingdom-message" "rat-kingdom")
+    "rat-kingdom-message" "rat-kingdom-epic" "rat-kingdom")
   "The package's files, each after the files it requires.")
 
 (defun rat-kingdom--directory ()

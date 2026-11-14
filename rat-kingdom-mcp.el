@@ -40,10 +40,15 @@ Claude Code calls its tools mcp__rat-kingdom__NAME.")
 (cl-defun rat-kingdom-mcp-define-tool (name &key description args roles function)
   "Define the tool NAME, replacing any tool of that name.
 DESCRIPTION tells the agent what it does.  ARGS is a list of property
-lists with `:name', `:type' (a symbol such as `string'),
-`:description' and `:optional'.  ROLES lists the roles, as symbols,
-that are offered the tool.  FUNCTION is called with the caller's
-context and an alist of arguments, and returns text."
+lists with `:name', `:type' (a symbol such as `string', `integer',
+`array' or `object'), `:description' and `:optional'.  An argument of
+the type `array' may have `:items', the schema of its elements: a
+property list like an argument's, without `:name' and `:optional'.
+One of the type `object' may have `:properties', a list like ARGS.
+ROLES lists the roles, as symbols, that are offered the tool.
+FUNCTION is called with the caller's context and an alist of
+arguments, and returns text.  An array argument arrives as a list and
+an object as an alist."
   (let ((tool (list :name name :description description :args args
                     :roles roles :function function)))
     (setq rat-kingdom-mcp--tools
@@ -53,19 +58,36 @@ context and an alist of arguments, and returns text."
                   (list tool)))
     tool))
 
+(defun rat-kingdom-mcp-tool-names (role)
+  "Return the names of the tools offered to ROLE, in definition order."
+  (mapcar (lambda (tool) (plist-get tool :name))
+          (rat-kingdom-mcp--tools-for role)))
+
 (defun rat-kingdom-mcp--tools-for (role)
   "Return the tools offered to ROLE."
   (cl-remove-if-not (lambda (tool) (memq role (plist-get tool :roles)))
                     rat-kingdom-mcp--tools))
+
+(defun rat-kingdom-mcp--value-schema (spec)
+  "Return the JSON Schema of a value SPEC describes.
+SPEC is a property list with `:type' and, if it has them,
+`:description', `:items' for an array and `:properties' for an object."
+  (let ((type (plist-get spec :type)))
+    (append (list :type (symbol-name type))
+            (and (plist-get spec :description)
+                 (list :description (plist-get spec :description)))
+            (and (eq type 'array) (plist-get spec :items)
+                 (list :items (rat-kingdom-mcp--value-schema
+                               (plist-get spec :items))))
+            (and (eq type 'object)
+                 (cddr (rat-kingdom-mcp--schema (plist-get spec :properties)))))))
 
 (defun rat-kingdom-mcp--schema (args)
   "Return the JSON Schema for a tool taking ARGS."
   (let ((properties (make-hash-table :test #'equal))
         required)
     (dolist (arg args)
-      (puthash (plist-get arg :name)
-               (list :type (symbol-name (plist-get arg :type))
-                     :description (plist-get arg :description))
+      (puthash (plist-get arg :name) (rat-kingdom-mcp--value-schema arg)
                properties)
       (unless (plist-get arg :optional)
         (push (plist-get arg :name) required)))

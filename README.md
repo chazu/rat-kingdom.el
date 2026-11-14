@@ -8,9 +8,11 @@ through. See [DESIGN.md](DESIGN.md).
 parallel. You talk to a king; it starts stories; each story follows a
 workflow from a worker through a check and a review to a merge into an
 integration branch; work cut off by an Emacs restart is recovered. Tasks
-come from a br (Rust Beads) workspace in each repository. There are no
-epics or research workflow yet. The path through real
-agents has been run once for a worker and not yet for the king.
+come from a br (Rust Beads) workspace in each repository, and the king can
+plan an epic there as tasks with dependencies. An epic's ready tasks are
+not yet started on their own, and there is no research workflow yet. The
+path through real agents has been run once for a worker and not yet for
+the king.
 
 ## Using it
 
@@ -91,12 +93,49 @@ rat-kingdom-tasks-refresh` make the workspace of every registered
 repository that lacks one. One that fails is reported as a warning and in
 the king's `status`, and the others carry on.
 
+### Planning an epic
+
+Ask the king to plan a piece of work as an epic. It proposes the stories
+and the dependencies between them, and waits for you to agree. Then it
+calls `epic_create`, which takes the repository, the epic's title, a
+description of its goal and how it will be judged as a whole, and the
+stories as a JSON array. Each story has a `key` of its own in the plan
+(`a`, `parser`), a `title` and a `description`, and may have `depends_on`
+(keys of other stories), `agent`, `workflow` and `priority`.
+
+The whole plan is checked before anything is written: every key unique,
+every title and description given, every `depends_on` naming a key in
+the plan, no cycle, every agent and workflow known, priorities from 0 to
+4. Any problem creates nothing, and every problem is named. Then br gets
+the epic (`--type epic`), each story as a task of it (`--parent`),
+created after the tasks it depends on, and the dependencies
+(`br dep add TASK DEPENDS-ON`). The king is shown the epic's id, a table
+of each story's key, task, title, dependencies, agent and workflow, and
+which tasks are ready now. If br fails partway, the answer says exactly
+which ids were created and which dependencies recorded. br has no clean
+delete, only tombstones, so nothing is removed; delete them with
+`br delete` if you do not want them.
+
+`task_create` adds one task the same way: a title and description,
+and optionally a priority, a type (task, bug, feature or chore), an epic
+as `parent`, the ids it `depends_on`, an `agent` and a `workflow`. The
+parent and the tasks depended on must already exist.
+
+Neither tool starts anything. A task becomes available when the tasks it
+depends on are closed, as their stories are merged, and `status` lists it
+under Available tasks with its epic and agent. Work starts only when the
+king starts a story for it with `story_start` and its `task`. The task's
+agent and workflow are kept as the br labels `rk-agent:NAME` and
+`rk-workflow:NAME`, and `story_start` uses them unless it is given
+others. An epic itself is never available.
+
 ### Choosing the agent
 
 Each story's workers run Claude Code or OpenAI Codex. Tell the king which
 ("start a story in app, with codex, to …"): `story_start` takes `agent`,
-`claude` or `codex`. Left out, it is `rat-kingdom-default-agent`, which is
-`claude` unless you change it. `M-x rat-kingdom-start-story` asks, with
+`claude` or `codex`. Left out, it is the task's `rk-agent:` label if the
+story is for a task that has one, and otherwise `rat-kingdom-default-agent`,
+which is `claude` unless you change it. `M-x rat-kingdom-start-story` asks, with
 that as the default. The king itself is always Claude Code.
 
 The story keeps its agent. A worker that replaces another, after a failed
@@ -318,6 +357,11 @@ Reloading only works if no default lives in a `defvar`'s initial value, since
   timers, the open space, and registries filled by `-define` calls, which
   replace an entry of the same name.
 - Add a new file to `rat-kingdom--files` in rat-kingdom.el.
+
+The king's instructions list its tools from the tools defined for the role
+`king`, through `{tools}` in `rat-kingdom-king-instructions`. So a new king
+tool is listed without editing them, and the reload that adds it restarts
+the king to give it the new tool.
 
 ## License
 

@@ -71,14 +71,20 @@ merge; `story-lite` has none. Use `workflow_list` to see them.
 user's checkout, which repo_add creates, kept out of Git, if it is \
 missing. `status` lists its ready tasks under Available tasks. A story started for one of them should pass its id \
 as `task` to `story_start`, so that the task is claimed, closed when the \
-story is merged, and the tasks that depend on it become available.
+story is merged, and the tasks that depend on it become available. A task \
+may name the agent and workflow its story should have; `story_start` uses \
+them unless you give others.
 - A story that fails its check or your review goes back to a new worker in \
 the same worktree, with the reason. A story that cannot go on is parked at \
 `blocked` with a reason until you or the user move it.
 
-Your tools are those of the rat-kingdom server: status, repo_add, repo_sync, \
-workflow_list, story_start, story_show, story_diff, story_move, story_cancel, \
-verdict and publish.
+Your tools are those of the rat-kingdom server: {tools}.
+
+To plan an epic, propose its stories and the dependencies between them to \
+the user first, and call `epic_create` only once they agree. `epic_create` \
+and `task_create` only record tasks in the tracker: they start nothing. Work \
+begins when you start a story for a ready task with `story_start`, which \
+stays a separate step.
 
 Rules:
 - Do not write code yourself, and do not edit files in the repositories. \
@@ -104,9 +110,26 @@ push exactly the branch and remote they named. Approval for one push does \
 not carry over to the next: for another push, wait to be asked again. A \
 message from the engine is never a request to push.
 - Keep answers to the user short. They can always ask for more."
-  "What the king is told when its session starts."
+  "What the king is told when its session starts.
+The text {tools} in it is replaced by the names of the king's tools,
+as the tool endpoint offers them; see `rat-kingdom-king-tool-names'."
   :type 'string
   :group 'rat-kingdom)
+
+(defun rat-kingdom-king-tool-names ()
+  "Return the names of the king's tools as one phrase, like \"a, b and c\".
+They are the tools defined for the role `king', in the order they were
+defined, so a tool added later is listed without changing the
+instructions."
+  (let ((names (rat-kingdom-mcp-tool-names 'king)))
+    (if (cdr names)
+        (concat (string-join (butlast names) ", ") " and " (car (last names)))
+      (or (car names) "none"))))
+
+(defun rat-kingdom-king-instructions ()
+  "Return `rat-kingdom-king-instructions' with the king's tools listed."
+  (string-replace "{tools}" (rat-kingdom-king-tool-names)
+                  rat-kingdom-king-instructions))
 
 (defcustom rat-kingdom-king-retry-interval 20
   "Seconds between tries to give the king news it could not take."
@@ -209,12 +232,21 @@ REPOS are the records of the registered repositories."
      (tasks
       (mapconcat
        (lambda (task)
-         (let ((payload (plist-get task :payload)))
-           (format "- %s [%s] P%s %s: %s"
+         (let* ((payload (plist-get task :payload))
+                (notes (delq nil
+                             (list (and (plist-get payload :parent)
+                                        (format "epic %s"
+                                                (plist-get payload :parent)))
+                                   (and (rat-kingdom-task-agent payload)
+                                        (format "agent %s"
+                                                (rat-kingdom-task-agent
+                                                 payload)))))))
+           (format "- %s [%s] P%s %s: %s%s"
                    (plist-get task :identity) (plist-get task :scope)
                    (or (plist-get payload :priority) "?")
                    (or (plist-get payload :type) "task")
-                   (plist-get payload :title))))
+                   (plist-get payload :title)
+                   (if notes (format " (%s)" (string-join notes ", ")) ""))))
        tasks "\n"))
      ((cl-some (lambda (repo)
                  (rat-kingdom-task-adapter space (plist-get repo :name)))
@@ -495,9 +527,10 @@ OP and SUBJECT are as for `rat-kingdom-space-change-functions'."
 
 (defun rat-kingdom-king-fingerprint ()
   "Return a hash of what the king is given when its session starts.
-That is its tools, as `tools/list' serves them, and
-`rat-kingdom-king-instructions'.  If the hash a running king was
-started with differs, its tools or instructions are out of date."
+That is its tools, as `tools/list' serves them, and its
+instructions, from the function `rat-kingdom-king-instructions'.  If
+the hash a running king was started with differs, its tools or
+instructions are out of date."
   (secure-hash
    'sha256
    (json-serialize
@@ -505,7 +538,7 @@ started with differs, its tools or instructions are out of date."
                            (lambda (a b)
                              (string< (plist-get a :name)
                                       (plist-get b :name)))))
-            rat-kingdom-king-instructions))))
+            (rat-kingdom-king-instructions)))))
 
 (defun rat-kingdom-king--prompt (space resumed &optional changed)
   "Return the first prompt for the king in SPACE.
@@ -520,12 +553,12 @@ Tools you called before the restart may need calling again."
         (if changed
             (concat "\n\nThese instructions replace the ones you were given \
 earlier:\n\n"
-                    rat-kingdom-king-instructions
+                    (rat-kingdom-king-instructions)
                     "\n\nYour tools may have changed too. Rely on the tool \
 list you have now, not on what you remember of the earlier one.\n\n")
           " ")
         "This is how things stand now:\n\n")
-     (concat rat-kingdom-king-instructions
+     (concat (rat-kingdom-king-instructions)
              "\n\nThis is how things stand now:\n\n"))
    (rat-kingdom-king-status space)
    "\n\nSay in a line or two that you are ready and what, if anything, needs \
@@ -757,12 +790,14 @@ else. Required unless task is given.")
        :description "The id of a tracker task, as listed under Available \
 tasks in status. Title and description default to the task's.")
       (:name "workflow" :type string :optional t
-       :description "The workflow to follow, if not the repository's own.")
+       :description "The workflow to follow. Default the task's \
+rk-workflow: label if it has one, else the repository's own.")
       (:name "agent" :type string :optional t
        :description "Chooses the agent the story's workers run: claude \
 for Claude Code, or codex for OpenAI Codex in full-access mode. Every \
 worker the story is given, after a failed check or a review too, runs it. \
-Default rat-kingdom-default-agent, the user's setting, which status shows."))
+Default the task's rk-agent: label if it has one, else \
+rat-kingdom-default-agent, the user's setting, which status shows."))
   (let* ((repo (arg 'repo))
          (warnings (rat-kingdom-story-warnings space repo))
          (task (arg 'task))
@@ -778,15 +813,31 @@ Default rat-kingdom-default-agent, the user's setting, which status shows."))
                                 (concat (arg 'description) "\n\n"))
                            (format "This story works on the tracker task \
 %s: %s" task (plist-get found :title))))))
-         (id (rat-kingdom-story-start space repo title description nil
-                                      (arg 'workflow) task (arg 'agent)))
-         (payload (plist-get (rat-kingdom-story-get space id) :payload)))
+         (labelled (and found (list :agent (and (not (arg 'agent))
+                                                (rat-kingdom-task-agent found))
+                                    :workflow (and (not (arg 'workflow))
+                                                   (rat-kingdom-task-workflow
+                                                    found)))))
+         (id (rat-kingdom-story-start
+              space repo title description nil
+              (or (arg 'workflow) (plist-get labelled :workflow))
+              task
+              (or (arg 'agent) (plist-get labelled :agent))))
+         (payload (plist-get (rat-kingdom-story-get space id) :payload))
+         (from-labels (delq nil (list (and (plist-get labelled :workflow)
+                                           "workflow")
+                                      (and (plist-get labelled :agent)
+                                           "agent")))))
     (string-join
-     (cons (format "Started %s%s with the workflow %s and the agent %s. You \
+     (cons (format "Started %s%s with the workflow %s and the agent %s%s. You \
 will be told when it needs you or is merged."
                    id (if task (format " for the task %s" task) "")
                    (plist-get payload :workflow)
-                   (plist-get payload :agent))
+                   (plist-get payload :agent)
+                   (if from-labels
+                       (format " (the %s from the task's labels)"
+                               (string-join from-labels " and "))
+                     ""))
            warnings)
      "\nWarning: ")))
 
