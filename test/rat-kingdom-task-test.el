@@ -5,7 +5,8 @@
 ;; Batch tests for the Rust Beads adapter.  A fake br, a shell script,
 ;; records the directory it ran in and its arguments, prints canned JSON
 ;; shaped like the real br's and exits as told.  One test uses the real
-;; br, if it is installed, in a disposable workspace.
+;; br, if it is installed, in a disposable workspace, and checks what
+;; the fake cannot: that dependencies point the right way.
 ;;
 ;; The projection of ready tasks into the space and the stories that
 ;; work on them are tested with an in-memory adapter and no subprocess
@@ -24,7 +25,10 @@
   "Run BODY with a fake br and VAR bound to an adapter for it.
 The adapter's workspace is a fresh directory.  Use
 `rat-kingdom-task-test--answer' to say what the fake prints and
-`rat-kingdom-task-test--args' to see what it was given."
+`rat-kingdom-task-test--args' to see what it was given.  Call N, from
+1, prints the file stdout.N in the fake's directory instead, if there
+is one, and a call whose first argument is show fails if there is a
+file show-fails.  `rat-kingdom-task-test--calls' lists every call."
   (declare (indent 1) (debug t))
   (let ((root (make-symbol "root")))
     `(let* ((,root (file-name-as-directory
@@ -39,7 +43,12 @@ The adapter's workspace is a fresh directory.  Use
                  "dir=" (shell-quote-argument ,root) "\n"
                  "pwd > \"$dir/cwd\"\n"
                  "for a in \"$@\"; do printf '%s\\n' \"$a\"; done > \"$dir/args\"\n"
-                 "cat \"$dir/stdout\"\n"
+                 "echo \"$*\" >> \"$dir/calls\"\n"
+                 "n=$(grep -c '' \"$dir/calls\")\n"
+                 "if [ \"$1\" = show ] && [ -e \"$dir/show-fails\" ]; then\n"
+                 "  echo 'show failed' >&2; exit 1; fi\n"
+                 "if [ -e \"$dir/stdout.$n\" ]; then cat \"$dir/stdout.$n\"\n"
+                 "else cat \"$dir/stdout\"; fi\n"
                  "cat \"$dir/stderr\" >&2\n"
                  "exit $(cat \"$dir/exit\")\n"))
        (set-file-modes rat-kingdom-task-br-program #o755)
@@ -55,6 +64,20 @@ The adapter's workspace is a fresh directory.  Use
                   ("exit" . ,(format "%d" (or exit 0)))))
     (with-temp-file (expand-file-name (car file) rat-kingdom-task-test--fake)
       (insert (cdr file)))))
+
+(defun rat-kingdom-task-test--answer-call (n stdout)
+  "Make call N of the fake br, counting from 1, print STDOUT."
+  (with-temp-file (expand-file-name (format "stdout.%d" n)
+                                    rat-kingdom-task-test--fake)
+    (insert stdout)))
+
+(defun rat-kingdom-task-test--calls ()
+  "Return every call the fake br was given, oldest first, one string each."
+  (let ((file (expand-file-name "calls" rat-kingdom-task-test--fake)))
+    (and (file-exists-p file)
+         (with-temp-buffer
+           (insert-file-contents file)
+           (split-string (buffer-string) "\n" t)))))
 
 (defun rat-kingdom-task-test--args ()
   "Return the arguments the fake br was last given."
@@ -89,14 +112,16 @@ The adapter's workspace is a fresh directory.  Use
              "\"priority\":2,\"status\":\"open\",\"title\":\"Second\","
              "\"assignee\":null,\"updated_at\":\"2026-11-13T13:09:26Z\"}]"))
     (let ((tasks (rat-kingdom-task-ready adapter)))
-      (should (equal (rat-kingdom-task-test--args) '("ready" "--json")))
+      ;; The ready tasks are read again in full, with one br show.
+      (should (equal (rat-kingdom-task-test--calls)
+                     '("ready --json" "show bd-duw bd-s9g --json")))
       (should (equal (rat-kingdom-task-test--cwd)
                      (file-truename (rat-kingdom-task-br-directory adapter))))
       (should (= (length tasks) 2))
       (should (equal (car tasks)
                      '(:id "bd-duw" :title "First task" :description "Do it"
                        :status "open" :priority 1 :type "task" :assignee nil
-                       :labels ("ui"))))
+                       :labels ("ui") :parent nil :depends-on nil)))
       (should (equal (plist-get (cadr tasks) :id) "bd-s9g"))
       (should (null (plist-get (cadr tasks) :description)))
       (should (null (plist-get (cadr tasks) :assignee)))
@@ -105,7 +130,58 @@ The adapter's workspace is a fresh directory.  Use
 (ert-deftest rat-kingdom-task-test-ready-empty ()
   (rat-kingdom-task-test-with-fake adapter
     (rat-kingdom-task-test--answer "[]")
-    (should (null (rat-kingdom-task-ready adapter)))))
+    (should (null (rat-kingdom-task-ready adapter)))
+    ;; Nothing to show.
+    (should (equal (rat-kingdom-task-test--calls) '("ready --json")))))
+
+(defconst rat-kingdom-task-test--ready-child
+  (concat "[{\"id\":\"bd-e.2\",\"title\":\"Child\",\"status\":\"open\","
+          "\"priority\":2,\"issue_type\":\"task\","
+          "\"labels\":[\"rk-agent:codex\"]}]")
+  "What `br ready' prints for one task of an epic.")
+
+(ert-deftest rat-kingdom-task-test-ready-reads-epic-and-dependencies ()
+  (rat-kingdom-task-test-with-fake adapter
+    (rat-kingdom-task-test--answer rat-kingdom-task-test--ready-child)
+    (rat-kingdom-task-test--answer-call
+     2 (concat "[{\"id\":\"bd-e.2\",\"title\":\"Child\",\"status\":\"open\","
+               "\"priority\":2,\"issue_type\":\"task\","
+               "\"labels\":[\"rk-agent:codex\"],\"parent\":\"bd-e\","
+               "\"dependencies\":["
+               "{\"id\":\"bd-e.1\",\"status\":\"closed\","
+               "\"dependency_type\":\"blocks\"},"
+               "{\"id\":\"bd-e\",\"status\":\"open\","
+               "\"dependency_type\":\"parent-child\"},"
+               "{\"id\":\"bd-x\",\"status\":\"open\","
+               "\"dependency_type\":\"related\"}]}]"))
+    (let ((task (car (rat-kingdom-task-ready adapter))))
+      (should (equal (plist-get task :parent) "bd-e"))
+      (should (equal (plist-get task :depends-on) '("bd-e.1")))
+      (should (equal (rat-kingdom-task-agent task) "codex"))
+      (should-not (rat-kingdom-task-workflow task)))
+    ;; If br show fails, the ready tasks are still given.
+    (with-temp-file (expand-file-name "show-fails" rat-kingdom-task-test--fake))
+    (let ((task (car (rat-kingdom-task-ready adapter))))
+      (should (equal (plist-get task :id) "bd-e.2"))
+      (should (equal (plist-get task :labels) '("rk-agent:codex")))
+      (should-not (plist-get task :parent)))))
+
+(ert-deftest rat-kingdom-task-test-labels ()
+  (should (equal (rat-kingdom-task-labels "codex" "story")
+                 '("rk-agent:codex" "rk-workflow:story")))
+  (should (equal (rat-kingdom-task-labels nil "story") '("rk-workflow:story")))
+  (should-not (rat-kingdom-task-labels nil nil))
+  (let ((task '(:labels ("ui" "rk-agent:" "rk-workflow:story-lite"
+                        "rk-agent:codex" "rk-agent:claude"))))
+    ;; The first label with a name counts.
+    (should (equal (rat-kingdom-task-agent task) "codex"))
+    (should (equal (rat-kingdom-task-workflow task) "story-lite")))
+  (should-not (rat-kingdom-task-agent '(:labels ("ui"))))
+  (should-not (rat-kingdom-task-agent nil))
+  ;; Round trip.
+  (let ((task (list :labels (rat-kingdom-task-labels "codex" "story"))))
+    (should (equal (rat-kingdom-task-agent task) "codex"))
+    (should (equal (rat-kingdom-task-workflow task) "story"))))
 
 (ert-deftest rat-kingdom-task-test-show ()
   (rat-kingdom-task-test-with-fake adapter
@@ -141,7 +217,60 @@ The adapter's workspace is a fresh directory.  Use
                      "--json")))
     (rat-kingdom-task-create adapter "Bare")
     (should (equal (rat-kingdom-task-test--args)
-                   '("create" "--title=Bare" "--json")))))
+                   '("create" "--title=Bare" "--json")))
+    (rat-kingdom-task-create adapter "Epic" :description "Goal" :type "epic")
+    (should (equal (rat-kingdom-task-test--args)
+                   '("create" "--title=Epic" "--description=Goal"
+                     "--type" "epic" "--json")))
+    (rat-kingdom-task-create adapter "Child" :parent "bd-epic"
+                             :labels '("rk-agent:codex" "rk-workflow:story"))
+    (should (equal (rat-kingdom-task-test--args)
+                   '("create" "--title=Child" "--parent" "bd-epic"
+                     "--labels=rk-agent:codex,rk-workflow:story" "--json")))
+    ;; br splits labels at commas, so one with a comma is refused
+    ;; before br is run.
+    (let ((calls (length (rat-kingdom-task-test--calls))))
+      (should-error (rat-kingdom-task-create adapter "Odd" :labels '("a,b"))
+                    :type 'rat-kingdom-task-error)
+      (should (eql (length (rat-kingdom-task-test--calls)) calls)))))
+
+(ert-deftest rat-kingdom-task-test-depend ()
+  (rat-kingdom-task-test-with-fake adapter
+    (rat-kingdom-task-test--answer
+     (concat "{\"status\":\"ok\",\"issue_id\":\"bd-b\",\"depends_on_id\":"
+             "\"bd-a\",\"type\":\"blocks\",\"action\":\"added\"}"))
+    (should-not (rat-kingdom-task-depend adapter "bd-b" "bd-a"))
+    ;; The task that waits comes first, as br dep add takes them.
+    (should (equal (rat-kingdom-task-test--args)
+                   '("dep" "add" "bd-b" "bd-a" "--json")))))
+
+(ert-deftest rat-kingdom-task-test-children ()
+  (rat-kingdom-task-test-with-fake adapter
+    (rat-kingdom-task-test--answer-call
+     1 (concat "[{\"id\":\"bd-e\",\"title\":\"Epic\",\"issue_type\":\"epic\","
+               "\"status\":\"open\",\"dependents\":["
+               "{\"id\":\"bd-e.10\",\"dependency_type\":\"parent-child\"},"
+               "{\"id\":\"bd-e.2\",\"dependency_type\":\"parent-child\"},"
+               "{\"id\":\"bd-z\",\"dependency_type\":\"blocks\"}]}]"))
+    (rat-kingdom-task-test--answer-call
+     2 (concat "[{\"id\":\"bd-e.10\",\"title\":\"Ten\",\"status\":\"open\","
+               "\"issue_type\":\"task\",\"parent\":\"bd-e\","
+               "\"dependencies\":[{\"id\":\"bd-e.2\","
+               "\"dependency_type\":\"blocks\"},{\"id\":\"bd-e\","
+               "\"dependency_type\":\"parent-child\"}]},"
+               "{\"id\":\"bd-e.2\",\"title\":\"Two\",\"status\":\"closed\","
+               "\"issue_type\":\"task\",\"parent\":\"bd-e\","
+               "\"labels\":[\"rk-workflow:story\"]}]"))
+    (let ((children (rat-kingdom-task-children adapter "bd-e")))
+      (should (equal (rat-kingdom-task-test--calls)
+                     '("show bd-e --json" "show bd-e.10 bd-e.2 --json")))
+      ;; In the order br made them, not as text sorts.
+      (should (equal (mapcar (lambda (task) (plist-get task :id)) children)
+                     '("bd-e.2" "bd-e.10")))
+      (should (equal (plist-get (car children) :status) "closed"))
+      (should (equal (rat-kingdom-task-workflow (car children)) "story"))
+      (should (equal (plist-get (cadr children) :depends-on) '("bd-e.2")))
+      (should (equal (plist-get (cadr children) :parent) "bd-e")))))
 
 (ert-deftest rat-kingdom-task-test-close-claim-release-comment ()
   (rat-kingdom-task-test-with-fake adapter
@@ -217,13 +346,60 @@ The adapter's workspace is a fresh directory.  Use
                           :type 'rat-kingdom-task-error)))
       (delete-directory root t))))
 
+;; The real br decides what the fake cannot: that `br dep add' takes the
+;; waiting task first, so a task is ready only once those it depends on
+;; are closed, and what br says about an epic's tasks.
+(ert-deftest rat-kingdom-task-test-real-br-epic ()
+  (skip-unless (executable-find "br"))
+  (let* ((root (file-name-as-directory
+                (file-truename (make-temp-file "rat-kingdom-task-br" t))))
+         (rat-kingdom-task-br-program (executable-find "br"))
+         (adapter (rat-kingdom-task-br (list :name "demo" :path root))))
+    (unwind-protect
+        (progn
+          (let ((default-directory root))
+            (should (eql (call-process rat-kingdom-task-br-program nil nil nil
+                                       "init")
+                         0)))
+          (let* ((epic (rat-kingdom-task-create adapter "Epic" :description "Goal"
+                                                :type "epic"))
+                 (a (rat-kingdom-task-create
+                     adapter "A" :description "First" :parent epic
+                     :labels (rat-kingdom-task-labels "codex" "story")))
+                 (b (rat-kingdom-task-create adapter "B" :parent epic)))
+            (rat-kingdom-task-depend adapter b a)
+            (let ((ready (rat-kingdom-task-ready adapter)))
+              ;; Only A: the epic has open tasks, and B waits for A.
+              (should (equal (mapcar (lambda (task) (plist-get task :id)) ready)
+                             (list a)))
+              (should (equal (plist-get (car ready) :parent) epic))
+              (should (equal (rat-kingdom-task-agent (car ready)) "codex"))
+              (should (equal (rat-kingdom-task-workflow (car ready)) "story")))
+            (let ((children (rat-kingdom-task-children adapter epic)))
+              (should (equal (mapcar (lambda (task) (plist-get task :id))
+                                     children)
+                             (list a b)))
+              (should (equal (plist-get (cadr children) :depends-on) (list a)))
+              (should-not (plist-get (car children) :depends-on))
+              (should (equal (plist-get (car children) :labels)
+                             '("rk-agent:codex" "rk-workflow:story")))
+              (should (equal (plist-get (car children) :status) "open")))
+            (should (equal (plist-get (rat-kingdom-task-show adapter epic) :type)
+                           "epic"))
+            (rat-kingdom-task-close adapter a "Done")
+            (should (equal (mapcar (lambda (task) (plist-get task :id))
+                                   (rat-kingdom-task-ready adapter))
+                           (list b)))))
+      (delete-directory root t))))
+
 ;;;; Tasks in the space
 
 (cl-defstruct (rat-kingdom-task-test-fake
                (:constructor rat-kingdom-task-test-fake--create)
                (:copier nil))
   "An in-memory tracker."
-  (tasks nil :documentation "The tasks; each may have `:after', a task id.")
+  (tasks nil :documentation "The tasks.
+Each may have `:after', a task id, and `:depends-on', a list of them.")
   (calls nil :documentation "The calls made, newest first.")
   (fail nil :documentation "Non-nil makes every call fail."))
 
@@ -246,17 +422,55 @@ The adapter's workspace is a fresh directory.  Use
   (plist-put (rat-kingdom-task-test--task fake id) :status status))
 
 (cl-defmethod rat-kingdom-task-ready ((fake rat-kingdom-task-test-fake))
-  "Return FAKE's open tasks whose predecessor, if any, is closed."
+  "Return FAKE's open tasks whose predecessors, if any, are closed.
+An epic with no tasks of its own is ready too, as in br."
   (rat-kingdom-task-test--call fake 'ready)
   (cl-remove-if-not
    (lambda (task)
      (and (equal (plist-get task :status) "open")
-          (let ((after (plist-get task :after)))
-            (or (null after)
-                (equal (plist-get (rat-kingdom-task-test--task fake after)
-                                  :status)
-                       "closed")))))
+          (cl-every (lambda (before)
+                      (equal (plist-get (rat-kingdom-task-test--task fake before)
+                                        :status)
+                             "closed"))
+                    (append (and (plist-get task :after)
+                                 (list (plist-get task :after)))
+                            (plist-get task :depends-on)))
+          (not (cl-find (plist-get task :id)
+                        (rat-kingdom-task-test-fake-tasks fake)
+                        :key (lambda (other) (plist-get other :parent))
+                        :test #'equal))))
    (rat-kingdom-task-test-fake-tasks fake)))
+
+(cl-defmethod rat-kingdom-task-create ((fake rat-kingdom-task-test-fake) title
+                                       &key description priority type parent
+                                       labels)
+  "Add the task TITLE to FAKE and return its id, T-N for the Nth task.
+DESCRIPTION, PRIORITY, TYPE, PARENT and LABELS are kept with it."
+  (rat-kingdom-task-test--call fake 'create title :type type :parent parent
+                               :labels labels :priority priority)
+  (let ((id (format "T-%d" (1+ (length (rat-kingdom-task-test-fake-tasks
+                                        fake))))))
+    (setf (rat-kingdom-task-test-fake-tasks fake)
+          (append (rat-kingdom-task-test-fake-tasks fake)
+                  (list (list :id id :title title :description description
+                              :status "open" :priority priority
+                              :type (or type "task") :parent parent
+                              :labels labels :depends-on nil))))
+    id))
+
+(cl-defmethod rat-kingdom-task-depend ((fake rat-kingdom-task-test-fake) id
+                                       depends-on)
+  "Record in FAKE that the task ID depends on DEPENDS-ON."
+  (rat-kingdom-task-test--call fake 'depend id depends-on)
+  (let ((task (rat-kingdom-task-test--task fake id)))
+    (plist-put task :depends-on
+               (append (plist-get task :depends-on) (list depends-on)))))
+
+(cl-defmethod rat-kingdom-task-children ((fake rat-kingdom-task-test-fake) epic)
+  "Return the tasks of FAKE whose parent is EPIC."
+  (rat-kingdom-task-test--call fake 'children epic)
+  (cl-remove-if-not (lambda (task) (equal (plist-get task :parent) epic))
+                    (rat-kingdom-task-test-fake-tasks fake)))
 
 (cl-defmethod rat-kingdom-task-show ((fake rat-kingdom-task-test-fake) id)
   "Return the task ID of FAKE, or fail if it has none."

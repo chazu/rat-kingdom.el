@@ -465,11 +465,16 @@ go, and it lets a role be denied built-in tools as well.
 
 | Role | Lifetime | Tools |
 |---|---|---|
-| king | long-lived, global, no worktree | built: `status` (with the tracker tasks available), `repo_add`, `repo_sync`, `workflow_list`, `story_start` (optionally from a `task`, with an `agent`), `story_show`, `story_diff`, `story_move`, `story_cancel`, `verdict`, `publish`. Planned: `task_create`, `epic_create`, `tell`, `query`, `config_set` |
+| king | long-lived, global, no worktree | built: `status` (with the tracker tasks available, each with its epic and agent), `repo_add`, `repo_sync`, `workflow_list`, `story_start` (optionally from a `task`, with an `agent`; a task's `rk-agent:` and `rk-workflow:` labels are the defaults), `story_show`, `story_diff`, `story_move`, `story_cancel`, `verdict`, `publish`, `task_create`, `epic_create` (section 10). Planned: `tell`, `query`, `config_set` |
 | rat (worker) | one task | `finish`, `block`, `note_fact`, `inbox` |
 | researcher | one task | `finish_doc`, `note_fact`, `block` |
 | foreman | one epic, optional | `story_start`, `tell`, `verdict`, `query`, limited to its epic |
 | ambient | one event | set by the reaction that starts it |
+
+The king's instructions list its tools by name, generated from the tools
+defined for the role `king` (`{tools}` in `rat-kingdom-king-instructions`),
+so a tool added later is listed without editing them. A changed list
+changes the king's fingerprint, and a reload restarts it in place.
 
 The king's chores from imp and rk2 (run the check, merge, close the task,
 clean the worktree, notice a finished worker) are reactions. Review
@@ -481,9 +486,17 @@ a conversation with the user.
 Tasks sit behind an adapter:
 
 ```
-ready(repo) → tasks      show(id)      create(...)      close(id, reason)
+ready(repo) → tasks      show(id)      create(..., labels)   close(id, reason)
 claim(id, run)           release(id)   comment(id, text)
+depend(id, depends-on)   children(epic) → tasks
 ```
+
+`depend` is `br dep add ID DEPENDS-ON`: the task that waits comes first,
+and it is not ready until DEPENDS-ON is closed. `children` reads an epic's
+tasks from `br show EPIC` (its dependents of type parent-child) and one
+more `br show` of them, with their status, labels and the tasks each
+depends on. `ready` reads the ready tasks with one `br show` too, since
+`br ready` does not give a task's parent.
 
 The adapter is Rust Beads (`br`), and br is required: every registered
 repository has one canonical workspace, the `.beads` directory of the
@@ -516,9 +529,51 @@ refreshed (`rat-kingdom-task-br-ensure`):
   warning and a note in the king's `status` for that repository; the
   others are still ensured and the engine starts.
 
-The adapter projects ready tasks into the space as `available` tuples.
-When integration closes a task, its dependents become ready and are
-projected in turn. That is how an epic's waves advance without a foreman.
+The adapter projects ready tasks into the space as `available` tuples,
+with the task's epic (`:parent`) and labels when it has them. An epic is
+never projected: it is not work for one story. When integration closes a
+task, its dependents become ready and are projected in turn. That is how
+an epic's waves advance without a foreman.
+
+**Built: planning an epic** (`rat-kingdom-epic.el`). The king creates tasks
+with two tools; neither starts anything.
+
+- `task_create` makes one task: title, description, and optionally
+  priority (0 to 4), type (task, bug, feature, chore), `parent` (an epic),
+  `depends_on` (ids, separated by commas or spaces), `agent` and
+  `workflow`. The agent and workflow must be known, and the parent and the
+  tasks depended on must exist, before anything is written.
+- `epic_create` makes an epic and its stories. It takes the repository,
+  the epic's title, a description (its goal and how it is judged as a
+  whole) and `stories`, a JSON array of objects: `key` (local to the
+  call), `title`, `description`, and optionally `depends_on` (keys),
+  `agent`, `workflow` and `priority`. The tool's input schema describes the
+  array and its objects (`items`), so the king's client sends real JSON; a
+  JSON text is accepted as well.
+- The plan is checked in full first: unique keys, non-blank titles and
+  descriptions, dependencies on keys of the plan only, no cycle (found in
+  Lisp, and named as `a depends on b depends on a`), known agents and
+  workflows, priorities from 0 to 4. Any problem creates nothing, and every
+  problem is listed.
+- Then the epic is created (`--type epic`), each story as a task of it
+  (`--parent EPIC`, with its labels) in an order where every task comes
+  after those it depends on, keeping the given order otherwise, and then
+  the dependencies.
+- If br fails partway, the error names the step, br's message, every id
+  created and every dependency recorded. Nothing is rolled back: `br
+  delete` only leaves tombstones.
+- The repository's tasks are projected again, and the king gets the epic's
+  id, a table of key, task, title, dependencies, agent and workflow, and
+  which tasks are ready now.
+
+A task carries its story's agent and workflow as the labels
+`rk-agent:NAME` and `rk-workflow:NAME`. `story_start` with a `task` uses
+them unless it is given `agent` or `workflow`. The king's instructions
+tell it to propose an epic's stories and dependencies to the user and call
+`epic_create` only once they agree.
+
+Not built yet: an epic token that starts ready tasks by itself, a view of
+an epic's progress, a feature branch per epic, a foreman.
 
 ## 11. Integration and publication
 
@@ -732,9 +787,15 @@ wait longer for review than for implementation.
    `rat-kingdom-tasks-refresh`; a story started from a task takes its
    tuple and claims it, and merging closes it and projects its
    dependents, tested with an in-memory adapter. The king's `status`
-   projects and lists the available tasks, and its `story_start` takes a
-   `task`, filling in the title and description from it. Still to come: epic
-   waves and the epic plan surface (4).
+   projects and lists the available tasks, with each one's epic and agent,
+   and its `story_start` takes a `task`, filling in the title and
+   description from it, and the agent and workflow from its labels. The
+   king plans work with `task_create` and `epic_create`
+   (`rat-kingdom-epic.el`): an epic and its tasks with dependencies, checked
+   in full before anything is written, started by nothing. Its instructions
+   list its tools from those defined. Still to come: an epic token that
+   dispatches ready tasks, an epic status view, feature branches per epic,
+   the foreman, and the epic plan surface (4).
 7. **Configuration**: layers, mixins, aspects, validated `config_set`.
 8. **Dashboard** additions with the factory floor, attention queue and
    review card (surfaces 1 to 3), then the **research** workflow, docs and
