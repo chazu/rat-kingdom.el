@@ -88,7 +88,10 @@ an epic runs, the engine itself starts a story for each of its tasks as the \
 task becomes ready, and you review those stories as usual; you do not start \
 them. If one stops or is cancelled, you are told what waits on it; \
 `epic_retry` lets the engine start a held task again. `epic_pause`, \
-`epic_resume` and `epic_cancel` are for when the user asks.
+`epic_resume` and `epic_cancel` are for when the user asks. Use \
+`feature_branch` with `epic_start` when the user wants the epic to land as \
+one unit; then review each story as usual, and the whole epic again with \
+`epic_diff` and `epic_verdict` at the end.
 
 Rules:
 - Do not write code yourself, and do not edit files in the repositories. \
@@ -440,12 +443,35 @@ clean)")
                                "")))
                 (and (plist-get payload :integrated)
                      (format "Merged into %s at %s"
-                             (or (plist-get payload :target) "the target")
+                             (or (rat-kingdom-story-target space story)
+                                 "the target")
                              (plist-get payload :integrated)))))
          "\n")))))
 
+(defun rat-kingdom-king-diff-text (path from tip)
+  "Return the commits and the diff TIP makes against FROM, or nil if none.
+PATH is the repository.  The commits are those in TIP that FROM lacks;
+the diff is from where the two meet, with a summary first.  A diff
+longer than `rat-kingdom-king-diff-limit' is cut short, saying how to
+read the rest."
+  (let* ((range (format "%s...%s" from tip))
+         (log (rat-kingdom-git path "log" "--format=%h %s"
+                               (format "%s..%s" from tip))))
+    (unless (string-empty-p log)
+      (let ((diff (rat-kingdom-git path "diff" range)))
+        (concat log "\n\n"
+                (rat-kingdom-git path "diff" "--stat" range)
+                "\n\n"
+                (if (> (length diff) rat-kingdom-king-diff-limit)
+                    (format "%s\n[The diff is %d characters; this is the first \
+%d. Read the rest with git in %s: git diff %s]"
+                            (substring diff 0 rat-kingdom-king-diff-limit)
+                            (length diff) rat-kingdom-king-diff-limit path range)
+                  diff))))))
+
 (defun rat-kingdom-king--diff (space id)
-  "Return the changes the story ID in SPACE makes, as a diff with a summary."
+  "Return the changes the story ID in SPACE makes, as a diff with a summary.
+They are taken against the base of its last check, or else its target."
   (pcase-let* ((`(,story . ,_) (rat-kingdom-king--find-story space id))
                (payload (plist-get story :payload))
                (repo (or (rat-kingdom-repo-get space (plist-get story :scope))
@@ -459,22 +485,10 @@ clean)")
                               (concat "refs/heads/" (plist-get payload :branch)))
                              (plist-get payload :branch))
                         (error "%s has no commits yet" id)))
-               (from (or (plist-get payload :base) (plist-get repo :target)))
-               (range (format "%s...%s" from tip))
-               (diff (rat-kingdom-git path "diff" range))
-               (log (rat-kingdom-git path "log" "--format=%h %s"
-                                     (format "%s..%s" from tip))))
-    (if (string-empty-p log)
-        (format "%s has no commits of its own yet." id)
-      (concat log "\n\n"
-              (rat-kingdom-git path "diff" "--stat" range)
-              "\n\n"
-              (if (> (length diff) rat-kingdom-king-diff-limit)
-                  (format "%s\n[The diff is %d characters; this is the first \
-%d. Read the rest with git in %s: git diff %s]"
-                          (substring diff 0 rat-kingdom-king-diff-limit)
-                          (length diff) rat-kingdom-king-diff-limit path range)
-                diff)))))
+               (from (or (plist-get payload :base)
+                         (rat-kingdom-story-target space story))))
+    (or (rat-kingdom-king-diff-text path from tip)
+        (format "%s has no commits of its own yet." id))))
 
 ;;;; News for the king
 
@@ -509,7 +523,8 @@ The paragraphs of `rat-kingdom-king-news-functions' are added to it."
             ('done
              (if (plist-get payload :integrated)
                  (format "%s is merged into %s of %s at %s."
-                         name (or (plist-get payload :target) "the target")
+                         name (or (rat-kingdom-story-target space story)
+                                  "the target")
                          (plist-get story :scope)
                          (substring (plist-get payload :integrated) 0 10))
                (format "%s is over." name)))
@@ -844,9 +859,14 @@ rk-workflow: label if it has one, else the repository's own.")
 for Claude Code, or codex for OpenAI Codex in full-access mode. Every \
 worker the story is given, after a failed check or a review too, runs it. \
 Default the task's rk-agent: label if it has one, else \
-rat-kingdom-default-agent, the user's setting, which status shows."))
+rat-kingdom-default-agent, the user's setting, which status shows.")
+      (:name "target" :type string :optional t
+       :description "Rarely needed; leave it out. The branch the worker's \
+worktree is cut from and the work is merged into, instead of the \
+repository's target. It must be an existing local branch that is not \
+checked out. A task of an epic run with a feature branch gets the epic's \
+branch without this."))
   (let* ((repo (arg 'repo))
-         (warnings (rat-kingdom-story-warnings space repo))
          (task (arg 'task))
          (found (and task (rat-kingdom-story-task space repo task)))
          (labelled (and found (list :agent (and (not (arg 'agent))
@@ -854,24 +874,35 @@ rat-kingdom-default-agent, the user's setting, which status shows."))
                                     :workflow (and (not (arg 'workflow))
                                                    (rat-kingdom-task-workflow
                                                     found)))))
-         ;; A task of an epic that has been run is counted with it.
-         (epic (when-let* ((parent (plist-get found :parent))
-                           ((rat-kingdom-space-rd
-                             space (list 'epic :scope repo
-                                         :identity parent))))
-                 parent))
+         ;; A task of an epic that has been run is counted with it, and
+         ;; while the epic has not ended its stories merge into its
+         ;; feature branch, if it has one.
+         (record (when-let* ((parent (plist-get found :parent)))
+                   (rat-kingdom-space-rd space (list 'epic :scope repo
+                                                     :identity parent))))
+         (epic (and record (plist-get record :identity)))
+         (target (or (arg 'target)
+                     (let ((payload (plist-get record :payload)))
+                       (and (not (member (plist-get payload :state)
+                                         '("done" "cancelled")))
+                            (plist-get payload :branch)))))
+         (warnings (progn
+                     (when target
+                       (rat-kingdom-story-check-target space repo target))
+                     (rat-kingdom-story-warnings space repo target)))
          (id (if task
                  (rat-kingdom-story-start-for-task
                   space repo task :found found
                   :title (arg 'title) :description (arg 'description)
-                  :agent (arg 'agent) :workflow (arg 'workflow) :epic epic)
+                  :agent (arg 'agent) :workflow (arg 'workflow) :epic epic
+                  :target target)
                (rat-kingdom-story-start
                 space repo
                 (or (arg 'title)
                     (error "Give a title, or a task to take it from"))
                 (or (arg 'description)
                     (error "Give a description, or a task to take it from"))
-                nil (arg 'workflow) nil (arg 'agent))))
+                nil (arg 'workflow) nil (arg 'agent) nil target)))
          (payload (plist-get (rat-kingdom-story-get space id) :payload))
          (from-labels (delq nil (list (and (plist-get labelled :workflow)
                                            "workflow")
@@ -888,7 +919,10 @@ will be told when it needs you or is merged."
                         (format " (the %s from the task's labels)"
                                 (string-join from-labels " and "))
                       "")
-                    (if epic (format ", as a story of the epic %s" epic) "")))
+                    (if epic (format ", as a story of the epic %s" epic) "")
+                    (if target
+                        (format "; it is cut from and merges into %s" target)
+                      "")))
            warnings)
      "\nWarning: ")))
 
@@ -900,7 +934,7 @@ where it is, why it stopped, the worker's report and the check's outcome."
 
 (rat-kingdom-king--deftool "story_diff"
     "Show the commits and the diff a story's work makes against its \
-repository's target branch."
+target branch."
     '((:name "story" :type string :description "The story's id."))
   (rat-kingdom-king--diff space (arg 'story)))
 

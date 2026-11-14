@@ -69,6 +69,12 @@ output.
 Finished work lands on the target branch only. Your checkout is not
 touched and nothing is pushed. Merge or discard that branch yourself.
 
+A story may be given a target of its own instead (`story_start` with
+`target`): an existing local branch that is not checked out anywhere. Its
+worktree is cut from that branch and its work merged into it. This is
+rarely needed by hand; the stories of an epic with a feature branch get
+it (below).
+
 ### Tasks
 
 br is required: every registered repository has a br workspace, the
@@ -155,7 +161,8 @@ story.
 **Review.** The king reviews each story as it always does. It does not
 start the epic's stories; the engine does. When every task of the epic is
 closed, the epic is done: the br epic is closed ("All 4 tasks merged")
-and the king is told.
+and the king is told. An epic with a feature branch lands first, after one
+more check and review of the whole (below).
 
 **Holdups.** When a story of the epic stops (its worker blocked, its
 setup failed, or it ran out of workers), the king is told once: which
@@ -177,12 +184,45 @@ stories in progress carry on; `epic_resume` starts what is ready.
 stay open in the tracker, for you to close, or to run again with
 `epic_start`.
 
-**Watching.** `status` has an Epics section for each epic that is running
-or paused: its state, how many of its tasks are merged, its stories in
-progress and where each is, the tasks held up behind a stopped story, the
-held tasks, and how many tasks still wait on others. Each story's line
+**Watching.** `status` has an Epics section for each epic that is running,
+paused or landing: its state, how many of its tasks are merged, its
+feature branch and what its landing waits for if it has one, its stories
+in progress and where each is, the tasks held up behind a stopped story,
+the held tasks, and how many tasks still wait on others. Each story's line
 names its epic. `epic_show` gives one epic in full: a table of its tasks
 with each one's status, story, agent and what it waits on.
+
+**Feature branch.** Without one, each story of the epic merges into the
+target as it passes, so a half-built epic sits on `rk/integration`. Ask
+for the epic to land as one unit and the king calls `epic_start` with
+`feature_branch`. The epic then gets a branch of its own, `rk/epic/ID`,
+cut from the target's head (an existing branch of that name is used if it
+continues from the target, and refused if it has diverged). Every story
+of the epic, including one the king starts with `story_start` for a task
+of it, is cut from that branch and merges into it, after its own check
+and review as usual. The target does not move.
+
+When every task is closed the epic is `landing` rather than done. Its
+branch is merged into the target in a scratch worktree, and the setup and
+check run there, as for a story. If that passes, the king is asked to
+review the whole: `epic_diff` shows the branch's commits and its combined
+diff against the target, and `epic_verdict` takes `pass` or `fix` with
+notes.
+
+- **pass** moves the target to the checked merge, only if the target has
+  not moved since; if it has, the epic is checked again and lands without
+  another review. The epic is done, the br epic closed ("Landed on
+  rk/integration at abc1234"), and the branch kept for you to delete.
+- **fix** adds a task to the epic whose description is the notes. The
+  epic runs again, the engine starts the task on the epic's branch, and
+  once it is merged the epic lands again.
+- **A failed check, or a merge that conflicts** because the target moved,
+  adds a task "Merge rk/integration into the epic branch and fix what
+  breaks", with the check's output or the files in conflict. Its worker
+  works on the epic's branch, merges the target in, and fixes it; then the
+  epic lands again.
+
+`epic_cancel` keeps the branch, with what its stories merged.
 
 ### Choosing the agent
 
@@ -255,8 +295,9 @@ fetches its tools afresh.
 Turning on `rat-kingdom-mode`, which `rat-kingdom-king` does, recovers
 what the last Emacs left in flight. A worker that was cut off is replaced
 by a new one in the same worktree, told to look at what is there. A check
-or setup that was running runs again. Running epics carry on: the stories
-their ready tasks have room for are started, and none twice. The king
+or setup that was running runs again, and so does the check of an epic
+that was landing. Running epics carry on: the stories their ready tasks
+have room for are started, and none twice. The king
 takes up its earlier session; `C-u M-x rat-kingdom-king` starts a new one
 instead.
 

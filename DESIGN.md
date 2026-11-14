@@ -115,12 +115,12 @@ is the audit trail and can be replayed.
 
 | Category | Modality | Written by | Meaning |
 |---|---|---|---|
-| `story` | linear | engine | the token: `(story S :at PLACE :workflow W :task T)` |
+| `story` | linear | engine | the token: `(story S :at PLACE :workflow W :task T)`, with `:target` if it has a target of its own |
 | `available` | linear | task adapter | a ready task with no story yet |
 | `run` | persistent | engine | a live or stopped agent run and its state |
 | `result` | persistent | worker `finish` | commit, summary, reported checks |
 | `blocked` | persistent | worker `block` | why the worker stopped |
-| `checked` | persistent | engine | what the engine itself verified |
+| `checked` | persistent | engine | what the engine itself verified, for a story, or for an epic's landing (named by the epic) |
 | `setup` | persistent | engine | how a new worktree's setup command came out |
 | `review` | linear | engine | a request for the king or user to judge |
 | `verdict` | linear | king or user | `pass` or `fix` with notes |
@@ -132,7 +132,7 @@ is the audit trail and can be replayed.
 | `stuck` | persistent | watchdog | a token that cannot move |
 | `repo` | persistent | user | a registered repository: path, target branch, check, setup |
 | `published` | persistent | king `publish`, user | a push receipt: repo (scope), branch, remote and URL, old and new remote commit, actor, time |
-| `epic` | persistent | king's epic tools, engine | a running epic, scoped to its repo and named by its br id: `:state` (`running`, `paused`, `done`, `cancelled`), `:title`, `:max-parallel`, `:held` (tasks not to be restarted by themselves, with reasons), `:merged`, `:started`, `:finished`; always replaced whole, in one transaction |
+| `epic` | persistent | king's epic tools, engine | a running epic, scoped to its repo and named by its br id: `:state` (`running`, `paused`, `landing`, `done`, `cancelled`), `:title`, `:max-parallel`, `:held` (tasks not to be restarted by themselves, with reasons), `:merged`, `:started`, `:finished`; with a feature branch also `:branch`, `:target`, `:landing` (`check`, `review` or `fix`), `:fix-task`, `:candidate`, the checked `:commit`, `:base` and `:head`, `:reviewed` and `:landed`; always replaced whole, in one transaction |
 
 ### 5.5 The rule: agents write, rules read
 
@@ -295,6 +295,16 @@ Configuration covers: the default workflow, command arrays (`lint`,
 merge or rebase, feature branch per epic), review mode (`king`, `user`,
 `none`), worker limit, and the agent command per role.
 
+**Built: a feature branch per epic**, chosen per epic rather than through
+configuration: `epic_start` with `feature_branch` (section 10). The epic's
+branch is `rk/epic/ID`, cut from the repository's target. Its stories
+carry it as their own target, so each is cut from it and merged into it,
+and the repository's target moves once, when the epic lands. A story's
+target is read in one place, `rat-kingdom-story-target`: the token's
+`:target`, else the repository's. `story_start` takes a `target` too,
+rarely needed; it must be an existing local branch that is not checked
+out.
+
 The king changes configuration through a tool that validates the merged
 result and refuses a change that leaves a workflow invalid: an unknown
 place, a step with no exit, an undefined command. The king never writes
@@ -408,8 +418,11 @@ worker takes its old place ahead of the queue for a free worker, which is
 kept and served once the replaced workers have started. A
 check that was running is run again, and so is a setup that was running
 in a new worker worktree, which keeps its worker place. The king takes up its earlier
-session by its id. Running epics are dispatched again once the tasks are
-projected (section 10). Sessions that end while Emacs is exiting are not
+session by its id. An epic that was `landing` stays so; if its landing
+check was running, `rat-kingdom-epic-reconcile` runs it again in a fresh
+candidate (from `rat-kingdom-reconcile`, as interrupted story checks are),
+and a landing that waited for a review still waits. Running epics are
+dispatched again once the tasks are projected (section 10). Sessions that end while Emacs is exiting are not
 recorded as ended, so they are found interrupted on the next start.
 
 The plan this came from:
@@ -522,7 +535,7 @@ go, and it lets a role be denied built-in tools as well.
 
 | Role | Lifetime | Tools |
 |---|---|---|
-| king | long-lived, global, no worktree | built: `status` (with the tracker tasks available, each with its epic and agent), `repo_add`, `repo_sync`, `workflow_list`, `story_start` (optionally from a `task`, with an `agent`; a task's `rk-agent:` and `rk-workflow:` labels are the defaults), `story_show`, `story_diff`, `story_move`, `story_cancel`, `verdict`, `publish`, `query`, `fact_forget`, `task_create`, `epic_create`, `epic_start`, `epic_pause`, `epic_resume`, `epic_cancel`, `epic_retry`, `epic_show` (section 10), `tell`. Planned: `config_set` |
+| king | long-lived, global, no worktree | built: `status` (with the tracker tasks available, each with its epic and agent), `repo_add`, `repo_sync`, `workflow_list`, `story_start` (optionally from a `task`, with an `agent`; a task's `rk-agent:` and `rk-workflow:` labels are the defaults), `story_show`, `story_diff`, `story_move`, `story_cancel`, `verdict`, `publish`, `query`, `fact_forget`, `task_create`, `epic_create`, `epic_start` (optionally with a `feature_branch`), `epic_pause`, `epic_resume`, `epic_cancel`, `epic_retry`, `epic_show`, `epic_diff`, `epic_verdict` (section 10), `tell`; `story_start` also takes a rarely needed `target`. Planned: `config_set` |
 | rat (worker) | one task | built: `finish`, `block`, `note_fact`, `inbox` |
 | researcher | one task | `finish_doc`, `note_fact`, `block` |
 | foreman | one epic, optional | `story_start`, `tell`, `verdict`, `query`, limited to its epic |
@@ -658,7 +671,8 @@ king, which reviews them as usual.
   the tracker, the agent and workflow from its labels, the `available`
   tuple taken and the task claimed. A story started for an epic, or by
   `story_start` for a task of an epic that has a record, carries
-  `:epic`. `rat-kingdom-story-start` refuses a task that already has a
+  `:epic`, and, while the epic has not ended and has a feature branch,
+  that branch as its `:target`. `rat-kingdom-story-start` refuses a task that already has a
   story in progress, in the same transaction that takes the `available`
   tuple and writes the token.
 - **Dispatch** (`rat-kingdom-epic-dispatch`) starts, for each running
@@ -688,23 +702,71 @@ king, which reviews them as usual.
   and the tasks of the epic waiting on it, directly or through others,
   from the tasks' `:depends-on`. When every task of the epic is closed,
   the epic is `done`, the br epic is closed with "All N tasks merged",
-  and the king is told "Epic E (title) is done: N stories merged."
+  and the king is told "Epic E (title) is done: N stories merged." An
+  epic with a feature branch lands instead (below).
 - **Pause, resume, cancel.** `epic_pause` stops dispatch; stories in
-  progress carry on. `epic_resume` dispatches again. `epic_cancel` marks
+  progress carry on. `epic_resume` dispatches again, or lands an epic whose tasks are all
+  closed. `epic_cancel` marks
   the epic cancelled first, so that nothing is held or started, then
   cancels each story of it in progress as `story_cancel` does, which
-  releases its task. The br epic and its tasks are left open, and a
-  cancelled epic can be started again.
+  releases its task, and abandons a landing check. The br epic and its
+  tasks are left open, a feature branch is kept and the answer says so,
+  and a cancelled epic can be started again.
 - **The view.** `status` has an Epics section
   (`rat-kingdom-king-status-functions`) for each running or paused epic:
   its state, merged/total, its stories in progress and where each is,
   the tasks held up behind a stopped story, the held tasks, and how many
   tasks wait on others. Each story's line names its epic, and
   `story_show` gives its task and epic. `epic_show` gives the full table:
-  each task's id, title, status, story, agent and what it waits on.
+  each task's id, title, status, story, agent and what it waits on. For
+  an epic with a feature branch, both give the branch, the target it
+  lands on, and what the landing waits for: the check, the king's
+  review, or the task that puts it right.
 
-Not built yet: a feature branch per epic, a foreman, the epic plan
-surface.
+**Built: a feature branch per epic** (`rat-kingdom-epic.el`). `epic_start`
+with `feature_branch` creates `rk/epic/ID` from the head of the
+repository's target, or uses an existing branch of that name if the
+target's head is in it (or moves it forward if it is behind with nothing
+of its own), and refuses one that has diverged. The record keeps
+`:branch` and `:target`, and every story of the epic is started with the
+branch as its target (7.3), so the stories merge there after their own
+check and review, and the target does not move.
+
+- **Landing.** When every task of such an epic is closed, it becomes
+  `landing` instead of `done`. The engine merges the branch into the
+  target in a fresh candidate worktree and runs the setup and check
+  there, with the code the stories use
+  (`rat-kingdom-story-check-candidate`). The outcome is a `checked` tuple
+  named by the epic, which a reaction joins with the landing epic.
+- **Review.** A check that passes asks the king, through the news: "Epic
+  E (title) is ready to land on TARGET: N stories, review with epic_diff
+  and give epic_verdict." `epic_diff` gives the branch's commits and its
+  combined diff against the target.
+- **Pass** moves the target to the checked merge with the same
+  compare-and-swap as a story's merge. If the target or the branch moved
+  after the check, the epic is checked again, and lands without another
+  review if the branch is the one reviewed. Then the epic is `done`, the
+  br epic is closed with "Landed on TARGET at SHORTSHA", the king is
+  told, and the branch is kept for the user to delete.
+- **Fix**, with notes, creates a task in the epic (`--parent`) whose
+  description is the notes. The epic goes back to `running`, its landing
+  waiting for that task; dispatch starts its story on the branch, and
+  once it is merged the epic lands again.
+- **A failed check, or a merge that conflicts** because the target moved,
+  creates the task "Merge TARGET into the epic branch and fix what
+  breaks", with the check's output or the files in conflict, and the epic
+  runs again. The task's worker is cut from the epic's branch, merges the
+  target in, and its story merges into the branch; then landing retries.
+  So neither is a dead end. If the tracker cannot create the task, or the
+  candidate cannot be made, the epic is paused and the king told;
+  `epic_resume` lands it again.
+- **Restarts.** The `landing` state is in the persistent record; an
+  interrupted landing check is run again on reconcile (8.4).
+
+Without a feature branch nothing changes: the epic is done when its tasks
+are closed.
+
+Not built yet: a foreman, the epic plan surface.
 
 ## 11. Integration and publication
 
@@ -727,6 +789,14 @@ command, run without a shell like the check: in a worker's worktree when
 it is made, before the worker starts, and in each candidate before the
 check. A worker that replaces another in the same worktree is not set up
 again. After a restart, a setup that was running is run again (8.4).
+
+A story's target is its repository's, or its own `:target` (7.3): the
+stories of an epic with a feature branch are merged into the epic's
+branch this way. That epic then lands on the repository's target as one,
+by the same steps: its branch merged into a candidate, the setup and
+check run there, and, after the king's `epic_verdict`, the target moved by
+compare-and-swap. A conflict or a failed check there becomes a task of
+the epic, done on its branch (section 10).
 
 Publication is a king tool that pushes one named branch to one named
 remote, only on the user's explicit request, and writes a receipt.
@@ -929,8 +999,13 @@ wait longer for review than for implementation.
    `epic_cancel`, `epic_retry` and `epic_show`, dispatch of ready tasks
    by the engine as their dependencies merge, held tasks, holdups told to
    the king, the Epics section of `status`, and dispatch resumed after a
-   restart, tested with the in-memory adapter. Still to come: feature
-   branches per epic, the foreman, and the epic plan surface (4).
+   restart, tested with the in-memory adapter. A feature branch per epic
+   is built: `epic_start` with `feature_branch`, stories with a target of
+   their own, landing through one check and the king's `epic_verdict`
+   after `epic_diff`, conflicts and failed checks returned as tasks on the
+   epic's branch, and an interrupted landing check run again on reconcile,
+   tested with real Git. Still to come: the foreman, and the epic plan
+   surface (4).
 
    **Facts** (built: `rat-kingdom-fact.el`): the worker's `note_fact`,
    facts in every worker's brief through
