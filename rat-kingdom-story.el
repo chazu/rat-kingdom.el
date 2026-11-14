@@ -36,6 +36,13 @@
 ;; is the target branch moved, and only if it has not moved meanwhile.
 ;; If it has, the story is checked again.  Nothing is pushed.
 ;;
+;; The target is the repository's, unless the story was started with a
+;; `:target' of its own, as the stories of an epic with a feature branch
+;; are (rat-kingdom-epic.el).  `rat-kingdom-story-target' is the one
+;; place a story's target is read: its worktree is cut from it, its
+;; worker is told of it, its candidate is made from it and it is the
+;; branch that is moved.
+;;
 ;; A repository may have a setup command, such as "npm ci", that its
 ;; worktrees need before anything can be built or tested.  It runs in a
 ;; worker's worktree when that is made, before the worker starts, and in
@@ -163,6 +170,36 @@ a candidate its setup and then its check.")
   (or (rat-kingdom-repo-get space (plist-get story :scope))
       (error "Repository %s is no longer registered" (plist-get story :scope))))
 
+(defun rat-kingdom-story-target (space story)
+  "Return the branch the token STORY in SPACE is cut from and merged into.
+That is the `:target' it was started with, if any, and otherwise its
+repository's target.  STORY may also be a story not yet started, as a
+property list with `:scope', the repository, and a `:payload' that may
+have `:target'.  Return nil if neither is known, as when the repository
+is no longer registered.  Every reading of a story's target goes
+through this."
+  (or (plist-get (plist-get story :payload) :target)
+      (plist-get (rat-kingdom-repo-get space (plist-get story :scope)) :target)))
+
+(defun rat-kingdom-story-check-target (space repo target)
+  "Signal an error unless TARGET may be the target of a story in REPO of SPACE.
+It must be an existing local branch, and not one checked out in any
+worktree, the user's checkout included, since work is merged into it
+by moving it."
+  (let ((path (plist-get (or (rat-kingdom-repo-get space repo)
+                             (error "No repository called %s is registered" repo))
+                         :path)))
+    (unless (and (stringp target)
+                 (not (string-empty-p target))
+                 (rat-kingdom-git-ok-p path "rev-parse" "--verify" "--quiet"
+                                       (concat "refs/heads/" target)))
+      (error "%s has no local branch %s to use as the target" repo target))
+    (when (rat-kingdom-git-checked-out-p path target)
+      (error "The branch %s is checked out in a worktree of %s, so it cannot \
+be a target: work is merged into a target by moving it. Check out another \
+branch there first" target repo))
+    target))
+
 (defun rat-kingdom-story--title (story)
   "Return the token STORY's id and title as one phrase."
   (format "%s (%s)" (plist-get story :identity)
@@ -250,7 +287,7 @@ CHANGES is merged into its payload."
     id))
 
 (defun rat-kingdom-story-start (space repo title &optional description id
-                                      workflow task agent epic)
+                                      workflow task agent epic target)
   "Start a story in SPACE for the repository REPO and return its id.
 TITLE says what to do in a line; DESCRIPTION gives the acceptance
 criteria.  ID names the story; one is made up if it is nil.  WORKFLOW
@@ -262,11 +299,16 @@ in progress, so another for it is an error.  AGENT names the agent
 every worker of the story runs, \"claude\" or \"codex\"; by default
 `rat-kingdom-default-agent'.  An unknown agent is an error.  EPIC, if
 given, is the id of the epic the story was started for, kept on its
-token as `:epic'."
+token as `:epic'.  TARGET, if given, is the branch the story's worktree
+is cut from and its work merged into, instead of the repository's
+target, kept on its token as `:target'; it must be an existing local
+branch that is not checked out (`rat-kingdom-story-check-target')."
   (let ((record (or (rat-kingdom-repo-get space repo)
                     (error "No repository called %s is registered" repo)))
         (id (or id (rat-kingdom-story--new-id space)))
         (agent (rat-kingdom-agent-name agent)))
+    (when target
+      (rat-kingdom-story-check-target space repo target))
     (when (rat-kingdom-space-rd space (list 'story :identity id))
       (error "There is already a story called %s" id))
     (let* ((name (rat-kingdom-workflow--name
@@ -294,7 +336,8 @@ token as `:epic'."
                          :agent agent :attempt 0
                          :entered (funcall rat-kingdom-space-now-function))
                    (and task (list :task task))
-                   (and epic (list :epic epic)))
+                   (and epic (list :epic epic))
+                   (and target (list :target target)))
          :actor "user"))
       (when task
         (rat-kingdom-task-claim-for-story space repo task id))
@@ -324,7 +367,8 @@ Available tasks in status" repo id (error-message-string err)))))))
 
 (cl-defun rat-kingdom-story-start-for-task (space repo task
                                                   &key title description
-                                                  agent workflow epic found)
+                                                  agent workflow epic found
+                                                  target)
   "Start a story in SPACE for the task TASK of the repository REPO.
 Return the story's id.  The task is looked up as `rat-kingdom-story-task'
 does, unless FOUND gives it already.  TITLE defaults to the task's.
@@ -332,8 +376,9 @@ Without DESCRIPTION the story's is the task's own text; with it, or if
 the task has none, it is DESCRIPTION followed by a line naming the task.
 AGENT and WORKFLOW default to the task's rk-agent: and rk-workflow:
 labels, then to the usual defaults.  EPIC, if given, is recorded on the
-token as `:epic'.  The task's `available' tuple is taken and the task is
-claimed for the story; see `rat-kingdom-story-start'."
+token as `:epic', and TARGET as `:target'.  The task's `available'
+tuple is taken and the task is claimed for the story; see
+`rat-kingdom-story-start'."
   (let* ((found (or found (rat-kingdom-story-task space repo task)))
          (title (or title (plist-get found :title)
                     (error "Give a title, or a task to take it from")))
@@ -348,16 +393,18 @@ claimed for the story; see `rat-kingdom-story-start'."
      (or workflow (rat-kingdom-task-workflow found))
      task
      (or agent (rat-kingdom-task-agent found))
-     epic)))
+     epic target)))
 
-(defun rat-kingdom-story-warnings (space repo)
+(defun rat-kingdom-story-warnings (space repo &optional target)
   "Return what a person starting a story in REPO in SPACE should know.
 The result is a list of strings: that the checkout has changes a worker
-will not see, or commits the target branch lacks."
+will not see, or commits the target branch lacks.  TARGET is the
+story's own target, if it is to have one."
   (let* ((record (or (rat-kingdom-repo-get space repo)
                      (error "No repository called %s is registered" repo)))
          (path (plist-get record :path))
-         (target (plist-get record :target))
+         (target (rat-kingdom-story-target
+                  space (list :scope repo :payload (list :target target))))
          warnings)
     (unless (string-empty-p (rat-kingdom-git path "status" "--porcelain"))
       (push (format "The checkout at %s has uncommitted changes. A worker \
@@ -492,7 +539,7 @@ started when it succeeds, by `rat-kingdom-story-set-up'."
      (t
       (let* ((repo (rat-kingdom-story--repo space story))
              (path (plist-get repo :path))
-             (target (plist-get repo :target))
+             (target (rat-kingdom-story-target space story))
              (known (plist-get payload :branch))
              (branch (or known (concat "rats/" id)))
              (worktree (rat-kingdom-story--worktree story))
@@ -677,25 +724,28 @@ its output:\n%s"
       (delete-directory candidate t)
       (rat-kingdom-git path "worktree" "prune"))))
 
-(defun rat-kingdom-story--check (space story _workflow step)
-  "Begin STEP for the taken token STORY in SPACE.
-Merge its commit in a candidate worktree and run the repository's check
-there, after its setup if it has one.  With no check there is nothing
-to set up for, and the clean merge passes.  The outcome is recorded in
-SPACE as a `checked' tuple."
-  (let* ((id (plist-get story :identity))
-         (payload (plist-get story :payload))
-         (repo (rat-kingdom-story--repo space story))
-         (path (plist-get repo :path))
-         (target (plist-get repo :target))
-         (commit (or (plist-get payload :commit)
-                     (error "There is no commit to check")))
-         (base (rat-kingdom-git-rev path target))
-         (candidate (expand-file-name
-                     (format "candidates/%s/%s" (plist-get repo :name) id)
-                     rat-kingdom-directory))
-         (check (plist-get repo :check))
-         (title (plist-get payload :title)))
+(defun rat-kingdom-story-check-candidate (space token path target commit
+                                                candidate message check setup)
+  "Merge COMMIT onto TARGET in a fresh candidate worktree and check it there.
+PATH is the repository.  CANDIDATE is the worktree to make, detached
+at TARGET's head; one already there is removed first.  MESSAGE is the
+merge commit's message.  CHECK and SETUP are the repository's
+commands: SETUP runs before CHECK, and with no CHECK there is nothing
+to set up for, and the clean merge passes at once.
+
+The outcome is recorded in SPACE as a `checked' tuple under TOKEN's
+`:scope', `:identity' and `:owner': a story's token, or an epic's
+record when it lands.  A merge that conflicts fails with the reason
+\"merge conflict\" and the files in conflict as its output.  The
+outcome carries `:commit', `:base' (where TARGET was), `:candidate',
+and, once merged, `:head', the merge.  A running check of the same
+identity is abandoned first.
+
+Return the base.  Return at once: the check's outcome is recorded when
+it exits.  If the candidate cannot be made or the check begun, signal
+the error, leaving no candidate and no process."
+  (let ((id (plist-get token :identity))
+        (base (rat-kingdom-git-rev path target)))
     (rat-kingdom-story--abandon-check id)
     (rat-kingdom-story--remove-candidate path candidate)
     (make-directory (file-name-directory candidate) t)
@@ -703,12 +753,11 @@ SPACE as a `checked' tuple."
     (condition-case err
         (let ((facts (list :commit commit :base base :candidate candidate)))
           (rat-kingdom-space-retract
-           space (list 'checked :scope (plist-get story :scope) :identity id))
-          (if (not (rat-kingdom-git-ok-p
-                    candidate "merge" "--no-ff" "-m"
-                    (format "Merge %s: %s" id title) commit))
+           space (list 'checked :scope (plist-get token :scope) :identity id))
+          (if (not (rat-kingdom-git-ok-p candidate "merge" "--no-ff" "-m"
+                                         message commit))
               (apply #'rat-kingdom-story--record-check
-                     space story "fail" :reason "merge conflict"
+                     space token "fail" :reason "merge conflict"
                      :output (rat-kingdom-git candidate "diff" "--name-only"
                                               "--diff-filter=U")
                      facts)
@@ -716,12 +765,38 @@ SPACE as a `checked' tuple."
                                 (list :head (rat-kingdom-git-rev candidate
                                                                  "HEAD"))))
             (if check
-                (rat-kingdom-story--run-check space story check candidate facts
-                                              (plist-get repo :setup))
-              (apply #'rat-kingdom-story--record-check space story "pass"
+                (rat-kingdom-story--run-check space token check candidate facts
+                                              setup)
+              (apply #'rat-kingdom-story--record-check space token "pass"
                      :check nil facts)))
-          (rat-kingdom-story--wait space story step "check"
-                                   :candidate candidate :base base))
+          base)
+      (error
+       (rat-kingdom-story--abandon-check id)
+       (ignore-errors (rat-kingdom-story--remove-candidate path candidate))
+       (signal (car err) (cdr err))))))
+
+(defun rat-kingdom-story--check (space story _workflow step)
+  "Begin STEP for the taken token STORY in SPACE.
+Merge its commit in a candidate worktree and run the repository's check
+there, after its setup if it has one, by
+`rat-kingdom-story-check-candidate'.  The outcome is recorded in SPACE
+as a `checked' tuple."
+  (let* ((id (plist-get story :identity))
+         (payload (plist-get story :payload))
+         (repo (rat-kingdom-story--repo space story))
+         (path (plist-get repo :path))
+         (commit (or (plist-get payload :commit)
+                     (error "There is no commit to check")))
+         (candidate (expand-file-name
+                     (format "candidates/%s/%s" (plist-get repo :name) id)
+                     rat-kingdom-directory))
+         (base (rat-kingdom-story-check-candidate
+                space story path (rat-kingdom-story-target space story) commit
+                candidate (format "Merge %s: %s" id (plist-get payload :title))
+                (plist-get repo :check) (plist-get repo :setup))))
+    (condition-case err
+        (rat-kingdom-story--wait space story step "check"
+                                 :candidate candidate :base base)
       (error
        (rat-kingdom-story--abandon-check id)
        (ignore-errors (rat-kingdom-story--remove-candidate path candidate))
@@ -816,7 +891,7 @@ moved since the check."
          (payload (plist-get story :payload))
          (repo (rat-kingdom-story--repo space story))
          (path (plist-get repo :path))
-         (target (plist-get repo :target))
+         (target (rat-kingdom-story-target space story))
          (head (or (plist-get payload :head)
                    (error "There is no checked merge to land")))
          (base (plist-get payload :base))

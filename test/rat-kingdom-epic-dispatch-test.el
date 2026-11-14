@@ -680,12 +680,13 @@ progress | %s at blocked (stopped) | default (claude) | - |" b)
                        (rat-kingdom-task-settled-functions
                         . rat-kingdom-epic--story-settled)))
         (should (eql (cl-count (cdr entry) (symbol-value (car entry))) 1)))
-      (should (eql (cl-count 'rat-kingdom-epic-dispatch-ready
-                             rat-kingdom-reaction--registry
-                             :key #'rat-kingdom-reaction-name)
-                   1))
+      (dolist (reaction '(rat-kingdom-epic-dispatch-ready
+                          rat-kingdom-epic-landing-checked))
+        (should (eql (cl-count reaction rat-kingdom-reaction--registry
+                               :key #'rat-kingdom-reaction-name)
+                     1)))
       (dolist (name '("epic_start" "epic_pause" "epic_resume" "epic_cancel"
-                      "epic_retry" "epic_show"))
+                      "epic_retry" "epic_show" "epic_diff" "epic_verdict"))
         (should (eql (cl-count name rat-kingdom-mcp--tools
                                :key (lambda (tool) (plist-get tool :name))
                                :test #'equal)

@@ -94,13 +94,18 @@
 (defun rat-kingdom-reconcile ()
   "Recover the work that was in flight when Emacs last stopped.
 A worker that was cut off is replaced by a new one in the same
-worktree, and a check or setup that was running is run again.  Turning on
-`rat-kingdom-mode' does this, so it is seldom needed by hand."
+worktree, and a check or setup that was running is run again, as is
+the check of an epic that was landing.  Turning on `rat-kingdom-mode'
+does this, so it is seldom needed by hand.  Return what
+`rat-kingdom-story-reconcile' does, with `:landings', the ids of the
+epics whose landing check is run again."
   (interactive)
   (let* ((space (rat-kingdom-space-default))
-         (found (rat-kingdom-story-reconcile space))
+         (found (append (rat-kingdom-story-reconcile space)
+                        (list :landings (rat-kingdom-epic-reconcile space))))
          (runs (plist-get found :runs))
-         (checks (plist-get found :checks))
+         (checks (append (plist-get found :checks)
+                         (plist-get found :landings)))
          (setups (plist-get found :setups)))
     (when (and rat-kingdom-mode (or runs checks setups))
       (rat-kingdom-reaction-run space))

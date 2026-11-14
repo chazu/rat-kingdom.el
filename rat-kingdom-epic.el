@@ -18,6 +18,8 @@
 ;;                between them, all at once
 ;;   epic_start, epic_pause, epic_resume, epic_cancel, epic_retry and
 ;;   epic_show    running an epic, and looking at one
+;;   epic_diff and epic_verdict
+;;                reviewing an epic with a feature branch before it lands
 ;;
 ;; The first two start nothing.  A task records the agent and workflow its
 ;; story should have as the labels rk-agent:NAME and rk-workflow:NAME,
@@ -38,10 +40,12 @@
 ;; An epic is run by the engine once the king starts it with
 ;; `epic_start'.  Its state is one persistent `epic' tuple, scoped to the
 ;; repository and named by the epic's id, whose payload holds `:state'
-;; (running, paused, done or cancelled), `:title', `:max-parallel',
-;; `:held' (tasks not to be started again by themselves, each with the
-;; reason), `:merged' (the tasks its stories merged), `:started' and
-;; `:finished'.  It is only ever replaced whole, in one transaction.
+;; (running, paused, landing, done or cancelled), `:title',
+;; `:max-parallel', `:held' (tasks not to be started again by
+;; themselves, each with the reason), `:merged' (the tasks its stories
+;; merged), `:started' and `:finished', and for an epic with a feature
+;; branch `:branch', `:target' and what its landing is at.  It is only
+;; ever replaced whole, in one transaction.
 ;;
 ;; Dispatch, `rat-kingdom-epic-dispatch', starts a story for each
 ;; `available' task of a running epic that is not held and has no story,
@@ -61,7 +65,22 @@
 ;; the king which tasks of the epic wait on it.  When every task of the
 ;; epic is closed, the epic is done, and the br epic is closed.
 ;;
-;; Not here yet: a feature branch per epic, a foreman.
+;; An epic started with `feature_branch' has a branch of its own,
+;; rk/epic/ID, cut from the repository's target.  Every story of it is
+;; started with that branch as its target (rat-kingdom-story.el), so the
+;; target does not move while the epic is built.  When every task is
+;; closed the epic is `landing' instead of done: its branch is merged
+;; into the target in a candidate worktree and checked there, as a
+;; story's commit is, the outcome recorded as a `checked' tuple named by
+;; the epic.  A check that passes asks the king for a review of the
+;; whole, `epic_diff' and `epic_verdict'.  Pass moves the target by the
+;; same compare-and-swap as a story's merge, and the epic is done.  Fix,
+;; a failed check, or a merge that conflicts because the target moved,
+;; each become a new task of the epic, which dispatch starts on the
+;; epic's branch; when it is merged, the epic lands again.  The branch
+;; is never deleted.
+;;
+;; Not here yet: a foreman.
 
 ;;; Code:
 
@@ -600,8 +619,16 @@ repository's.")
 
 ;;;; The epic record
 
-(defconst rat-kingdom-epic-live-states '("running" "paused")
+(defconst rat-kingdom-epic-live-states '("running" "paused" "landing")
   "The states of an epic that has not ended.")
+
+(defconst rat-kingdom-epic-building-states '("running" "paused")
+  "The states of an epic whose tasks are still being done.
+When every task of such an epic is closed, it is done, or, if it has a
+feature branch, it lands.")
+
+(defconst rat-kingdom-epic-branch-prefix "rk/epic/"
+  "The start of the name of an epic's feature branch; its id follows.")
 
 (defun rat-kingdom-epic-record (space id &optional repo)
   "Return the `epic' tuple of the epic ID in SPACE, or nil.
@@ -620,7 +647,7 @@ With REPO, only one in that repository."
   (plist-get (plist-get record :payload) key))
 
 (defun rat-kingdom-epic--live-p (record)
-  "Return non-nil if the `epic' tuple RECORD is running or paused."
+  "Return non-nil if the `epic' tuple RECORD is running, paused or landing."
   (member (rat-kingdom-epic--payload record :state)
           rat-kingdom-epic-live-states))
 
@@ -666,6 +693,13 @@ A held task is not started by dispatch until `epic_retry' clears it."
        (plist-put payload :held
                   (append (plist-get payload :held)
                           (list (list :task task :reason reason))))))))
+
+(defun rat-kingdom-epic--target (space record)
+  "Return the branch the epic RECORD in SPACE lands on.
+That is the `:target' it was started with, or else its repository's."
+  (or (rat-kingdom-epic--payload record :target)
+      (plist-get (rat-kingdom-repo-get space (plist-get record :scope))
+                 :target)))
 
 (defun rat-kingdom-epic--tell (space repo text)
   "Leave the king a message in SPACE, about REPO, saying TEXT."
@@ -774,7 +808,8 @@ transaction, which takes TASK's `available' tuple."
                                                         :task task)))
                  (rat-kingdom-epic--room-p space repo record))
         (rat-kingdom-story-start-for-task
-         space repo task :found (plist-get available :payload) :epic id)))))
+         space repo task :found (plist-get available :payload) :epic id
+         :target (rat-kingdom-epic--payload record :branch))))))
 
 (defun rat-kingdom-epic--dispatch-one (space repo id)
   "Start stories for the ready tasks of the epic ID of REPO in SPACE.
@@ -832,10 +867,13 @@ resumed or a task is retried."
 
 (defun rat-kingdom-epic--finish-if-done (space repo id)
   "Mark the epic ID of REPO in SPACE done if every task of it is closed.
-Close the br epic too, and tell the king.  Return non-nil if it was
-done now.  A tracker that fails leaves the epic as it is."
+Close the br epic too, and tell the king.  An epic with a feature
+branch is not done then but lands (`rat-kingdom-epic--land').  Return
+non-nil if it was done, or began to land, now.  A tracker that fails
+leaves the epic as it is."
   (let ((record (rat-kingdom-epic-record space id repo)))
-    (when (rat-kingdom-epic--live-p record)
+    (when (member (rat-kingdom-epic--payload record :state)
+                  rat-kingdom-epic-building-states)
       (let ((children (condition-case err
                           (rat-kingdom-epic--children space repo id)
                         (error
@@ -843,6 +881,9 @@ done now.  A tracker that fails leaves the epic as it is."
                                   id (error-message-string err))
                          nil))))
         (when (and children (cl-every #'rat-kingdom-epic--closed-p children))
+          (if (rat-kingdom-epic--payload record :branch)
+              (rat-kingdom-epic--land space repo id
+                                      rat-kingdom-epic-building-states)
           (let* ((total (length children))
                  (merged (length (cl-intersection
                                   (rat-kingdom-epic--payload record :merged)
@@ -861,7 +902,7 @@ stories" total merged)))
                      space repo id
                      (lambda (payload)
                        (when (member (plist-get payload :state)
-                                     rat-kingdom-epic-live-states)
+                                     rat-kingdom-epic-building-states)
                          (plist-put (plist-put payload :state "done")
                                     :finished
                                     (funcall rat-kingdom-space-now-function)))))
@@ -877,7 +918,434 @@ them by merged stories" total merged)))
                              (format " The br epic %s could not be closed: %s"
                                      id closed)
                            (format " The br epic %s is closed." id))))
-                t))))))))
+                t)))))))))
+
+;;;; Landing an epic with a feature branch
+
+(defun rat-kingdom-epic--set (payload &rest changes)
+  "Return PAYLOAD with CHANGES, a property list, put into it."
+  (while changes
+    (setq payload (plist-put payload (pop changes) (pop changes))))
+  payload)
+
+(defun rat-kingdom-epic-branch-name (id)
+  "Return the name of the feature branch of the epic ID."
+  (concat rat-kingdom-epic-branch-prefix id))
+
+(defun rat-kingdom-epic--prepare-branch (path branch target)
+  "Make BRANCH, an epic's feature branch, at TARGET's head, or check it.
+PATH is the repository.  A BRANCH that exists is kept if it continues
+from TARGET, that is if TARGET's head is in it, and moved forward to
+TARGET if it is behind TARGET with no commits of its own.  Signal an
+error if it is checked out, or has diverged from TARGET.  Return a
+sentence saying what was done."
+  (let ((ref (concat "refs/heads/" branch)))
+    (unless (rat-kingdom-git-ok-p path "check-ref-format" ref)
+      (error "%s is not a valid branch name" branch))
+    (cond
+     ((not (rat-kingdom-git-ok-p path "rev-parse" "--verify" "--quiet" ref))
+      (rat-kingdom-git path "branch" branch target)
+      (format "Created the branch %s from %s." branch target))
+     ((rat-kingdom-git-checked-out-p path branch)
+      (error "The branch %s exists and is checked out in a worktree; check \
+out another branch there, then start the epic again" branch))
+     ((rat-kingdom-git-ancestor-p path target ref)
+      (format "Kept the branch %s, which already continues from %s." branch
+              target))
+     ((rat-kingdom-git-ancestor-p path ref target)
+      (rat-kingdom-git path "update-ref" "-m" "rat-kingdom: epic branch"
+                       ref (rat-kingdom-git-rev path target)
+                       (rat-kingdom-git-rev path ref))
+      (format "Moved the branch %s, which had no commits of its own, forward \
+to %s." branch target))
+     (t
+      (error "The branch %s already exists and has diverged from %s: each \
+has commits the other lacks, so it is not a continuation of %s. Merge %s into \
+it, or delete it (git branch -D %s), then start the epic again"
+             branch target target target branch)))))
+
+(defun rat-kingdom-epic--token (record)
+  "Return what the landing check of the epic RECORD is recorded under."
+  (list :scope (plist-get record :scope) :identity (plist-get record :identity)))
+
+(defun rat-kingdom-epic--candidate (repo id)
+  "Return the candidate worktree the epic ID of REPO lands through."
+  (expand-file-name (format "candidates/%s/epic-%s" repo id)
+                    rat-kingdom-directory))
+
+(defun rat-kingdom-epic--remove-candidate (space record)
+  "Abandon the landing check of the epic RECORD in SPACE and remove its candidate."
+  (rat-kingdom-story--abandon-check (plist-get record :identity))
+  (when-let* ((candidate (rat-kingdom-epic--payload record :candidate))
+              (repo (rat-kingdom-repo-get space (plist-get record :scope))))
+    (with-demoted-errors "rat-kingdom: removing a candidate: %S"
+      (rat-kingdom-story--remove-candidate (plist-get repo :path) candidate))))
+
+(defun rat-kingdom-epic--stop-landing (space repo id why)
+  "Pause the epic ID of REPO in SPACE, whose landing cannot go on because WHY.
+Tell the king; `epic_resume' lands it again."
+  (rat-kingdom-space-with-transaction space
+    (when-let* ((record (rat-kingdom-epic--update
+                         space repo id
+                         (lambda (payload)
+                           (rat-kingdom-epic--set payload :state "paused"
+                                                  :landing nil :fix-task nil)))))
+      (rat-kingdom-epic--tell
+       space repo
+       (format "Epic %s could not land on %s: %s\nIt is paused. Fix the \
+cause, then epic_resume lands it again."
+               (rat-kingdom-epic--name record)
+               (rat-kingdom-epic--target space record) why)))))
+
+(defun rat-kingdom-epic--land (space repo id from)
+  "Begin landing the epic ID of REPO in SPACE, if it is in a state of FROM.
+Its feature branch is merged into its target in a fresh candidate
+worktree, and the repository's setup and check run there, by
+`rat-kingdom-story-check-candidate', as for a story.  The outcome is a
+`checked' tuple named by the epic, which
+`rat-kingdom-epic-landing-checked' takes from there.  The epic is
+`landing', waiting for the check, meanwhile.  If the check cannot be
+begun, the epic is paused and the king told.  Return non-nil if landing
+began."
+  (when-let* ((record (rat-kingdom-epic--update
+                       space repo id
+                       (lambda (payload)
+                         (when (member (plist-get payload :state) from)
+                           (rat-kingdom-epic--set
+                            payload :state "landing" :landing "check"
+                            :fix-task nil
+                            :candidate (rat-kingdom-epic--candidate repo id)))))))
+    (condition-case err
+        (let* ((repo-record (or (rat-kingdom-repo-get space repo)
+                                (error "The repository %s is no longer \
+registered" repo)))
+               (path (plist-get repo-record :path))
+               (branch (rat-kingdom-epic--payload record :branch)))
+          (rat-kingdom-story-check-candidate
+           space (rat-kingdom-epic--token record) path
+           (rat-kingdom-epic--target space record)
+           (rat-kingdom-git-rev path (concat "refs/heads/" branch))
+           (rat-kingdom-epic--payload record :candidate)
+           (format "Merge the epic %s: %s" id
+                   (rat-kingdom-epic--payload record :title))
+           (plist-get repo-record :check) (plist-get repo-record :setup)))
+      (error
+       (rat-kingdom-epic--stop-landing
+        space repo id (format "its check could not be begun: %s"
+                              (error-message-string err)))))
+    t))
+
+(defun rat-kingdom-epic--add-task (space repo id title description why)
+  "Add the task TITLE with DESCRIPTION to the epic ID of REPO in SPACE.
+It is work the epic's landing needs; WHY says what for, for the king.
+The epic runs again, its landing waiting for the task, and dispatch
+starts the task's story on the epic's branch.  Return (TASK . STARTED),
+STARTED being the stories started, as (TASK . STORY).  If the tracker
+fails, pause the epic instead, tell the king, and return nil."
+  (let ((task (condition-case err
+                  (rat-kingdom-task-create (rat-kingdom-epic--adapter space repo)
+                                           title :description description
+                                           :parent id)
+                (error
+                 (rat-kingdom-epic--stop-landing
+                  space repo id
+                  (format "%s, and the tracker failed to create a task in it \
+to put that right: %s" why (rat-kingdom-epic--message err)))
+                 nil))))
+    (when task
+      (let ((record (rat-kingdom-epic--update
+                     space repo id
+                     (lambda (payload)
+                       (rat-kingdom-epic--set payload :state "running"
+                                              :landing "fix" :fix-task task
+                                              :reviewed nil)))))
+        (rat-kingdom-epic--tell
+         space repo
+         (format "Epic %s cannot land on %s yet: %s. Created the task %s in \
+it (%s); the engine starts its story on %s, and when it is merged the epic \
+lands again."
+                 (rat-kingdom-epic--name record)
+                 (rat-kingdom-epic--target space record) why task title
+                 (rat-kingdom-epic--payload record :branch)))
+        (with-demoted-errors "rat-kingdom: projecting tasks: %S"
+          (rat-kingdom-task-project space repo))
+        (cons task (rat-kingdom-epic-dispatch space repo id))))))
+
+(defun rat-kingdom-epic--landing-problem (record target checked)
+  "Return the description of the task that puts right a failed landing.
+RECORD is the epic, TARGET where it lands, and CHECKED the outcome of
+its landing check."
+  (let* ((branch (rat-kingdom-epic--payload record :branch))
+         (name (rat-kingdom-epic--name record))
+         (conflict (equal (plist-get checked :reason) "merge conflict")))
+    (concat
+     (pcase (plist-get checked :reason)
+       ("merge conflict"
+        (format "The epic %s cannot land on %s: its branch %s no longer \
+merges cleanly into %s, which has moved on since." name target branch target))
+       ("setup failed"
+        (format "The epic %s cannot land on %s: with its branch %s merged \
+into %s, the repository's setup %s exited with %s, so the check did not run."
+                name target branch target
+                (combine-and-quote-strings (plist-get checked :setup))
+                (plist-get checked :exit)))
+       (_
+        (format "The epic %s cannot land on %s: with its branch %s merged \
+into %s, the check %s exited with %s."
+                name target branch target
+                (combine-and-quote-strings (plist-get checked :check))
+                (plist-get checked :exit))))
+     (format "\n\nMerge %s into your branch (git merge %s), %s, make sure the \
+repository's check passes, and commit. Your branch is cut from %s and your \
+work is merged into it; then the epic tries to land again.\n\n%s\n%s"
+             target target
+             (if conflict "resolve the conflicts" "fix what breaks")
+             branch
+             (if conflict "Files in conflict:" "The end of its output:")
+             (or (plist-get checked :output) "")))))
+
+(defun rat-kingdom-epic--landing-failed (space record checked)
+  "Turn the failed landing check CHECKED of the epic RECORD in SPACE into work.
+A task in the epic, to merge the target into the epic's branch and fix
+what breaks, is started on that branch."
+  (let ((target (rat-kingdom-epic--target space record)))
+    (rat-kingdom-epic--add-task
+     space (plist-get record :scope) (plist-get record :identity)
+     (format "Merge %s into the epic branch and fix what breaks" target)
+     (rat-kingdom-epic--landing-problem record target checked)
+     (pcase (plist-get checked :reason)
+       ("merge conflict" (format "its branch no longer merges cleanly into \
+%s, which has moved on (in conflict: %s)"
+                                 target
+                                 (string-join
+                                  (split-string (or (plist-get checked :output)
+                                                    "")
+                                                "\n" t)
+                                  ", ")))
+       ("setup failed" "the repository's setup failed with the branch merged")
+       (_ (format "the check failed with the branch merged (exit %s)"
+                  (plist-get checked :exit)))))))
+
+(defun rat-kingdom-epic--landed (space repo id head)
+  "Mark the epic ID of REPO in SPACE done, its target moved to HEAD.
+Remove its candidate, close the br epic and tell the king.  The
+epic's branch is kept."
+  (let* ((record (rat-kingdom-epic-record space id repo))
+         (target (rat-kingdom-epic--target space record))
+         (short (substring head 0 (min 7 (length head))))
+         (closed (rat-kingdom-epic--problem
+                  #'rat-kingdom-task-close (rat-kingdom-epic--adapter space repo)
+                  id (format "Landed on %s at %s" target short))))
+    (rat-kingdom-epic--remove-candidate space record)
+    (rat-kingdom-space-with-transaction space
+      (rat-kingdom-epic--update
+       space repo id
+       (lambda (payload)
+         (rat-kingdom-epic--set payload :state "done" :landing nil
+                                :landed head
+                                :finished (funcall rat-kingdom-space-now-function))))
+      (rat-kingdom-epic--tell
+       space repo
+       (format "Epic %s landed on %s at %s: %d stories.%s Its branch %s is \
+kept for the user to delete (git branch -d %s)."
+               (rat-kingdom-epic--name record) target short
+               (length (rat-kingdom-epic--payload record :merged))
+               (if closed
+                   (format " The br epic %s could not be closed: %s" id closed)
+                 (format " The br epic %s is closed." id))
+               (rat-kingdom-epic--payload record :branch)
+               (rat-kingdom-epic--payload record :branch))))))
+
+(defun rat-kingdom-epic--move-target (space repo id)
+  "Land the epic ID of REPO in SPACE, whose landing passed its check and review.
+Move its target to the checked merge with a compare-and-swap, as a
+story's merge does: only if the target is still where the check found
+it.  Return the commit the target is now at if the epic landed.  If
+the target or the epic's branch moved after the check, land again,
+checking anew, and return nil.  Signal an error if the target is
+checked out in a worktree."
+  (let* ((record (rat-kingdom-epic-record space id repo))
+         (path (plist-get (or (rat-kingdom-repo-get space repo)
+                              (error "The repository %s is no longer \
+registered" repo))
+                          :path))
+         (target (rat-kingdom-epic--target space record))
+         (branch (rat-kingdom-epic--payload record :branch))
+         (head (rat-kingdom-epic--payload record :head))
+         (base (rat-kingdom-epic--payload record :base))
+         (current (rat-kingdom-git-rev path target))
+         (stale
+          (cond
+           ((equal current head) nil)
+           ((not (equal (rat-kingdom-git-rev path (concat "refs/heads/" branch))
+                        (rat-kingdom-epic--payload record :commit)))
+            t)
+           ((not (equal current base)) t)
+           ((rat-kingdom-git-checked-out-p path target)
+            (error "%s is checked out in a worktree of %s. Check out another \
+branch there, then give the verdict again" target repo))
+           ;; Moves the target only if it is still where the check began.
+           (t (not (rat-kingdom-git-ok-p
+                    path "update-ref" "-m"
+                    (format "rat-kingdom: land the epic %s" id)
+                    (concat "refs/heads/" target) head base))))))
+    (if stale
+        (progn (rat-kingdom-epic--land space repo id '("landing"))
+               nil)
+      (rat-kingdom-epic--landed space repo id head)
+      head)))
+
+(defun rat-kingdom-epic--landing-checked (space repo id checked)
+  "Move on the epic ID of REPO in SPACE, whose landing check came out CHECKED.
+CHECKED is the payload of the `checked' tuple, which is retracted.  A
+check that failed, or a merge that conflicted, becomes a task of the
+epic (`rat-kingdom-epic--landing-failed').  One that passed asks the
+king for a review, unless the same branch was reviewed already, which
+happens when the target moved after the verdict: then the epic lands."
+  (rat-kingdom-space-retract space (list 'checked :scope repo :identity id)
+                             :actor "engine")
+  (let ((record (rat-kingdom-epic-record space id repo)))
+    (if (not (equal (plist-get checked :value) "pass"))
+        (rat-kingdom-epic--landing-failed space record checked)
+      (let ((reviewed (and (rat-kingdom-epic--payload record :reviewed)
+                           (equal (rat-kingdom-epic--payload record :reviewed)
+                                  (plist-get checked :commit))))
+            (record (rat-kingdom-epic--update
+                     space repo id
+                     (lambda (payload)
+                       (rat-kingdom-epic--set
+                        payload :landing "review"
+                        :commit (plist-get checked :commit)
+                        :base (plist-get checked :base)
+                        :head (plist-get checked :head))))))
+        (if reviewed
+            (condition-case err
+                (rat-kingdom-epic--move-target space repo id)
+              (error
+               (rat-kingdom-epic--tell
+                space repo
+                (format "Epic %s passed its check again but could not land: \
+%s\nGive epic_verdict pass again once that is put right."
+                        (rat-kingdom-epic--name record)
+                        (error-message-string err)))))
+          (rat-kingdom-epic--tell
+           space repo
+           (format "Epic %s is ready to land on %s: %d stories, review with \
+epic_diff and give epic_verdict."
+                   (rat-kingdom-epic--name record)
+                   (rat-kingdom-epic--target space record)
+                   (length (rat-kingdom-epic--payload record :merged)))))))))
+
+(rat-kingdom-defreaction rat-kingdom-epic-landing-checked
+  "Move on an epic whose landing check has come out."
+  :read ((epic :scope $repo :identity $epic :state landing :landing check)
+         (checked :scope $repo :identity $epic))
+  (let ((space rat-kingdom-reaction-space))
+    (rat-kingdom-epic--landing-checked
+     space $repo $epic
+     (plist-get (rat-kingdom-space-rd space (list 'checked :scope $repo
+                                                  :identity $epic))
+                :payload))))
+
+(defun rat-kingdom-epic-verdict (space id value &optional notes)
+  "Act on the verdict VALUE on the epic ID in SPACE, which waits for one.
+VALUE is \"pass\" or \"fix\".  Pass moves the epic's target to the
+checked merge of its branch, and the epic is done; if the target or the
+branch moved after the check, the epic is checked again and lands
+without another review.  Fix, with NOTES saying what to change, adds a
+task to the epic with NOTES as its description, which is started on
+the epic's branch, and the epic lands again once it is merged.  Return
+a text saying what happened."
+  (let* ((record (rat-kingdom-epic--get space id))
+         (repo (plist-get record :scope))
+         (value (rat-kingdom-workflow--name value)))
+    (unless (and (equal (rat-kingdom-epic--payload record :state) "landing")
+                 (equal (rat-kingdom-epic--payload record :landing) "review"))
+      (error "The epic %s is not waiting for a verdict: it is %s%s" id
+             (rat-kingdom-epic--payload record :state)
+             (if-let* ((phrase (rat-kingdom-epic--landing-phrase space record)))
+                 (format "; %s" phrase)
+               ", with no feature branch")))
+    (unless (member value '("pass" "fix"))
+      (error "A verdict is pass or fix, not %s" value))
+    (when (and (equal value "fix") (rat-kingdom-epic--blank-p notes))
+      (error "A verdict of fix needs notes that say what to change"))
+    (if (equal value "pass")
+        (progn
+          (rat-kingdom-epic--update
+           space repo id
+           (lambda (payload)
+             (plist-put payload :reviewed (plist-get payload :commit)))
+           rat-kingdom-king-id)
+          (if-let* ((head (rat-kingdom-epic--move-target space repo id)))
+              (format "Landed the epic %s on %s at %s. It is done and the br \
+epic is closed. Its branch %s is kept for the user to delete."
+                      (rat-kingdom-epic--name record)
+                      (rat-kingdom-epic--target space record)
+                      (substring head 0 7)
+                      (rat-kingdom-epic--payload record :branch))
+            (format "Recorded. %s or the epic's branch moved after the check, \
+so the epic is checked again on top of it; if that passes it lands without \
+another review."
+                    (rat-kingdom-epic--target space record))))
+      (rat-kingdom-epic--remove-candidate space record)
+      (if-let* ((added (rat-kingdom-epic--add-task
+                        space repo id
+                        (format "Fix what the review of the epic %s asked for"
+                                id)
+                        notes "the review asked for changes")))
+          (format "Recorded. Created the task %s in the epic with your notes. \
+%s When it is merged, the epic is checked and lands again, after another \
+epic_verdict."
+                  (car added)
+                  (if-let* ((story (cdr (assoc (car added) (cdr added)))))
+                      (format "Started %s for it on %s." story
+                              (rat-kingdom-epic--payload record :branch))
+                    (format "It starts on %s when the epic has room."
+                            (rat-kingdom-epic--payload record :branch))))
+        "The tracker could not create a task for your notes, so the epic is \
+paused; see the news. epic_resume lands it again."))))
+
+(defun rat-kingdom-epic-reconcile (space)
+  "Run again in SPACE each landing check that an Emacs that stopped cut off.
+That is the check of a landing epic that is not running here and has
+recorded no outcome; it is begun afresh in a new candidate, as an
+interrupted story check is.  Return the ids of the epics checked again."
+  (let (found)
+    (dolist (record (rat-kingdom-space-scan
+                     space '(epic :state "landing" :landing "check")))
+      (let ((id (plist-get record :identity))
+            (repo (plist-get record :scope)))
+        (unless (or (gethash id rat-kingdom-story--checks)
+                    (rat-kingdom-space-rd space (list 'checked :scope repo
+                                                      :identity id)))
+          (when (rat-kingdom-epic--land space repo id '("landing"))
+            (push id found)))))
+    (nreverse found)))
+
+(defun rat-kingdom-epic--landing-phrase (space record)
+  "Return what the epic RECORD in SPACE has to say of its feature branch.
+Return nil if it has none."
+  (when-let* ((branch (rat-kingdom-epic--payload record :branch)))
+    (format "branch %s, landing on %s: %s" branch
+            (rat-kingdom-epic--target space record)
+            (pcase (list (rat-kingdom-epic--payload record :state)
+                         (rat-kingdom-epic--payload record :landing))
+              (`("landing" "check")
+               "waiting for the check of the branch merged into it")
+              (`("landing" "review")
+               "waiting for your review (epic_diff, then epic_verdict)")
+              (`(,_ "fix")
+               (format "waiting for the task %s to be merged, then checked \
+again"
+                       (rat-kingdom-epic--payload record :fix-task)))
+              (`("done" ,_)
+               (if-let* ((landed (rat-kingdom-epic--payload record :landed)))
+                   (format "landed at %s" (substring landed 0 7))
+                 "done"))
+              (`("cancelled" ,_) "cancelled; the branch is kept")
+              (_ "once every task is closed, after one check and \
+epic_verdict")))))
 
 (defun rat-kingdom-epic--story-event (space event story)
   "Keep the epic of the token STORY in SPACE up to date after EVENT.
@@ -1075,6 +1543,9 @@ gives them."
            (delq nil
                  (list
                   (format "%s, %s" head (rat-kingdom-epic--progress record tasks))
+                  (when-let* ((phrase (rat-kingdom-epic--landing-phrase
+                                       space record)))
+                    (concat "    " phrase))
                   (and stories
                        (format "    in progress: %s"
                                (mapconcat
@@ -1149,7 +1620,7 @@ For `rat-kingdom-king-status-functions'."
                                   task))
                         (rat-kingdom-epic--tasks space record))))
     (concat
-     (format "Epic %s in %s: %s\nState: %s%s. %s.\n"
+     (format "Epic %s in %s: %s\nState: %s%s. %s.\n%s"
              id (plist-get record :scope) (plist-get payload :title)
              (rat-kingdom-epic--state-phrase record)
              (cond ((plist-get payload :finished)
@@ -1161,7 +1632,10 @@ For `rat-kingdom-king-status-functions'."
                             (rat-kingdom-king--age
                              (round (- now (plist-get payload :started))))))
                    (t ""))
-             (rat-kingdom-epic--progress record tasks))
+             (rat-kingdom-epic--progress record tasks)
+             (if-let* ((phrase (rat-kingdom-epic--landing-phrase space record)))
+                 (format "Feature %s.\n" phrase)
+               ""))
      "\n| task | title | status | story | agent | waits on |\n"
      "|---|---|---|---|---|---|\n"
      (mapconcat
@@ -1300,6 +1774,10 @@ workers run at once" rat-kingdom-story-max-workers))
             (pcase state
               ("running" "The engine starts the other stories as their tasks \
 become ready; review them as usual.")
+              ("landing" (format "Every task is closed, so the epic is \
+landing: %s."
+                                 (rat-kingdom-epic--landing-phrase space
+                                                                   record)))
               ("done" (format "Every task is closed, so the epic is done."))
               (_ nil))))
      "\n\n")))
@@ -1311,13 +1789,22 @@ become ready; review them as usual.")
   (unless (memq space rat-kingdom-reaction--running)
     (rat-kingdom-reaction-run space)))
 
-(defun rat-kingdom-epic-start (space repo id &optional max-parallel)
+(defun rat-kingdom-epic-start (space repo id &optional max-parallel
+                                    feature-branch)
   "Start running the epic ID of REPO in SPACE.
 At most MAX-PARALLEL of its stories are in progress at once, if given.
 Signal an error if ID is not an epic in REPO's tracker, has no tasks, is
-already running, is paused or is done.  A cancelled epic is started
-again, with no task held.  Write its record as running and dispatch it.
-Return the started stories as (TASK . STORY)."
+already running, is paused, is landing or is done.  A cancelled epic is
+started again, with no task held.  Write its record as running and
+dispatch it.  Return the started stories as (TASK . STORY).
+
+With FEATURE-BRANCH non-nil, the epic gets a branch of its own,
+`rat-kingdom-epic-branch-name', cut from the head of REPO's target, or
+the existing branch of that name if it continues from the target (see
+`rat-kingdom-epic--prepare-branch').  Every story of the epic merges
+into it, and once every task is closed the epic lands on the target as
+one, after one check and `epic_verdict'.  The record keeps the branch
+as `:branch' and the target as `:target'."
   (let* ((adapter (rat-kingdom-epic--adapter space repo))
          (epic (condition-case err
                    (rat-kingdom-task-show adapter id)
@@ -1329,6 +1816,8 @@ Return the started stories as (TASK . STORY)."
     (pcase (rat-kingdom-epic--payload record :state)
       ("running" (error "The epic %s is already running" id))
       ("paused" (error "The epic %s is paused; resume it with epic_resume" id))
+      ("landing" (error "The epic %s is landing on its target; see epic_show"
+                        id))
       ("done" (error "The epic %s is done: all its tasks are closed" id)))
     (when (and max-parallel (not (and (integerp max-parallel)
                                       (> max-parallel 0))))
@@ -1338,17 +1827,51 @@ not %s"
     (unless (rat-kingdom-task-children adapter id)
       (error "The epic %s has no tasks; plan them with epic_create or \
 task_create" id))
-    (rat-kingdom-space-put
-     space 'epic :scope repo :identity id
-     :payload (list :state "running" :title (plist-get epic :title)
-                    :max-parallel max-parallel :held nil
-                    :merged (rat-kingdom-epic--payload record :merged)
-                    :started (funcall rat-kingdom-space-now-function)
-                    :finished nil)
-     :actor rat-kingdom-king-id)
+    (let* ((target (and feature-branch
+                        (plist-get (rat-kingdom-repo-get space repo) :target)))
+           (branch (and feature-branch (rat-kingdom-epic-branch-name id))))
+      (when branch
+        (rat-kingdom-epic--prepare-branch
+         (plist-get (rat-kingdom-repo-get space repo) :path) branch target))
+      (rat-kingdom-space-put
+       space 'epic :scope repo :identity id
+       :payload (append
+                 (list :state "running" :title (plist-get epic :title)
+                       :max-parallel max-parallel :held nil
+                       :merged (rat-kingdom-epic--payload record :merged)
+                       :started (funcall rat-kingdom-space-now-function)
+                       :finished nil)
+                 (and branch (list :branch branch :target target)))
+       :actor rat-kingdom-king-id))
     (rat-kingdom-task-project space repo)
     (unless (rat-kingdom-epic--finish-if-done space repo id)
       (rat-kingdom-epic-dispatch space repo id))))
+
+(defun rat-kingdom-epic--true-p (value)
+  "Return non-nil if VALUE, an argument from a tool call, means yes."
+  (and value
+       (not (member (downcase (string-trim (format "%s" value)))
+                    '("" "false" "no" "0" "nil" "off" ":false")))))
+
+(defun rat-kingdom-epic-diff (space id)
+  "Return the commits and combined diff of the feature branch of the epic ID.
+They are taken in SPACE against the target the epic lands on."
+  (let* ((record (rat-kingdom-epic--get space id))
+         (target (rat-kingdom-epic--target space record))
+         (branch (or (rat-kingdom-epic--payload record :branch)
+                     (error "The epic %s has no feature branch: its stories \
+merge into %s one by one, and story_diff shows each" id target)))
+         (path (plist-get (or (rat-kingdom-repo-get space
+                                                    (plist-get record :scope))
+                              (error "The repository %s is no longer \
+registered" (plist-get record :scope)))
+                          :path)))
+    (concat
+     (format "Epic %s: its branch %s against %s, with %d stories merged.\n\n"
+             (rat-kingdom-epic--name record) branch target
+             (length (rat-kingdom-epic--payload record :merged)))
+     (or (rat-kingdom-king-diff-text path target branch)
+         (format "%s has nothing that %s lacks." branch target)))))
 
 (defun rat-kingdom-epic--set-state (space id from to)
   "Move the epic ID in SPACE from the state FROM, a list, to TO.
@@ -1372,13 +1895,17 @@ Return its new record."
   "Cancel the epic ID in SPACE and every story of it in progress.
 The epic is marked cancelled first, so that nothing more is started
 for it and its tasks are not held.  Each story is cancelled as
-`rat-kingdom-story-cancel' does, which releases its task.  The tracker's
-epic and tasks are left open.  Return the cancelled stories as
-\(TASK . STORY)."
+`rat-kingdom-story-cancel' does, which releases its task.  A landing
+check is abandoned and its candidate removed.  The tracker's epic and
+tasks are left open, and a feature branch is kept.  Return the
+cancelled stories as \(TASK . STORY)."
   (let* ((record (rat-kingdom-epic--set-state
                   space id rat-kingdom-epic-live-states "cancelled"))
          (repo (plist-get record :scope))
          cancelled)
+    (rat-kingdom-epic--remove-candidate space record)
+    (rat-kingdom-space-retract space (list 'checked :scope repo :identity id)
+                               :actor rat-kingdom-king-id)
     (dolist (story (rat-kingdom-epic--stories space repo id))
       (rat-kingdom-story-cancel space (plist-get story :identity)
                                 rat-kingdom-king-id)
@@ -1421,10 +1948,18 @@ wait for a place, and the tasks still waiting, with what each waits on."
 gave it.")
       (:name "max_parallel" :type integer :optional t
        :description "At most this many of the epic's stories in progress at \
-once. Default no limit but the workers' cap."))
+once. Default no limit but the workers' cap.")
+      (:name "feature_branch" :type boolean :optional t
+       :description "true to give the epic a branch of its own, rk/epic/ID, \
+cut from the repository's target: its stories merge there instead, and the \
+target moves only once, when every task is closed, after one check of the \
+whole and your epic_verdict. Use it when the user wants the epic to land as \
+one unit. Default false: each story merges into the target as it passes."))
   (let* ((repo (arg 'repo))
          (id (arg 'epic))
-         (started (rat-kingdom-epic-start space repo id (arg 'max_parallel)))
+         (started (rat-kingdom-epic-start
+                   space repo id (arg 'max_parallel)
+                   (rat-kingdom-epic--true-p (arg 'feature_branch))))
          (record (rat-kingdom-epic-record space id repo)))
     (rat-kingdom-epic--run-reactions space)
     (rat-kingdom-epic--answer
@@ -1434,9 +1969,16 @@ once. Default no limit but the workers' cap."))
              (if (equal (rat-kingdom-epic--payload record :state) "running")
                  "running"
                (rat-kingdom-epic--payload record :state))
-             (if-let* ((limit (rat-kingdom-epic--payload record :max-parallel)))
-                 (format ", with at most %d stories at once" limit)
-               "")))))
+             (concat
+              (if-let* ((limit (rat-kingdom-epic--payload record :max-parallel)))
+                  (format ", with at most %d stories at once" limit)
+                "")
+              (if-let* ((branch (rat-kingdom-epic--payload record :branch)))
+                  (format ". Its stories merge into its feature branch %s; \
+%s lands only after every task is closed, one check of the whole, and your \
+epic_verdict"
+                          branch (rat-kingdom-epic--target space record))
+                ""))))))
 
 (rat-kingdom-king--deftool "epic_pause"
     "Pause a running epic: no new story of it starts, and those in progress \
@@ -1477,19 +2019,26 @@ in the tracker. Call it only when the user asks."
     '((:name "epic" :type string :description "The epic's id."))
   (let* ((record (rat-kingdom-epic--get space (arg 'epic)))
          (cancelled (rat-kingdom-epic-cancel space (arg 'epic))))
-    (format "Cancelled the epic %s. %sNothing more will be started for it. \
+    (concat
+     (format "Cancelled the epic %s. %sNothing more will be started for it. \
 The br epic %s and its tasks are left open in the tracker: close them with \
 br if they are not wanted, or run the epic again with epic_start."
-            (rat-kingdom-epic--name record)
-            (if cancelled
-                (format "Cancelled its stories %s; their tasks are released, \
+             (rat-kingdom-epic--name record)
+             (if cancelled
+                 (format "Cancelled its stories %s; their tasks are released, \
 and their worktrees and branches kept. "
-                        (mapconcat (lambda (entry)
-                                     (format "%s (task %s)" (cdr entry)
-                                             (car entry)))
-                                   cancelled ", "))
-              "It had no story in progress. ")
-            (arg 'epic))))
+                         (mapconcat (lambda (entry)
+                                      (format "%s (task %s)" (cdr entry)
+                                              (car entry)))
+                                    cancelled ", "))
+               "It had no story in progress. ")
+             (arg 'epic))
+     (if-let* ((branch (rat-kingdom-epic--payload record :branch)))
+         (format " Its feature branch %s is kept, with what its stories \
+merged; %s has not moved for it. Delete the branch with git branch -D %s if \
+it is not wanted, or carry on from it with epic_start and feature_branch."
+                 branch (rat-kingdom-epic--target space record) branch)
+       ""))))
 
 (rat-kingdom-king--deftool "epic_retry"
     "Let the engine start a held task of an epic again. A task is held when \
@@ -1523,6 +2072,27 @@ its story could not be started."
                             (cl-remove task started :key #'car :test #'equal)
                             ", "))
        ""))))
+
+(rat-kingdom-king--deftool "epic_diff"
+    "Show the commits and the combined diff of an epic's feature branch \
+against the target it lands on: everything its stories merged. Use it to \
+review the whole epic when it waits for your epic_verdict."
+    '((:name "epic" :type string :description "The epic's id."))
+  (rat-kingdom-epic-diff space (arg 'epic)))
+
+(rat-kingdom-king--deftool "epic_verdict"
+    "Give your verdict on an epic with a feature branch that waits for your \
+review before it lands. pass moves the target to the checked merge of the \
+epic's branch and the epic is done. fix adds a task to the epic with your \
+notes as its description; the engine starts it on the epic's branch, and the \
+epic lands again, after another review, once it is merged."
+    '((:name "epic" :type string :description "The epic's id.")
+      (:name "value" :type string :description "pass or fix.")
+      (:name "notes" :type string :optional t
+       :description "With fix: what to change, exact enough for a worker to \
+act on. It becomes the new task's description."))
+  (prog1 (rat-kingdom-epic-verdict space (arg 'epic) (arg 'value) (arg 'notes))
+    (rat-kingdom-epic--run-reactions space)))
 
 (rat-kingdom-king--deftool "epic_show"
     "Show one epic in full: its state and progress, and a table of its \

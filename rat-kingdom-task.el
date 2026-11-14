@@ -624,6 +624,8 @@ ignored."
         (with-demoted-errors "rat-kingdom: task settled function: %S"
           (funcall function space story))))))
 
+(declare-function rat-kingdom-story-target "rat-kingdom-story" (space story))
+
 (defun rat-kingdom-task-story-ended (space story)
   "Settle the task of the token STORY in SPACE, which has ended.
 If it was merged, close the task; otherwise release it.  This is done
@@ -633,7 +635,8 @@ from a timer, outside any transaction in progress."
       (run-at-time 0 nil #'rat-kingdom-task--settle
                    space (plist-get story :scope) task
                    (when-let* ((head (plist-get payload :integrated)))
-                     (format "Merged into %s at %s" (plist-get payload :target)
+                     (format "Merged into %s at %s"
+                             (rat-kingdom-story-target space story)
                              (substring head 0 (min 7 (length head)))))
                    story))))
 
