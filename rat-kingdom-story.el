@@ -125,6 +125,15 @@ made the change.")
 (add-hook 'rat-kingdom-story-event-functions #'rat-kingdom-story--announce t)
 (add-hook 'rat-kingdom-story-event-functions #'rat-kingdom-task-story-event t)
 
+(defvar rat-kingdom-story-brief-functions nil
+  "Functions that add sections to a worker's brief.
+Each is called with the space, the story's token and the id of the run
+being started, and returns a string, a section of the worker's prompt,
+or nil.  The sections are appended to the prompt in the order of this
+list, each after a blank line.  An error in one is reported and its
+section left out.  Add to it with `add-hook', so that reloading does
+not add a function twice.")
+
 (defvar rat-kingdom-story--actor "engine"
   "Who is recorded as moving tokens.")
 
@@ -338,10 +347,22 @@ then sync again." target target)))))
 
 ;;;; Spawning a worker
 
-(defun rat-kingdom-story--prompt (story run-id worktree branch target earlier)
-  "Return what the worker RUN-ID is told about the token STORY.
+(defun rat-kingdom-story--brief-sections (space story run-id)
+  "Return the sections `rat-kingdom-story-brief-functions' give, in order.
+Each is called with SPACE, the token STORY and RUN-ID."
+  (let (sections)
+    (dolist (function rat-kingdom-story-brief-functions)
+      (with-demoted-errors "rat-kingdom: brief function: %S"
+        (when-let* ((section (funcall function space story run-id)))
+          (push section sections))))
+    (nreverse sections)))
+
+(defun rat-kingdom-story--prompt (space story run-id worktree branch target
+                                        earlier)
+  "Return what the worker RUN-ID is told about the token STORY in SPACE.
 It works in WORKTREE on BRANCH, cut from TARGET.  EARLIER is non-nil
-if the story has been worked on before."
+if the story has been worked on before.  The sections from
+`rat-kingdom-story-brief-functions' come last."
   (let ((payload (plist-get story :payload)))
     (concat rat-kingdom-run-rat-instructions
             (format "\n\nYou are %s.\nWorktree: %s\nBranch: %s (cut from %s)\
@@ -355,7 +376,11 @@ if the story has been worked on before."
 is in your worktree. Before you change anything, look at \
 `git log %s..HEAD` and `git status`, then carry on from there.\n" target))
             (when-let* ((reason (plist-get payload :reason)))
-              (concat "\nWhy the task has come to you:\n" reason "\n")))))
+              (concat "\nWhy the task has come to you:\n" reason "\n"))
+            (mapconcat (lambda (section)
+                         (concat "\n" (string-trim-right section) "\n"))
+                       (rat-kingdom-story--brief-sections space story run-id)
+                       ""))))
 
 (defun rat-kingdom-story--worker-free-p (space id)
   "Return non-nil if the story ID in SPACE may start a worker now.
@@ -441,7 +466,7 @@ started when it succeeds, by `rat-kingdom-story-set-up'."
                :agent (plist-get payload :agent)
                :worktree worktree :branch branch :target target
                :prompt (rat-kingdom-story--prompt
-                        story run-id worktree branch target
+                        space story run-id worktree branch target
                         (or known (> attempt 1))))
               (rat-kingdom-story--wait space story step "worker"
                                        :run run-id :branch branch
