@@ -35,7 +35,9 @@
 ;;
 ;; Two tools are offered to a worker here: `finish' and `block'.
 ;; rat-kingdom-fact.el adds `note_fact', and rat-kingdom-message.el
-;; `inbox'.
+;; `inbox'.  A worker is a rat, which commits code, or a researcher,
+;; which writes docs; rat-kingdom-doc.el gives the researcher its own
+;; `finish' and its doc tools.
 ;;
 ;; A run need not belong to a story.  The king is a run too; see
 ;; rat-kingdom-king.el.
@@ -120,6 +122,42 @@ check `inbox` now and then, and always before you call `finish`.
   "What every worker is told before its task."
   :type 'string
   :group 'rat-kingdom)
+
+(defcustom rat-kingdom-run-researcher-instructions
+  "You are a researcher in a rat-kingdom swarm. You have one task: find \
+things out and write them down. Do it and nothing else.
+
+Rules:
+- Investigate the task in your worktree, and elsewhere as you need to: \
+read code, run read-only commands, look things up.
+- Write what you find with the `write_doc' tool of the rat-kingdom server: \
+a title and a Markdown body, and a topic if one fits. It answers with the \
+doc's id. To revise a doc, call `write_doc' again with its id. A doc is \
+read by the king, who reviews it, and once approved by every later worker \
+in this repository, so make each one stand on its own.
+- Read a doc you are told of with `read_doc'.
+- When you learn something a later worker in this repository would want to \
+know, such as a convention, a pitfall, how to build or test something, or \
+where something lives, record it with the `note_fact' tool.
+- Do not commit code. Your docs are your work; your worktree is for looking.
+- When your docs are written, call the `finish' tool with a summary and the \
+checks you ran, if any. It fails, and says why, if you have written no doc.
+- If you cannot finish, call the `block' tool and say what you need.
+- Messages from the king arrive between your turns; during a long turn, \
+check `inbox` now and then, and always before you call `finish`.
+- After `finish' or `block', stop. Do not start other work."
+  "What every researcher is told before its task.
+A researcher is the worker of a `research' story (rat-kingdom-doc.el)."
+  :type 'string
+  :group 'rat-kingdom)
+
+(defun rat-kingdom-run-instructions (role)
+  "Return what a worker in ROLE, a symbol or string, is told before its task.
+A researcher gets `rat-kingdom-run-researcher-instructions'; any other
+worker `rat-kingdom-run-rat-instructions'."
+  (if (equal (format "%s" role) "researcher")
+      rat-kingdom-run-researcher-instructions
+    rat-kingdom-run-rat-instructions))
 
 (defcustom rat-kingdom-run-ignored-paths '(".agent-shell/")
   "Paths in a worktree that the harness writes for itself.
@@ -417,7 +455,7 @@ example \"go test ./... passed\". Say so if you ran none."))
  "block"
  :description "Report that you cannot finish your task. Your work so far is \
 kept. After it succeeds, stop."
- :roles '(rat)
+ :roles '(rat researcher)
  :args '((:name "summary" :type string
           :description "What stopped you and what you need to go on."))
  :function #'rat-kingdom-run--block)
