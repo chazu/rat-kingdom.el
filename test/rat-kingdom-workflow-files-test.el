@@ -64,7 +64,8 @@ is a property list whose keys replace those of the workflow."
 (ert-deftest rat-kingdom-workflow-files-test-built-in-only ()
   (rat-kingdom-config-engine-test-with-repo (space _path)
     (should (equal (rat-kingdom-workflow-files-test--names space "demo")
-                   '(("story" . built-in) ("story-lite" . built-in))))
+                   '(("research" . built-in) ("story" . built-in)
+                     ("story-lite" . built-in))))
     (should (equal (rat-kingdom-config-workflow space 'story "demo")
                    (rat-kingdom-workflow-get 'story)))
     (should-not (rat-kingdom-config-workflow space "nothing" "demo"))
@@ -227,8 +228,8 @@ is a property list whose keys replace those of the workflow."
           (good (rat-kingdom-workflow-files-test--global
                  "good.eld" (rat-kingdom-workflow-files-test--spec 'good))))
       (should (equal (rat-kingdom-workflow-files-test--names space "demo")
-                     '(("good" . global) ("story" . built-in)
-                       ("story-lite" . built-in))))
+                     '(("good" . global) ("research" . built-in)
+                       ("story" . built-in) ("story-lite" . built-in))))
       (should (string-search "The start b is not a place"
                              (rat-kingdom-workflow-files-test--error unsound)))
       (should (string-search "a list is not closed"
@@ -261,6 +262,66 @@ is a property list whose keys replace those of the workflow."
       (should-not (rat-kingdom-config-errors))
       (should-not (string-search "Configuration ignored"
                                  (rat-kingdom-king-status space))))))
+
+(ert-deftest rat-kingdom-workflow-files-test-new-step-kinds ()
+  (rat-kingdom-config-engine-test-with-repo (space path)
+    (let ((composed
+           (rat-kingdom-workflow-files-test--repo
+            path "composed.eld"
+            (rat-kingdom-workflow-files-test--spec
+             'composed
+             :places '(todo checking formatting waiting linting integrating
+                            done blocked)
+             :steps '((implement :from todo :spawn rat :to checking
+                                 :brief "Write failing tests first.")
+                      (check :from checking :check (lint test)
+                             :pass formatting :fail todo)
+                      (format :from formatting :run (format) :pass waiting)
+                      (wait :from waiting :gate (:signal approve) :to linting)
+                      (lint :from linting :workflow lint-only
+                            :to integrating :fail todo)
+                      (integrate :from integrating :merge t :to done
+                                 :stale checking)))))
+          (unknown-kind
+           (rat-kingdom-workflow-files-test--repo
+            path "frob.eld"
+            (rat-kingdom-workflow-files-test--spec
+             'frob
+             :steps '((implement :from todo :frobnicate t :to checking)
+                      (check :from checking :check t :pass integrating)
+                      (integrate :from integrating :merge t :to done)))))
+          (bad-value
+           (rat-kingdom-workflow-files-test--repo
+            path "late.eld"
+            (rat-kingdom-workflow-files-test--spec
+             'late
+             :places '(todo waiting checking integrating done blocked)
+             :steps '((implement :from todo :spawn rat :to waiting)
+                      (wait :from waiting :gate (:after 0) :to checking)
+                      (check :from checking :check t :pass integrating
+                             :brief "No.")
+                      (integrate :from integrating :merge t :to done))))))
+      (should-not (rat-kingdom-workflow-files-test--error composed))
+      (let ((workflow (rat-kingdom-config-workflow space 'composed "demo")))
+        (should workflow)
+        (should (equal (plist-get (rat-kingdom-workflow-step-named
+                                   workflow "implement")
+                                  :brief)
+                       "Write failing tests first."))
+        (should (eq (plist-get (rat-kingdom-workflow-step-named
+                                workflow "lint")
+                               :kind)
+                    :workflow)))
+      (should-not (assoc "frob" (rat-kingdom-workflow-files-test--names
+                                 space "demo")))
+      (should (string-search "Step implement needs exactly one of"
+                             (rat-kingdom-workflow-files-test--error
+                              unknown-kind)))
+      (should-not (assoc "late" (rat-kingdom-workflow-files-test--names
+                                 space "demo")))
+      (let ((error (rat-kingdom-workflow-files-test--error bad-value)))
+        (should (string-search "a gate is (:after SECONDS)" error))
+        (should (string-search "only a spawn step may have" error))))))
 
 (ert-deftest rat-kingdom-workflow-files-test-same-name-twice ()
   (rat-kingdom-config-engine-test-with-repo (space _path)
@@ -317,15 +378,15 @@ is a property list whose keys replace those of the workflow."
         (should (string-search (format "quick: The workflow quick.\n  (global, \
 from %s)\n" quick) text))
         (should (string-search "Repository demo has: mine (its own), quick \
-\(global), story (built-in), story-lite (its own)." text))
-        (should (string-search "Repository other has: quick (global), story \
-\(built-in), story-lite (built-in)." text))
+\(global), research (built-in), story (built-in), story-lite (its own)." text))
+        (should (string-search "Repository other has: quick (global), research \
+\(built-in), story (built-in), story-lite (built-in)." text))
         (should (string-search (format "mine: The workflow mine.\n  (this \
 repository's own, from %s)\n" mine) text))
         (should (string-search (format "story-lite: The workflow story-lite.\n\
   (this repository's own, from %s; it shadows the built-in one)\n" lite)
                                text))
-        (should (string-search "Workflow files ignored" text))
+        (should (string-search "Workflow and mixin files ignored" text))
         (should (string-search broken text)))
       ;; For one repository.
       (let ((text (rat-kingdom-king-workflow-list space "other")))
