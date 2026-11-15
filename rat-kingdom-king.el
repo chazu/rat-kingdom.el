@@ -213,7 +213,8 @@ See `rat-kingdom-king-story-note-functions'."
 (defun rat-kingdom-king--waiting-detail (space story)
   "Return what the token STORY in SPACE waits on, in words, or nil.
 For a gate that is when it opens or the signal it waits for; for a
-`:run' step the commands it runs and the one running now."
+`:run' step the commands it runs and the one running now; for a
+`:workflow' step its child story and where that is."
   (let* ((payload (plist-get story :payload))
          (now (funcall rat-kingdom-space-now-function)))
     (pcase (plist-get payload :awaiting)
@@ -230,6 +231,12 @@ For a gate that is when it opens or the signal it waits for; for a
                      "overdue; it opens at the watchdog's next look")))
           (signal
            (format "the signal %s; send it with story_signal" signal)))))
+      ("child"
+       (let ((child (plist-get payload :child)))
+         (if-let* ((token (rat-kingdom-story-get space child)))
+             (format "the child story %s, at %s" child
+                     (plist-get (plist-get token :payload) :at))
+           (format "the child story %s, which is gone" child))))
       ("run"
        (let ((names (plist-get (rat-kingdom-story--step space story) :with))
              (running (rat-kingdom-story-running
@@ -281,6 +288,30 @@ For a gate that is when it opens or the signal it waits for; for a
                  space (list 'stuck :identity (plist-get story :identity)))
                 "\n    STUCK; see story_show"
               ""))))
+
+(defun rat-kingdom-king--story-lines (space stories)
+  "Return the lines describing the tokens STORIES in SPACE, one per story.
+A child story's line follows its parent's, indented two spaces for each
+level it is nested; one whose parent is not among STORIES is listed as
+if it had none."
+  (let ((ids (mapcar (lambda (story) (plist-get story :identity)) stories))
+        lines)
+    (cl-labels
+        ((add (story depth)
+           (let ((indent (make-string (* 2 depth) ?\s)))
+             (push (concat indent
+                           (string-replace
+                            "\n" (concat "\n" indent)
+                            (rat-kingdom-king--story-line space story)))
+                   lines))
+           (dolist (child stories)
+             (when (equal (plist-get (plist-get child :payload) :parent)
+                          (plist-get story :identity))
+               (add child (1+ depth))))))
+      (dolist (story stories)
+        (unless (member (plist-get (plist-get story :payload) :parent) ids)
+          (add story 0))))
+    (string-join (nreverse lines) "\n")))
 
 (defun rat-kingdom-king--available (space repos)
   "Return lines listing the tasks available in SPACE.
@@ -439,8 +470,7 @@ another."
      (rat-kingdom-king--config-errors space repos)
      "\n\nStories in progress:\n"
      (if stories
-         (mapconcat (lambda (story) (rat-kingdom-king--story-line space story))
-                    stories "\n")
+         (rat-kingdom-king--story-lines space stories)
        "- none")
      (mapconcat (lambda (section) (concat "\n\n" (string-trim-right section)))
                 (rat-kingdom-king--status-sections space) "")
@@ -528,6 +558,23 @@ see `rat-kingdom-king-story-start'."
                                                       :title))
                                            ""))
                                "")))
+                (and (plist-get payload :parent)
+                     (format "Child story of %s, in its worktree and on \
+its branch"
+                             (plist-get payload :parent)))
+                (when-let* ((children (plist-get payload :children)))
+                  (format "Child stories: %s"
+                          (mapconcat
+                           (lambda (child)
+                             (format "%s (%s)" child
+                                     (if-let* ((token (rat-kingdom-story-get
+                                                       space child)))
+                                         (format "at %s"
+                                                 (plist-get
+                                                  (plist-get token :payload)
+                                                  :at))
+                                       "over")))
+                           children ", ")))
                 (format "Agent: %s" (rat-kingdom-king--agent payload))
                 (format "Workflow %s; at %s%s%s"
                         (plist-get payload :workflow) (plist-get payload :at)
@@ -738,8 +785,10 @@ to the epic's foreman while it has one running."
   (let* ((payload (plist-get story :payload))
          (id (plist-get story :identity))
          (name (rat-kingdom-story--title story))
+         ;; A child story's news goes where its parent's does.
          (route (rat-kingdom-king-route space (plist-get story :scope)
-                                        (plist-get payload :epic)))
+                                        (rat-kingdom-story--config-epic
+                                         payload)))
          (to (car route))
          (notes (rat-kingdom-king--news-notes space event story))
          (text

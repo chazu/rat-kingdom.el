@@ -222,11 +222,10 @@ parked. A target branch that moved after the check leads back to
 Workers are capped; the rest queue (section 7.2).
 
 **Spec: workflow composition**, step 8 of the build order (section 15).
-The rest of this section says what the engine is to do. Built so far:
-the step kinds `:run` and `:gate`, `:check (NAME ...)`, `:brief` on a
-spawn step, and the king's `story_signal`; the shape of every kind's
-value is validated. The rest is not built yet: `:workflow` steps fail to
-begin, saying the kind is not supported yet.
+The rest of this section says what the engine is to do. Built: the step
+kinds `:run`, `:gate` and `:workflow` (child stories, below),
+`:check (NAME ...)`, `:brief` on a spawn step, and the king's
+`story_signal`; the shape of every kind's value is validated.
 
 The starting workflows are `story`, `story-lite` (no review) and
 `research` (writes docs, no code; below). **Epics are not a workflow.**
@@ -369,9 +368,15 @@ workflow NAME in the parent's worktree, on its branch, from its commit.
 - Its spawn steps find the worktree and branch already there, so no setup
   runs, and each worker is told of the earlier work. It has its own count
   of workers.
-- A child's workflow may not have a `:merge` step. A NAME whose expansion
-  has one, or that is not a workflow, makes the parent's step fail to
-  begin.
+- A NAME that is not a workflow, or whose expansion fails, makes the
+  parent's step fail to begin. A child's workflow may have a `:merge`
+  step: it moves the target as any story's does, but leaves the shared
+  worktree and branch, and the parent takes its `:integrated`. A parent
+  that ends with `:integrated` taken from a child has its worktree and
+  branch removed then, as its own merge would have.
+- A child is never complete (`rat-kingdom-story-complete-p`): its end
+  closes no task, and a child whose workflow merges nothing does not
+  remove the worktree as a research story's end does.
 - **Limits.** Before the child starts, the engine follows the `:workflow`
   steps of NAME's expansion, and of theirs in turn, for the story's
   configuration. The step fails to begin if that would make a story
@@ -381,8 +386,12 @@ workflow NAME in the parent's worktree, on its branch, from its commit.
   `:child`. It holds no worker.
 - When the child reaches a final place, it is archived as any story is,
   and in the same transaction the parent takes the child's `:commit`,
-  `:head` and `:base` (each one the child has; one it lacks stays as the
-  parent had it) and leaves by `:to`.
+  `:head`, `:base`, `:summary`, `:integrated`, `:integrate` and
+  `:reviewed` (each one the child has; one it lacks stays as the parent
+  had it) and leaves by `:to`. Either way the parent takes the child's
+  `:worktree` and `:branch` if it had none, as when the child's spawn step
+  made the worktree, where the parent's own would be. The child's
+  candidate is removed.
 - When the child reaches its failure place, or is parked anywhere else,
   it is archived, and in the same transaction the parent leaves by `:fail`
   with the child's reason: "The child S-1a2b/lint stopped at blocked:
@@ -395,7 +404,14 @@ workflow NAME in the parent's worktree, on its branch, from its commit.
 - `status` shows the child on its own line, indented under its parent's,
   and `story_show` of either names the other.
 - The watchdog reports as stuck a parent that waits for "child" when the
-  child's token is gone.
+  child's token is gone, and reconciling (8.4) sends such a parent on by
+  `:fail`: "The child S-1a2b/lint is gone".
+
+**Built** (`rat-kingdom-story.el`, `rat-kingdom-king.el`): child stories
+as above. A child that is parked is not news: its parent's step says
+why. `rat-kingdom-story-children` gives a story's children in progress,
+and the parent's token keeps `:children`, the ids of every child it
+started, which `story_show` lists.
 
 **Mixins and aspects.**
 
@@ -644,7 +660,7 @@ is never reused.
 
 All of this is built.
 
-**Spec** (7.1), built except for child stories: a story waiting in a
+**Spec** (7.1), built: a story waiting in a
 `:run` step has a process, as a
 check does, and the watchdog reports it stuck if that is not running or
 has run past the check's limit. A story waiting at a gate, or a parent
@@ -1866,8 +1882,9 @@ wait longer for review than for implementation.
    and the king's `config_show` and validated `config_set`. Mixins and
    aspects are step 8.
 8. **Workflow composition** (this epic; spec in 7.1, 7.3, 8.3, 9 and 11;
-   built so far: `:brief`, named checks, `:run`, `:gate`, `story_signal`,
-   the research workflow and docs, and the git options):
+   built so far: `:brief`, named checks, `:run`, `:gate`, `:workflow`
+   with child stories, `story_signal`, the research workflow and docs,
+   and the git options):
    - step kinds: `:spawn` with `:brief`, `:check` with named commands,
      `:run`, `:gate` and `:workflow` with child stories;
    - mixins and aspects, expanded at lookup, the built-in `no-review` and
