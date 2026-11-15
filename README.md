@@ -473,6 +473,15 @@ not hold together is ignored, and the king's `status` says why. Files
 are read again when they change, and a changed workflow applies from a
 story's next move. `workflow_list` shows where each workflow comes from.
 
+Not built yet, and specified in DESIGN.md (section 7.1, step 8 of the
+build order): steps that run named commands (`:run`), wait for a time or a
+signal (`:gate`) or run a child workflow (`:workflow`); mixins such as
+`no-review` and `tdd` and aspects such as `(:after implement :run
+(format))`, with a `:mixins` configuration key; a `research` workflow whose
+researcher writes docs that every later worker is told of; and a `:git`
+key for branch names and for merging, rebasing or squashing into the
+target.
+
 ## Requirements
 
 Emacs 29.1 or later, built with SQLite support, Git, and br (Rust Beads)
