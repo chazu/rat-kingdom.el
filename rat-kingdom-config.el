@@ -20,7 +20,8 @@
 ;;
 ;;   defaults      the existing user options, `rat-kingdom-config-defaults'
 ;;   global        config.eld in `rat-kingdom-directory'
-;;   registration  :workflow :target :check :setup on the `repo' tuple
+;;   registration  :workflow :target :check :setup :mixins on the `repo'
+;;                 tuple
 ;;   repo          .rk/config.eld in the repository's checkout (its :path)
 ;;   epic          the epic's `policy' tuple
 ;;   task          the task's `policy' tuple
@@ -79,6 +80,17 @@
 ;; built-in workflows), and `rat-kingdom-config-workflow' resolves one
 ;; name in it.  The engine looks a story's workflow up there each time
 ;; it moves the token, so a changed file applies from the next move.
+;;
+;; Mixin files.  A mixin (DESIGN.md, section 7.1) can be a file,
+;; mixins/NAME.eld in `rat-kingdom-directory' or .rk/mixins/NAME.eld in
+;; a repository's checkout, holding the property list
+;; `rat-kingdom-workflow-define-mixin' takes.  They are read and
+;; reported as workflow files are; `rat-kingdom-config-mixins' gives a
+;; repository's view and `rat-kingdom-config-mixin' resolves one name.
+;; `rat-kingdom-config-workflow' returns a workflow expanded with its
+;; own mixins, the configuration's :mixins for the repository, epic and
+;; task, and its own aspects; `rat-kingdom-config-build-workflow' says
+;; why one cannot be built.
 ;;
 ;; The king's tools.  `rat-kingdom-config-show' is `config_show': each
 ;; value with its layer, the files, what is ignored and what the merged
@@ -148,7 +160,10 @@
     (:track
      :layers (defaults global repo)
      :sub-keys (:rk :beads)
-     :validate rat-kingdom-config--boolean-problem))
+     :validate rat-kingdom-config--boolean-problem)
+    (:mixins
+     :layers (global registration repo epic task)
+     :validate rat-kingdom-config--mixins-problem))
   "The configuration keys, each with what may set it and how it is checked.
 Each entry is (KEY . PROPERTIES):
 
@@ -228,6 +243,13 @@ names (lint test), not both and not %S" value)))
   "Return what is wrong with VALUE as t or nil, or nil."
   (unless (memq value '(t nil))
     (format "is t or nil, not %S" value)))
+
+(defun rat-kingdom-config--mixins-problem (value)
+  "Return what is wrong with VALUE as a list of mixin names, or nil."
+  (unless (and (proper-list-p value)
+               (cl-every #'rat-kingdom-config--name-symbol-p value))
+    (format "is a list of mixin names, symbols such as (no-review), not %S"
+            value)))
 
 (defun rat-kingdom-config--plist-p (value)
   "Return non-nil if VALUE is a proper list of even length."
@@ -444,7 +466,7 @@ for `rat-kingdom-config-errors'."
 ;;;; Workflow files
 
 (defconst rat-kingdom-config-workflow-keys
-  '(:name :doc :places :start :final :failure :steps)
+  '(:name :doc :places :start :final :failure :steps :mixins :aspects)
   "The keys a workflow file may have.
 They are `:name' and the keys `rat-kingdom-workflow-define' takes.")
 
@@ -513,30 +535,49 @@ one is recorded for `rat-kingdom-config-errors' in the same way."
         (cl-loop for (key value) on form by #'cddr
                  unless (eq key :name) append (list key value)))))))
 
-(defun rat-kingdom-config--workflow-files (directory repo)
-  "Return the workflows defined by the files in DIRECTORY.
-REPO is the name of the repository DIRECTORY is for, or nil for every
-one.  The files are the *.eld files in DIRECTORY, not hidden ones.
-Return an alist from workflow name to (WORKFLOW FILE), in the order of
-the files' names.  An invalid file is left out, and so are two or more
-files that define the same name; each is recorded for
-`rat-kingdom-config-errors'.  Errors recorded before for files that
-are gone are forgotten."
+(defun rat-kingdom-config--eld-files (directory)
+  "Return the *.eld files in DIRECTORY, not hidden ones, sorted by name.
+Errors recorded before for files in DIRECTORY that are gone are
+forgotten, and so are the files themselves."
   (let* ((directory (file-name-as-directory (expand-file-name directory)))
          (files (and (file-directory-p directory)
                      (cl-remove-if-not
                       #'file-regular-p
-                      (directory-files directory t "\\`[^.].*\\.eld\\'"))))
-         read)
+                      (directory-files directory t "\\`[^.].*\\.eld\\'")))))
     (maphash (lambda (source _entry)
                (when (and (equal (file-name-directory source) directory)
                           (not (member source files)))
                  (rat-kingdom-config--clear-error source)
                  (remhash source rat-kingdom-config--files)))
              (copy-hash-table rat-kingdom-config--errors))
+    files))
+
+(defun rat-kingdom-config--workflow-files (directory repo &optional lookup)
+  "Return the workflows defined by the files in DIRECTORY.
+REPO is the name of the repository DIRECTORY is for, or nil for every
+one.  The files are the *.eld files in DIRECTORY, not hidden ones.
+LOOKUP resolves a mixin's name to the mixin, for the mixins DIRECTORY
+can see; a workflow whose own mixins and aspects do not expand with
+them is invalid.
+Return an alist from workflow name to (WORKFLOW FILE), in the order of
+the files' names; WORKFLOW is as written, not expanded.  An invalid
+file is left out, and so are two or more files that define the same
+name; each is recorded for `rat-kingdom-config-errors'.  Errors
+recorded before for files that are gone are forgotten."
+  (let ((files (rat-kingdom-config--eld-files directory))
+        read)
     (dolist (file files)
       (when-let* ((workflow (rat-kingdom-config--read-workflow-file file repo)))
-        (push (list (plist-get workflow :name) workflow file) read)))
+        (if-let* ((problem (condition-case err
+                               (progn (rat-kingdom-workflow-expand workflow nil
+                                                                   lookup)
+                                      nil)
+                             (rat-kingdom-workflow-expansion-error
+                              (cadr err)))))
+            (rat-kingdom-config--record-error
+             file repo (format "The workflow %s cannot be built: %s"
+                               (plist-get workflow :name) problem))
+          (push (list (plist-get workflow :name) workflow file) read))))
     (setq read (nreverse read))
     (cl-loop
      for entry in read
@@ -567,7 +608,8 @@ Files are read again when they change.
 
 Return a list of (WORKFLOW ORIGIN FILE), sorted by name, where ORIGIN
 is `repo', `global' or `built-in' and FILE the file it was read from,
-nil for a built-in one."
+nil for a built-in one.  WORKFLOW is as written: its mixins and
+aspects are not applied; `rat-kingdom-config-workflow' applies them."
   (let* ((record (and repo (rat-kingdom-config--repo space repo)))
          (table (mapcar (lambda (workflow)
                           (list (plist-get workflow :name) workflow
@@ -578,31 +620,169 @@ nil for a built-in one."
                   (setf (alist-get name table nil nil #'equal)
                         (list workflow origin file)))))
       (add (rat-kingdom-config--workflow-files
-            (rat-kingdom-config-workflow-directory) nil)
+            (rat-kingdom-config-workflow-directory) nil
+            (rat-kingdom-config--mixin-lookup space nil))
            'global)
       (when (plist-get record :path)
         (add (rat-kingdom-config--workflow-files
               (rat-kingdom-config-repo-workflow-directory record)
-              (plist-get record :name))
+              (plist-get record :name)
+              (rat-kingdom-config--mixin-lookup space record))
              'repo)))
     (mapcar #'cdr
             (sort table (lambda (a b) (string< (car a) (car b)))))))
 
-(defun rat-kingdom-config-workflow (space name &optional repo)
-  "Return the workflow called NAME, a symbol or string, for REPO in SPACE.
-REPO is a repository's name or record, or nil for the workflows every
-repository has.  The workflow is resolved as
-`rat-kingdom-config-workflows' says.  Return nil if there is none."
+(defun rat-kingdom-config--workflow-entry (space name repo)
+  "Return the entry of the workflow NAME for REPO in SPACE, or nil.
+It is (WORKFLOW ORIGIN FILE), as `rat-kingdom-config-workflows' gives."
   (when (and name (not (equal name "")))
     (let ((name (rat-kingdom-workflow--name name)))
-      (car (cl-find name (rat-kingdom-config-workflows space repo)
-                    :key (lambda (entry) (plist-get (car entry) :name))
-                    :test #'equal)))))
+      (cl-find name (rat-kingdom-config-workflows space repo)
+               :key (lambda (entry) (plist-get (car entry) :name))
+               :test #'equal))))
+
+(cl-defun rat-kingdom-config-build-workflow (space name &key repo epic task
+                                                   (mixins nil mixins-p))
+  "Return the workflow called NAME for REPO, EPIC and TASK in SPACE, expanded.
+NAME is a symbol or string, resolved for REPO as
+`rat-kingdom-config-workflows' says.  Its own mixins, then the mixins
+of the configuration's `:mixins' for REPO, EPIC and TASK, then its own
+aspects are applied (`rat-kingdom-workflow-expand'), each mixin
+resolved for REPO as `rat-kingdom-config-mixins' says.  With MIXINS,
+they are the configured mixins instead.  Return nil if there is no
+workflow called NAME.  Signal `rat-kingdom-config-error' saying what
+is wrong if it does not expand: \"The workflow story cannot be built:
+there is no mixin called tdd2\"."
+  (let* ((record (and repo (rat-kingdom-config--repo space repo)))
+         (where (or record repo))
+         (base (car (rat-kingdom-config--workflow-entry space name where))))
+    (when base
+      (condition-case err
+          (rat-kingdom-workflow-expand
+           base
+           (if mixins-p
+               mixins
+             (rat-kingdom-config-get space :mixins :repo where :epic epic
+                                     :task task))
+           (rat-kingdom-config--mixin-lookup space where))
+        (rat-kingdom-workflow-expansion-error
+         (signal 'rat-kingdom-config-error
+                 (list (format "The workflow %s cannot be built: %s"
+                               (plist-get base :name) (cadr err)))))))))
+
+(defun rat-kingdom-config-workflow (space name &optional repo epic task)
+  "Return the workflow called NAME, a symbol or string, for REPO in SPACE.
+REPO is a repository's name or record, or nil for the workflows every
+repository has; EPIC and TASK are ids, whose `:mixins' count.  The
+workflow is resolved as `rat-kingdom-config-workflows' says and
+expanded by `rat-kingdom-config-build-workflow'.  Return nil if there
+is none, or if it does not expand; `rat-kingdom-config-workflow-problem'
+says why."
+  (condition-case nil
+      (rat-kingdom-config-build-workflow space name :repo repo :epic epic
+                                         :task task)
+    (rat-kingdom-config-error nil)))
+
+(defun rat-kingdom-config-workflow-problem (space name &optional repo epic
+                                                  task)
+  "Return why the workflow NAME cannot be had for REPO, EPIC and TASK, or nil.
+SPACE, NAME, REPO, EPIC and TASK are as for
+`rat-kingdom-config-workflow'.  The reason is a sentence: there is no
+such workflow, or it cannot be built, and why."
+  (condition-case err
+      (unless (rat-kingdom-config-build-workflow space name :repo repo
+                                                 :epic epic :task task)
+        (format "There is no workflow called %s" name))
+    (rat-kingdom-config-error (cadr err))))
 
 (defun rat-kingdom-config-workflow-names (space &optional repo)
   "Return the names of the workflows of REPO in SPACE, as text."
   (mapconcat (lambda (entry) (plist-get (car entry) :name))
              (rat-kingdom-config-workflows space repo) ", "))
+
+;;;; Mixin files
+
+(defun rat-kingdom-config-mixin-directory ()
+  "Return the directory of the mixin files for every repository."
+  (file-name-as-directory (expand-file-name "mixins" rat-kingdom-directory)))
+
+(defun rat-kingdom-config-repo-mixin-directory (repo)
+  "Return the directory of the mixin files of REPO, a repository record."
+  (file-name-as-directory
+   (expand-file-name ".rk/mixins" (plist-get repo :path))))
+
+(defun rat-kingdom-config--read-mixin-file (file repo)
+  "Return the mixin in FILE, named by the file, or nil if FILE is invalid.
+REPO is the name of the repository FILE is for, or nil for every one.
+FILE holds one property list of `rat-kingdom-workflow-mixin-keys',
+read as `rat-kingdom-config-read-file' reads; an invalid one is
+recorded for `rat-kingdom-config-errors' in the same way."
+  (rat-kingdom-config--read-cached
+   file repo
+   (lambda (form)
+     (when-let* ((problems (rat-kingdom-workflow-mixin-problems form)))
+       (signal 'rat-kingdom-config-error (list (string-join problems "; "))))
+     (rat-kingdom-workflow--normalize-mixin (file-name-base file) form))))
+
+(defun rat-kingdom-config--mixin-files (directory repo)
+  "Return the mixins defined by the files in DIRECTORY, valid ones only.
+REPO is the name of the repository DIRECTORY is for, or nil for every
+one.  Return a list of (NAME MIXIN FILE), in the order of the files'
+names."
+  (delq nil (mapcar (lambda (file)
+                      (when-let* ((mixin (rat-kingdom-config--read-mixin-file
+                                          file repo)))
+                        (list (plist-get mixin :name) mixin file)))
+                    (rat-kingdom-config--eld-files directory))))
+
+(defun rat-kingdom-config-mixins (space &optional repo)
+  "Return the mixins a workflow for REPO can use, in SPACE.
+REPO is a repository's name or record; without it, or if it is not
+registered, the mixins every repository has.  A mixin comes from
+REPO's .rk/mixins/NAME.eld, else from NAME.eld in
+`rat-kingdom-config-mixin-directory', else it is a built-in one,
+defined with `rat-kingdom-workflow-define-mixin'.  Files are read
+again when they change.
+
+Return a list of (MIXIN ORIGIN FILE), sorted by name, where ORIGIN is
+`repo', `global' or `built-in' and FILE the file it was read from, nil
+for a built-in one."
+  (let* ((record (and repo (rat-kingdom-config--repo space repo)))
+         (table (mapcar (lambda (mixin)
+                          (list (plist-get mixin :name) mixin 'built-in nil))
+                        (rat-kingdom-workflow-mixin-list))))
+    (cl-flet ((add (entries origin)
+                (pcase-dolist (`(,name ,mixin ,file) entries)
+                  (setf (alist-get name table nil nil #'equal)
+                        (list mixin origin file)))))
+      (add (rat-kingdom-config--mixin-files
+            (rat-kingdom-config-mixin-directory) nil)
+           'global)
+      (when (plist-get record :path)
+        (add (rat-kingdom-config--mixin-files
+              (rat-kingdom-config-repo-mixin-directory record)
+              (plist-get record :name))
+             'repo)))
+    (mapcar #'cdr (sort table (lambda (a b) (string< (car a) (car b)))))))
+
+(defun rat-kingdom-config--mixin-lookup (space repo)
+  "Return a function from a mixin's name to the mixin, for REPO in SPACE.
+The mixins are read once, when this is called."
+  (let ((mixins (mapcar #'car (rat-kingdom-config-mixins space repo))))
+    (lambda (name)
+      (cl-find (rat-kingdom-workflow--name name) mixins
+               :key (lambda (mixin) (plist-get mixin :name)) :test #'equal))))
+
+(defun rat-kingdom-config-mixin (space name &optional repo)
+  "Return the mixin called NAME, a symbol or string, for REPO in SPACE, or nil.
+REPO is a repository's name or record, or nil for the mixins every
+repository has.  It is resolved as `rat-kingdom-config-mixins' says."
+  (funcall (rat-kingdom-config--mixin-lookup space repo) name))
+
+(defun rat-kingdom-config-mixin-names (space &optional repo)
+  "Return the names of the mixins of REPO in SPACE, as text."
+  (mapconcat (lambda (entry) (plist-get (car entry) :name))
+             (rat-kingdom-config-mixins space repo) ", "))
 
 ;;;; Policies
 
@@ -711,12 +891,18 @@ if the policy was removed."
            :track (list :rk nil :beads (not rat-kingdom-task-br-untracked))))))
 
 (defun rat-kingdom-config-registration (repo)
-  "Return the registration layer of REPO, a repository record."
+  "Return the registration layer of REPO, a repository record.
+It is the `:workflow', `:target', `:setup', `:check' and `:mixins'
+it was registered with."
   (rat-kingdom-config--normalize
    (list :workflow (plist-get repo :workflow)
          :target (plist-get repo :target)
          :setup (plist-get repo :setup)
-         :check (plist-get repo :check))))
+         :check (plist-get repo :check)
+         ;; The space keeps payloads as JSON, so the names come back as
+         ;; strings.
+         :mixins (mapcar (lambda (name) (if (stringp name) (intern name) name))
+                         (plist-get repo :mixins)))))
 
 (defun rat-kingdom-config--repo (space repo)
   "Return REPO, a repository's name or record, as a record, or nil.
@@ -873,7 +1059,8 @@ SPACE, REPO, EPIC and TASK are as for `rat-kingdom-config-get'.  With
 LAYER, PLIST takes the place of what that layer holds, so a change can
 be checked before it is made, and what is wrong with PLIST itself is
 reported too.  Checked here is what no single layer can show: that the
-workflow and the agents exist, that every command name in :setup and
+workflow and the agents exist, that every mixin of :mixins exists and
+the workflow expands with them, that every command name in :setup and
 :check is defined in :commands, and that the target is a local branch
 of the repository.  Return nil if all is well."
   (let* ((record (rat-kingdom-config--repo space repo))
@@ -889,11 +1076,23 @@ of the repository.  Return nil if all is well."
                           when value append (list key value))))
     (cl-flet ((problem (format-string &rest args)
                 (push (apply #'format format-string args) problems)))
-      (when-let* ((workflow (plist-get merged :workflow)))
-        (unless (rat-kingdom-config-workflow space workflow (or record repo))
-          (problem "There is no workflow called %s; there are: %s" workflow
-                   (rat-kingdom-config-workflow-names space
-                                                      (or record repo)))))
+      (let ((unknown (cl-remove-if
+                      (lambda (name)
+                        (rat-kingdom-config-mixin space name (or record repo)))
+                      (plist-get merged :mixins))))
+        (dolist (name unknown)
+          (problem ":mixins: there is no mixin called %s; there are: %s" name
+                   (rat-kingdom-config-mixin-names space (or record repo))))
+        (when-let* ((workflow (plist-get merged :workflow)))
+          (condition-case err
+              (unless (rat-kingdom-config-build-workflow
+                       space workflow :repo (or record repo)
+                       :mixins (and (null unknown) (plist-get merged :mixins)))
+                (problem "There is no workflow called %s; there are: %s"
+                         workflow
+                         (rat-kingdom-config-workflow-names space
+                                                            (or record repo))))
+            (rat-kingdom-config-error (problem "%s" (cadr err))))))
       (cl-loop for (role kind) on (plist-get merged :agents) by #'cddr
                unless (member (format "%s" kind) (rat-kingdom-agent-names))
                do (problem ":agents %s: there is no agent called %s; there \

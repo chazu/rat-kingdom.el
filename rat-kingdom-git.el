@@ -180,7 +180,7 @@ there was one."
 
 (cl-defun rat-kingdom-repo-add (space path
                                       &key name target check setup workflow
-                                      task-prefix)
+                                      task-prefix mixins)
   "Register the repository at PATH in SPACE and return its record.
 NAME defaults to the directory's name.  TARGET is the branch finished
 work is merged into, by default `rat-kingdom-git-default-target'; it
@@ -189,8 +189,9 @@ list of strings, that must succeed before work is merged; it is run
 without a shell.  SETUP is a command of the same kind run in each new
 worktree before a worker starts in it and before the check, for example
 to install dependencies.  WORKFLOW names the workflow its stories follow
-unless they say otherwise.  Registering a name again replaces its
-record.
+unless they say otherwise.  MIXINS is a list of mixin names, symbols,
+applied to every workflow its stories follow (the registration layer's
+`:mixins').  Registering a name again replaces its record.
 
 Every registered repository has a br workspace for its tasks.  If the
 checkout has none, one is created by `rat-kingdom-task-br-ensure',
@@ -217,6 +218,12 @@ returned has the warnings as `:track-warnings', which is not stored."
       (error "A check is a list of strings: %S" check))
     (unless (and (listp setup) (cl-every #'stringp setup))
       (error "A setup is a list of strings: %S" setup))
+    (unless (and (proper-list-p mixins)
+                 (cl-every (lambda (name)
+                             (and name (symbolp name) (not (eq name t))
+                                  (not (keywordp name))))
+                           mixins))
+      (error "Mixins are a list of names such as (no-review): %S" mixins))
     (when (and task-prefix (string-empty-p task-prefix))
       (error "A task prefix may not be empty"))
     (unless (rat-kingdom-git-ok-p top "rev-parse" "--verify" "--quiet" "HEAD")
@@ -233,7 +240,9 @@ returned has the warnings as `:track-warnings', which is not stored."
                                             :check check :setup setup
                                             :workflow (and workflow
                                                            (format "%s" workflow))
-                                            :task-prefix task-prefix)
+                                            :task-prefix task-prefix
+                                            :mixins (mapcar #'symbol-name
+                                                            mixins))
                              :actor "user")
       (append (rat-kingdom-repo-get space name)
               (and initialized (list :task-initialized t))
