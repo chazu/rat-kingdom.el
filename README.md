@@ -473,9 +473,15 @@ not hold together is ignored, and the king's `status` says why. Files
 are read again when they change, and a changed workflow applies from a
 story's next move. `workflow_list` shows where each workflow comes from.
 
+A workflow step may also run named commands from `:commands` in the
+story's worktree and commit what they change (`:run (format)`), check with
+named commands in place of the configured check (`:check (lint test)`),
+wait for a time (`:gate (:after 3600)`) or for a signal the king sends
+with `story_signal` (`:gate (:signal deploy-ok)`), and give its worker
+extra instructions (`:spawn rat :brief "..."`).
+
 Not built yet, and specified in DESIGN.md (section 7.1, step 8 of the
-build order): steps that run named commands (`:run`), wait for a time or a
-signal (`:gate`) or run a child workflow (`:workflow`); mixins such as
+build order): steps that run a child workflow (`:workflow`); mixins such as
 `no-review` and `tdd` and aspects such as `(:after implement :run
 (format))`, with a `:mixins` configuration key; a `research` workflow whose
 researcher writes docs that every later worker is told of.

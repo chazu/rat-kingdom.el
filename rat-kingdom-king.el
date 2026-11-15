@@ -210,6 +210,37 @@ See `rat-kingdom-king-story-note-functions'."
           (push note notes))))
     (nreverse notes)))
 
+(defun rat-kingdom-king--waiting-detail (space story)
+  "Return what the token STORY in SPACE waits on, in words, or nil.
+For a gate that is when it opens or the signal it waits for; for a
+`:run' step the commands it runs and the one running now."
+  (let* ((payload (plist-get story :payload))
+         (now (funcall rat-kingdom-space-now-function)))
+    (pcase (plist-get payload :awaiting)
+      ("gate"
+       (let ((until (plist-get payload :until))
+             (signal (plist-get payload :signal)))
+         (cond
+          ((numberp until)
+           (format "until %s, %s"
+                   (format-time-string "%F %T" (seconds-to-time until))
+                   (if (> until now)
+                       (format "in %s"
+                               (rat-kingdom-king--age (round (- until now))))
+                     "overdue; it opens at the watchdog's next look")))
+          (signal
+           (format "the signal %s; send it with story_signal" signal)))))
+      ("run"
+       (let ((names (plist-get (rat-kingdom-story--step space story) :with))
+             (running (rat-kingdom-story-running
+                       (plist-get story :identity))))
+         (concat (mapconcat #'symbol-name names " ")
+                 (if running
+                     (format "; running %s"
+                             (rat-kingdom-story-command-text (cdr running)
+                                                             (car running)))
+                   "")))))))
+
 (defun rat-kingdom-king--story-line (space story)
   "Return one line describing the token STORY in SPACE."
   (let* ((payload (plist-get story :payload))
@@ -222,11 +253,15 @@ See `rat-kingdom-king-story-note-functions'."
             (pcase (plist-get payload :phase)
               ("wait" (format " (waiting for %s%s)"
                               (plist-get payload :awaiting)
-                              (if (and run (equal (plist-get payload :awaiting)
-                                                  "worker"))
-                                  (format " %s, %s" (plist-get run :id)
-                                          (plist-get run :state))
-                                "")))
+                              (cond
+                               ((and run (equal (plist-get payload :awaiting)
+                                                "worker"))
+                                (format " %s, %s" (plist-get run :id)
+                                        (plist-get run :state)))
+                               ((rat-kingdom-king--waiting-detail space story)
+                                (concat ": " (rat-kingdom-king--waiting-detail
+                                              space story)))
+                               (t ""))))
               ("parked" " (stopped)")
               (_ ""))
             (rat-kingdom-king--age
@@ -467,6 +502,7 @@ see `rat-kingdom-king-story-start'."
                                            (plist-get tuple :category)))
                            :payload)))
       (let ((checked (of 'checked))
+            (ran (of 'ran))
             (stuck (of 'stuck)))
         (string-join
          (delq nil
@@ -503,6 +539,13 @@ see `rat-kingdom-king-story-start'."
                           ("cancelled" ", cancelled")
                           (_ ""))
                         (if archived " (archived)" ""))
+                (and (not archived)
+                     (equal (plist-get payload :phase) "wait")
+                     (when-let* ((detail (rat-kingdom-king--waiting-detail
+                                          space story)))
+                       (format "%s: %s"
+                               (capitalize (plist-get payload :awaiting))
+                               detail)))
                 (unless archived
                   (if-let* ((workflow (rat-kingdom-story--workflow space story)))
                       (when-let* ((composition (rat-kingdom-workflow-composition
@@ -564,6 +607,18 @@ clean)")
                              (if (and (equal (plist-get checked :value) "fail")
                                       (plist-get checked :output))
                                  (format "\n%s" (plist-get checked :output))
+                               "")))
+                (and ran
+                     (format "Last run: %s (%s)%s"
+                             (plist-get ran :value)
+                             (if (equal (plist-get ran :value) "pass")
+                                 (string-join (plist-get ran :names) " ")
+                               (rat-kingdom-story-command-text
+                                (plist-get ran :argv)
+                                (plist-get ran :command)))
+                             (if (and (equal (plist-get ran :value) "fail")
+                                      (plist-get ran :output))
+                                 (format "\n%s" (plist-get ran :output))
                                "")))
                 (and (plist-get payload :integrated)
                      (format "Merged into %s at %s"
@@ -1421,6 +1476,33 @@ worker (move it to the workflow's first place) or to skip or repeat a step."
           (arg 'story)
           (rat-kingdom-story-move space (arg 'story) (arg 'place) (arg 'note)
                                   rat-kingdom-king-id)))
+
+(defun rat-kingdom-king-story-signal (space id name actor)
+  "Send the signal NAME to the story ID in SPACE, as ACTOR, and say what it did."
+  (let* ((open (rat-kingdom-story-signal space id name actor))
+         (payload (plist-get (rat-kingdom-story-get space id) :payload)))
+    (if open
+        (format "Sent %s to %s, which waits at its gate %s for it, so the \
+gate opens." name id (plist-get payload :step))
+      (format "Sent %s to %s, which is not waiting at a gate for %s now \
+(it is at %s%s). The signal is kept until a gate of the story waits for it, \
+or the story ends."
+              name id name (plist-get payload :at)
+              (if (equal (plist-get payload :phase) "wait")
+                  (format ", waiting for %s%s" (plist-get payload :awaiting)
+                          (if-let* ((signal (plist-get payload :signal)))
+                              (format " the signal %s" signal)
+                            ""))
+                "")))))
+
+(rat-kingdom-king--deftool "story_signal"
+    "Send a signal to a story, to open its gate step that waits for a \
+signal of that name. A signal sent before the story reaches the gate is \
+kept, and opens the gate when it gets there."
+    '((:name "story" :type string :description "The story's id.")
+      (:name "name" :type string :description "The signal's name."))
+  (rat-kingdom-king-story-signal space (arg 'story) (arg 'name)
+                                 rat-kingdom-king-id))
 
 (rat-kingdom-king--deftool "story_cancel"
     "End a story for good. Its worker is stopped and the story is archived. \
