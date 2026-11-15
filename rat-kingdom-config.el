@@ -20,13 +20,13 @@
 ;;
 ;;   defaults      the existing user options, `rat-kingdom-config-defaults'
 ;;   global        config.eld in `rat-kingdom-directory'
-;;   registration  :workflow :target :check :setup on the `repo' tuple
+;;   registration  :workflow :target :check :setup :git on the `repo' tuple
 ;;   repo          .rk/config.eld in the repository's checkout (its :path)
 ;;   epic          the epic's `policy' tuple
 ;;   task          the task's `policy' tuple
 ;;
 ;; The most specific layer wins, key by key; for :commands, :agents,
-;; :timeouts and :track, sub-key by sub-key.  Code reads one key with
+;; :timeouts, :track and :git, sub-key by sub-key.  Code reads one key with
 ;; `rat-kingdom-config-get', and `rat-kingdom-config-explain' says which
 ;; layer every value came from.
 ;;
@@ -148,17 +148,24 @@
     (:track
      :layers (defaults global repo)
      :sub-keys (:rk :beads)
-     :validate rat-kingdom-config--boolean-problem))
+     :validate rat-kingdom-config--boolean-problem)
+    (:git
+     :layers (defaults global registration repo epic task)
+     :sub-keys (:branch :integrate)
+     :validate rat-kingdom-config--git-problem
+     :by-sub-key t))
   "The configuration keys, each with what may set it and how it is checked.
 Each entry is (KEY . PROPERTIES):
 
-  `:layers'    the layers that may set KEY
-  `:validate'  a function of a value returning nil if it is sound, or
-               a phrase saying what is wrong with it
-  `:sub-keys'  for a key whose value is a property list, the sub-keys
-               it may have, or t for any keyword; then `:validate'
-               checks each sub-key's value, and layers are merged
-               sub-key by sub-key")
+  `:layers'     the layers that may set KEY
+  `:validate'   a function of a value returning nil if it is sound, or
+                a phrase saying what is wrong with it
+  `:sub-keys'   for a key whose value is a property list, the sub-keys
+                it may have, or t for any keyword; then `:validate'
+                checks each sub-key's value, and layers are merged
+                sub-key by sub-key
+  `:by-sub-key' non-nil if `:validate' takes the sub-key as well, as
+                its first argument, since the sub-keys differ in kind")
 
 (defun rat-kingdom-config--entry (key)
   "Return the schema entry of KEY, or signal an error if it is unknown."
@@ -229,14 +236,153 @@ names (lint test), not both and not %S" value)))
   (unless (memq value '(t nil))
     (format "is t or nil, not %S" value)))
 
+;;;; :git
+
+(defconst rat-kingdom-config-integrate-modes '(merge rebase squash)
+  "The ways a story's work can go into its target, for :git :integrate.")
+
+(defconst rat-kingdom-config-default-branch-format "rats/%i"
+  "The default :git :branch, the format of a story's branch name.")
+
+(defconst rat-kingdom-config-branch-specifiers
+  '((?i . "the story id") (?s . "a slug of the title") (?r . "the repo")
+    (?e . "the epic id, or none") (?% . "a literal %"))
+  "The specifiers a :git :branch format may use, with what each stands for.")
+
+(defun rat-kingdom-config-branch-slug (title)
+  "Return the slug of TITLE for a branch name, by the rule of :git :branch.
+It is lowercased, every run of characters other than a-z and 0-9 made
+one dash, dashes trimmed from both ends, cut to at most 40 characters
+and trimmed again; \=`story' if nothing is left."
+  (let* ((case-fold-search nil)
+         (slug (replace-regexp-in-string "[^a-z0-9]+" "-"
+                                         (downcase (or title ""))))
+         (trim (lambda (text) (string-trim text "-+" "-+")))
+         (slug (funcall trim slug))
+         (slug (funcall trim (substring slug 0 (min 40 (length slug))))))
+    (if (string-empty-p slug) "story" slug)))
+
+(defun rat-kingdom-config--branch-format-error (format)
+  "Return what is wrong with the specifiers of FORMAT, or nil."
+  (let ((i 0) problem)
+    (while (and (not problem) (< i (length format)))
+      (if (not (eq (aref format i) ?%))
+          (cl-incf i)
+        (let ((next (and (< (1+ i) (length format)) (aref format (1+ i)))))
+          (if (assq next rat-kingdom-config-branch-specifiers)
+              (cl-incf i 2)
+            (setq problem
+                  (format "has %s, which is not a specifier; they are %s"
+                          (if next (string ?% next) "a % at its end")
+                          (mapconcat (lambda (entry)
+                                       (format "%%%c (%s)" (car entry)
+                                               (cdr entry)))
+                                     rat-kingdom-config-branch-specifiers
+                                     ", ")))))))
+    problem))
+
+(defun rat-kingdom-config-branch-name (format id title repo epic)
+  "Return the branch name FORMAT makes for a story.
+ID is the story's id, TITLE its title, REPO its repository's name and
+EPIC its epic's id, or nil.  The specifiers are those of
+`rat-kingdom-config-branch-specifiers'.  Signal an error if FORMAT has
+another."
+  (when-let* ((problem (rat-kingdom-config--branch-format-error format)))
+    (error "The branch format %S %s" format problem))
+  (let ((slug (rat-kingdom-config-branch-slug title)))
+    (replace-regexp-in-string
+     "%\\(.\\)"
+     (lambda (match)
+       (pcase (aref match 1)
+         (?i (format "%s" id))
+         (?s slug)
+         (?r (format "%s" repo))
+         (?e (if epic (format "%s" epic) "none"))
+         (?% "%")))
+     format t t)))
+
+(defun rat-kingdom-config--ref-name-problem (name)
+  "Return which rule of `git check-ref-format' the branch NAME breaks, or nil."
+  (cond
+   ((string-empty-p name) "is empty")
+   ((equal name "@") "is @")
+   ((string-prefix-p "-" name) "starts with -")
+   ((string-match-p "[[:cntrl:] ~^:?*[\\]" name)
+    "has a space, a control character or one of ~^:?*[\\")
+   ((string-search ".." name) "has ..")
+   ((string-search "@{" name) "has @{")
+   ((string-search "//" name) "has //")
+   ((string-suffix-p "/" name) "ends with /")
+   ((string-suffix-p "." name) "ends with .")
+   ((cl-some (lambda (component)
+               (or (string-prefix-p "." component)
+                   (string-suffix-p ".lock" component)))
+             (split-string name "/"))
+    "has a part that starts with . or ends with .lock")))
+
+(defvar rat-kingdom-config--checked-ref-names (make-hash-table :test #'equal)
+  "Branch names `git check-ref-format --branch' was asked about, and its answer.")
+
+(defun rat-kingdom-config-git-branch-ok-p (name &optional directory)
+  "Return non-nil if `git check-ref-format --branch' accepts NAME.
+It runs in DIRECTORY, by default the variable `temporary-file-directory'.
+Without DIRECTORY the answer is remembered."
+  (if directory
+      (rat-kingdom-git-ok-p directory "check-ref-format" "--branch" name)
+    (let ((known (gethash name rat-kingdom-config--checked-ref-names 'unknown)))
+      (if (not (eq known 'unknown))
+          known
+        (puthash name (rat-kingdom-git-ok-p temporary-file-directory
+                                            "check-ref-format" "--branch" name)
+                 rat-kingdom-config--checked-ref-names)))))
+
+(defun rat-kingdom-config-branch-format-problem (value)
+  "Return what is wrong with VALUE as a :git :branch format, or nil.
+It is a string whose only specifiers are those of
+`rat-kingdom-config-branch-specifiers', and which, filled in for the
+story S-0000 titled \=`title' in the repo \=`repo' with no epic, is a valid
+branch name: it keeps the rules of `git check-ref-format', and
+`git check-ref-format --branch' accepts it."
+  (if (not (and (stringp value) (not (string-blank-p value))))
+      (format "is a format for branch names, a string such as \"rats/%%i\", \
+not %S" value)
+    (or (when-let* ((problem (rat-kingdom-config--branch-format-error value)))
+          (format "%S %s" value problem))
+        (let ((sample (rat-kingdom-config-branch-name value "S-0000" "title"
+                                                      "repo" nil)))
+          (when-let* ((problem
+                       (or (rat-kingdom-config--ref-name-problem sample)
+                           (unless (rat-kingdom-config-git-branch-ok-p sample)
+                             "is refused by git check-ref-format --branch"))))
+            (format "%S does not make a valid branch name: for a sample \
+story it makes %S, which %s" value sample problem))))))
+
+(defun rat-kingdom-config--integrate-mode (value)
+  "Return VALUE, a :git :integrate symbol or string, as a symbol, or nil."
+  (let ((mode (cond ((stringp value) (intern-soft value))
+                    ((symbolp value) value))))
+    (and (memq mode rat-kingdom-config-integrate-modes) mode)))
+
+(defun rat-kingdom-config--git-problem (sub value)
+  "Return what is wrong with VALUE as the :git sub-key SUB, or nil."
+  (pcase sub
+    (:branch (rat-kingdom-config-branch-format-problem value))
+    (:integrate
+     (unless (rat-kingdom-config--integrate-mode value)
+       (format "is %s, not %S"
+               (mapconcat #'symbol-name rat-kingdom-config-integrate-modes
+                          ", ")
+               value)))))
+
 (defun rat-kingdom-config--plist-p (value)
   "Return non-nil if VALUE is a proper list of even length."
   (and (proper-list-p value) (cl-evenp (length value))))
 
 (defun rat-kingdom-config--value-problem (entry value)
   "Return what is wrong with VALUE as the value of the schema ENTRY, or nil."
-  (let ((sub-keys (plist-get (cdr entry) :sub-keys))
-        (validate (plist-get (cdr entry) :validate)))
+  (let* ((sub-keys (plist-get (cdr entry) :sub-keys))
+         (by-sub-key (plist-get (cdr entry) :by-sub-key))
+         (validate (plist-get (cdr entry) :validate)))
     (cond
      ((not sub-keys) (funcall validate value))
      ((not (rat-kingdom-config--plist-p value))
@@ -252,7 +398,10 @@ names (lint test), not both and not %S" value)))
                     ((and (listp sub-keys) (not (memq sub sub-keys)))
                      (format "has %s, which is not one of %s" sub
                              (mapconcat #'symbol-name sub-keys " ")))
-                    (t (when-let* ((problem (funcall validate sub-value)))
+                    (t (when-let* ((problem
+                                    (if by-sub-key
+                                        (funcall validate sub sub-value)
+                                      (funcall validate sub-value))))
                          (format "%s %s" sub problem))))
                  do (push sub seen)
                  when problem return problem))))))
@@ -298,7 +447,7 @@ and target exist, is checked on the merged result, by
 (defun rat-kingdom-config--normalize (plist)
   "Return the sound configuration PLIST in the form lookups return.
 Keys whose value is nil are left out, the workflow is a string and
-agent kinds are symbols."
+agent kinds and the :git :integrate mode are symbols."
   (let (result)
     (cl-loop
      for (key value) on plist by #'cddr
@@ -310,6 +459,12 @@ agent kinds are symbols."
                                append (list sub (if (stringp kind)
                                                     (intern kind)
                                                   kind))))
+             (:git (cl-loop for (sub sub-value) on value by #'cddr
+                            append (list sub
+                                         (if (eq sub :integrate)
+                                             (rat-kingdom-config--integrate-mode
+                                              sub-value)
+                                           sub-value))))
              (_ value))
            result))
     (nreverse result)))
@@ -708,7 +863,9 @@ if the policy was removed."
                              (and check (list :check check)))
            :attempts rat-kingdom-story-attempts
            :max-workers rat-kingdom-story-max-workers
-           :track (list :rk nil :beads (not rat-kingdom-task-br-untracked))))))
+           :track (list :rk nil :beads (not rat-kingdom-task-br-untracked))
+           :git (list :branch rat-kingdom-config-default-branch-format
+                      :integrate 'merge)))))
 
 (defun rat-kingdom-config-registration (repo)
   "Return the registration layer of REPO, a repository record."
@@ -716,7 +873,8 @@ if the policy was removed."
    (list :workflow (plist-get repo :workflow)
          :target (plist-get repo :target)
          :setup (plist-get repo :setup)
-         :check (plist-get repo :check))))
+         :check (plist-get repo :check)
+         :git (plist-get repo :git))))
 
 (defun rat-kingdom-config--repo (space repo)
   "Return REPO, a repository's name or record, as a record, or nil.
@@ -787,7 +945,7 @@ sub-key to its layer.  A key no layer sets has VALUE and ORIGIN nil."
   "Return the effective configuration of REPO, EPIC and TASK in SPACE.
 Return a list of (KEY VALUE ORIGIN), one for every configuration key:
 VALUE is what `rat-kingdom-config-get' returns for KEY, and ORIGIN the
-layer it came from, or for :commands, :agents, :timeouts and :track a
+layer it came from, or for :commands, :agents, :timeouts, :track and :git a
 property list from each sub-key to the layer it came from.  A key that
 no layer sets has VALUE and ORIGIN nil.  See `rat-kingdom-config-layers'
 for the arguments."
@@ -805,7 +963,7 @@ It is one property list of every key some layer sets."
   "Return the effective value of the configuration KEY in SPACE.
 REPO is a repository's name, EPIC and TASK the ids of the epic and
 task, if any; each makes its layers count.  The most specific layer
-that sets KEY wins; for :commands, :agents, :timeouts and :track the
+that sets KEY wins; for :commands, :agents, :timeouts, :track and :git the
 layers are merged sub-key by sub-key.  Return nil if no layer sets
 KEY.  Signal `rat-kingdom-config-error' if KEY is unknown."
   (rat-kingdom-config--entry key)
@@ -1339,7 +1497,7 @@ repository's name, is needed for every layer but global; EPIC or TASK,
 an id, for its layer.  KEY is a keyword, or its name as a string with
 or without the colon.  VALUE is in the form of a file, such as
 `rat-kingdom-config-read-value' reads; nil removes KEY from LAYER.  A
-value for :commands, :agents, :timeouts or :track replaces KEY's whole
+value for :commands, :agents, :timeouts, :track or :git replaces KEY's whole
 value at LAYER; the sub-keys it leaves out come from the layers below.
 
 Nothing is written unless the layer's whole configuration is sound

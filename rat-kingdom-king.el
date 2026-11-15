@@ -1170,7 +1170,13 @@ rk/integration. It must not be a branch that is checked out.")
        :description "The workflow stories here follow by default.")
       (:name "task_prefix" :type string :optional t
        :description "The issue prefix of the br workspace, if one has to \
-be created. Default the repository's name."))
+be created. Default the repository's name.")
+      (:name "git" :type string :optional t
+       :description "The :git configuration of the registration layer, as \
+Emacs Lisp text read as config_set reads a value, e.g. (:branch \"rats/%s-%i\" \
+:integrate squash). :branch is the format of story branch names (%i story \
+id, %s title slug, %r repo, %e epic or none, %% a %); :integrate is merge, \
+rebase or squash. Leave out for the defaults."))
   (when-let* ((workflow (arg 'workflow))
               (where (list :path (expand-file-name (arg 'path))
                            :name (or (plist-get (cl-find
@@ -1191,7 +1197,9 @@ be created. Default the repository's name."))
                :check (and (arg 'check) (split-string-and-unquote (arg 'check)))
                :setup (and (arg 'setup) (split-string-and-unquote (arg 'setup)))
                :target (arg 'target) :workflow (arg 'workflow)
-               :task-prefix (arg 'task_prefix))))
+               :task-prefix (arg 'task_prefix)
+               :git (and (arg 'git) (rat-kingdom-config-read-value
+                                     (arg 'git))))))
     (string-join
      (cons (format "Registered %s at %s. Finished work is merged into %s.%s"
                    (plist-get repo :name) (plist-get repo :path)

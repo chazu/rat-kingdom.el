@@ -632,7 +632,7 @@ setup and check, which agent runs each role, the time limits and
 attempts, the worker limit, and whether rat-kingdom's directories are
 kept in Git. This section is the spec for step 7 of the build order
 (section 15), which is built. The keys `:mixins` and `:git` (below) are
-the spec for step 8, and not built yet.
+the spec for step 8; `:git` is built, `:mixins` is not yet.
 
 **Format.** A configuration file is one Emacs Lisp property list, read
 with `read` and never evaluated. Its extension is `.eld`. Anything after
@@ -881,7 +881,7 @@ does not expand, is a problem of the merged result: `status` shows it,
 `config_set` refuses to make it, and a story whose workflow does not
 expand cannot move (7.1).
 
-**Spec: `:git`** (step 8). A property list with two sub-keys, merged sub-key
+**Built: `:git`** (step 8). A property list with two sub-keys, merged sub-key
 by sub-key. `repo_add` and `rat-kingdom-add-repo` take an optional `git`
 for the registration layer, as for `mixins`.
 
@@ -1530,7 +1530,7 @@ check run there, and, after the king's `epic_verdict`, the target moved by
 compare-and-swap. A conflict or a failed check there becomes a task of
 the epic, done on its branch (section 10).
 
-**Spec: how work goes into the target** (step 8), `:git :integrate`
+**Built: how work goes into the target** (step 8), `:git :integrate`
 (7.3). Steps 1 and 3 above depend on it; the check, the setup and step 4
 do not.
 

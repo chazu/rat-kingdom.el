@@ -390,7 +390,8 @@ branch that is not checked out (`rat-kingdom-story-check-target')."
                          (error "There is no workflow called %s; there are: %s"
                                 name
                                 (rat-kingdom-config-workflow-names space
-                                                                   repo)))))
+                                                                   repo))))
+           (branch-name (rat-kingdom-story-branch-name space where id title)))
       (rat-kingdom-space-with-transaction space
         (when task
           (when-let* ((other (rat-kingdom-space-rd
@@ -404,7 +405,7 @@ branch that is not checked out (`rat-kingdom-story-check-target')."
          :payload (append
                    (list :workflow name :at (plist-get workflow :start)
                          :phase "enter" :title title :description description
-                         :agent agent :attempt 0
+                         :agent agent :attempt 0 :branch-name branch-name
                          :entered (funcall rat-kingdom-space-now-function))
                    (and task (list :task task))
                    (and epic (list :epic epic))
@@ -413,6 +414,36 @@ branch that is not checked out (`rat-kingdom-story-check-target')."
       (when task
         (rat-kingdom-task-claim-for-story space repo task id))
       id)))
+
+(defun rat-kingdom-story-branch-name (space story id title)
+  "Return the branch name of the story ID titled TITLE, about to start in SPACE.
+STORY is the story as `rat-kingdom-story-config' takes it, with its
+repository and maybe its epic and task.  The name is made from the
+configuration's :git :branch by `rat-kingdom-config-branch-name'.
+Signal an error, which starts nothing, if `git check-ref-format
+--branch' refuses it."
+  (let* ((repo (plist-get story :scope))
+         (format-string (or (plist-get (rat-kingdom-story-config space story :git)
+                                       :branch)
+                            rat-kingdom-config-default-branch-format))
+         (name (rat-kingdom-config-branch-name
+                format-string id title repo
+                (plist-get (plist-get story :payload) :epic))))
+    (unless (rat-kingdom-config-git-branch-ok-p
+             name (plist-get (rat-kingdom-repo-get space repo) :path))
+      (error "The branch name %S, made from the :git :branch %S, is not a \
+valid branch name (git check-ref-format --branch); change :git :branch \
+with config_set" name format-string))
+    name))
+
+(defun rat-kingdom-story--free-branch (path name)
+  "Return NAME, or NAME with -2, -3 and so on, whichever is first free in PATH.
+A name is free if the repository at PATH has no local branch by it."
+  (let ((candidate name) (n 1))
+    (while (rat-kingdom-git-ok-p path "rev-parse" "--verify" "--quiet"
+                                 (concat "refs/heads/" candidate))
+      (setq candidate (format "%s-%d" name (cl-incf n))))
+    candidate))
 
 (defun rat-kingdom-story-task (space repo id)
   "Return the task ID of the repository REPO in SPACE, for a new story.
@@ -617,9 +648,22 @@ the step's `:attempts', else the configuration's."
              (path (plist-get repo :path))
              (target (rat-kingdom-story-target space story))
              (known (plist-get payload :branch))
-             (branch (or known (concat "rats/" id)))
              (worktree (rat-kingdom-story--worktree story))
              (fresh (not (file-directory-p worktree)))
+             ;; A name from :git :branch takes a suffix if it is taken; a
+             ;; token from before it, with no :branch-name, does not.  A
+             ;; worktree made before the branch was recorded, as while
+             ;; its setup ran, is on the branch it was made with.
+             (branch (cond (known)
+                           ((plist-get payload :branch-name)
+                            (if fresh
+                                (rat-kingdom-story--free-branch
+                                 path (plist-get payload :branch-name))
+                              (or (ignore-errors
+                                    (rat-kingdom-git worktree "symbolic-ref"
+                                                     "--short" "HEAD"))
+                                  (plist-get payload :branch-name))))
+                           (t (concat "rats/" id))))
              (setup (and (or fresh (plist-get payload :needs-setup))
                          (rat-kingdom-story-commands
                           space :setup (plist-get repo :name)
@@ -631,9 +675,19 @@ the step's `:attempts', else the configuration's."
         (when fresh
           (make-directory (file-name-directory worktree) t)
           (rat-kingdom-git path "worktree" "prune")
-          (if known
-              (rat-kingdom-git path "worktree" "add" worktree branch)
-            (rat-kingdom-git path "worktree" "add" "-b" branch worktree target)))
+          (cond
+           (known (rat-kingdom-git path "worktree" "add" worktree branch))
+           ((plist-get payload :branch-name)
+            ;; The name was free, so a branch Git made before failing
+            ;; is its own, and goes.
+            (condition-case err
+                (rat-kingdom-git path "worktree" "add" "-b" branch worktree
+                                 target)
+              (error
+               (ignore-errors (rat-kingdom-git path "branch" "-D" branch))
+               (signal (car err) (cdr err)))))
+           (t (rat-kingdom-git path "worktree" "add" "-b" branch worktree
+                               target))))
         (condition-case err
             (if setup
                 (progn
@@ -855,45 +909,106 @@ its output:\n%s"
       (delete-directory candidate t)
       (rat-kingdom-git path "worktree" "prune"))))
 
+(defun rat-kingdom-story--integrate-mode (value)
+  "Return VALUE, a :git :integrate mode as a symbol or string, as a symbol.
+nil, or anything that is not a mode, is \=`merge'."
+  (or (rat-kingdom-config--integrate-mode value) 'merge))
+
+(defun rat-kingdom-story--integrate (candidate commit base mode message)
+  "Put COMMIT into the CANDIDATE worktree by MODE, and say how it went.
+CANDIDATE is detached at BASE, the target's head, or for \=`rebase' at
+COMMIT.  MODE is \=`merge', \=`rebase' or \=`squash'; MESSAGE is the
+merge commit's or the squashed commit's message.  Return nil if it
+went in, the candidate's HEAD then being the result, or a property list
+with `:reason' and `:output' saying why it did not."
+  (pcase mode
+    ('rebase
+     ;; The user's settings for these would touch other branches or
+     ;; reorder commits; unknown to an older Git, they are ignored.
+     (if (rat-kingdom-git-ok-p candidate "-c" "rebase.updateRefs=false"
+                               "-c" "rebase.autoSquash=false"
+                               "-c" "rebase.autoStash=false" "rebase" base)
+         nil
+       (let ((files (ignore-errors
+                      (rat-kingdom-git candidate "diff" "--name-only"
+                                       "--diff-filter=U"))))
+         (rat-kingdom-git-ok-p candidate "rebase" "--abort")
+         (list :reason "rebase conflict" :output (or files "")))))
+    ('squash
+     (cond
+      ((not (rat-kingdom-git-ok-p candidate "merge" "--squash" commit))
+       (list :reason "merge conflict"
+             :output (rat-kingdom-git candidate "diff" "--name-only"
+                                      "--diff-filter=U")))
+      ((rat-kingdom-git-ok-p candidate "diff" "--cached" "--quiet")
+       (list :reason "nothing to integrate"
+             :output (format "%s changes nothing against %s" commit base)))
+      (t (rat-kingdom-git candidate "commit" "-q" "-m" message)
+         nil)))
+    (_
+     (unless (rat-kingdom-git-ok-p candidate "merge" "--no-ff" "-m" message
+                                   commit)
+       (list :reason "merge conflict"
+             :output (rat-kingdom-git candidate "diff" "--name-only"
+                                      "--diff-filter=U"))))))
+
 (defun rat-kingdom-story-check-candidate (space token path target commit
-                                                candidate message check setup)
-  "Merge COMMIT onto TARGET in a fresh candidate worktree and check it there.
-PATH is the repository.  CANDIDATE is the worktree to make, detached
-at TARGET's head; one already there is removed first.  MESSAGE is the
-merge commit's message.  CHECK and SETUP are the commands to run, each
-a list of (NAME . ARGV) as `rat-kingdom-story-commands' returns: SETUP
-runs before CHECK, each in order until a command fails, and with no
-CHECK there is nothing to set up for, and the clean merge passes at
-once.
+                                                candidate message check setup
+                                                &optional integrate
+                                                squash-message)
+  "Put COMMIT onto TARGET in a fresh candidate worktree and check it there.
+PATH is the repository.  CANDIDATE is the worktree to make; one
+already there is removed first.  INTEGRATE, a :git :integrate mode,
+says how COMMIT goes in; nil is \=`merge'.
+
+  \=`merge'   the candidate is detached at TARGET's head and COMMIT
+            merged with --no-ff, MESSAGE the merge commit's message
+  \=`rebase'  the candidate is detached at COMMIT and rebased onto
+            TARGET's head; a conflict is recorded as a failure with
+            the reason \"rebase conflict\", and the rebase aborted
+  \=`squash'  the candidate is detached at TARGET's head, COMMIT is
+            merged with --squash and committed with SQUASH-MESSAGE; a
+            squash that changes nothing fails with the reason
+            \"nothing to integrate\"
+
+CHECK and SETUP are the commands to run, each a list of (NAME . ARGV)
+as `rat-kingdom-story-commands' returns: SETUP runs before CHECK, each
+in order until a command fails, and with no CHECK there is nothing to
+set up for, and the clean result passes at once.
 
 The outcome is recorded in SPACE as a `checked' tuple under TOKEN's
 `:scope', `:identity' and `:owner': a story's token, or an epic's
 record when it lands.  A merge that conflicts fails with the reason
 \"merge conflict\" and the files in conflict as its output.  The
 outcome carries `:commit', `:base' (where TARGET was), `:candidate',
-and, once merged, `:head', the merge.  A running check of the same
-identity is abandoned first.
+`:integrate', the mode, and, once integrated, `:head', the result, a
+descendant of the base, so the target moves to it by compare-and-swap
+whatever the mode.  A running check of the same identity is abandoned
+first.
 
 Return the base.  Return at once: the check's outcome is recorded when
 it exits.  If the candidate cannot be made or the check begun, signal
 the error, leaving no candidate and no process."
-  (let ((id (plist-get token :identity))
-        (base (rat-kingdom-git-rev path target)))
+  (let* ((id (plist-get token :identity))
+         (mode (rat-kingdom-story--integrate-mode integrate))
+         (base (rat-kingdom-git-rev path target)))
     (rat-kingdom-story--abandon-check id)
     (rat-kingdom-story--remove-candidate path candidate)
     (make-directory (file-name-directory candidate) t)
-    (rat-kingdom-git path "worktree" "add" "--detach" candidate base)
+    (rat-kingdom-git path "worktree" "add" "--detach" candidate
+                     (if (eq mode 'rebase) commit base))
     (condition-case err
-        (let ((facts (list :commit commit :base base :candidate candidate)))
+        (let ((facts (list :commit commit :base base :candidate candidate
+                           :integrate (symbol-name mode))))
           (rat-kingdom-space-retract
            space (list 'checked :scope (plist-get token :scope) :identity id))
-          (if (not (rat-kingdom-git-ok-p candidate "merge" "--no-ff" "-m"
-                                         message commit))
+          (if-let* ((failure (rat-kingdom-story--integrate
+                              candidate commit base mode
+                              (if (eq mode 'squash)
+                                  (or squash-message message)
+                                message))))
               (apply #'rat-kingdom-story--record-check
-                     space token "fail" :reason "merge conflict"
-                     :output (rat-kingdom-git candidate "diff" "--name-only"
-                                              "--diff-filter=U")
-                     facts)
+                     space token "fail" (append failure facts))
             (setq facts (append facts
                                 (list :head (rat-kingdom-git-rev candidate
                                                                  "HEAD"))))
@@ -908,13 +1023,24 @@ the error, leaving no candidate and no process."
        (ignore-errors (rat-kingdom-story--remove-candidate path candidate))
        (signal (car err) (cdr err))))))
 
+(defun rat-kingdom-story-squash-message (id title &optional body)
+  "Return the message of the squashed commit of ID titled TITLE.
+It is \"ID: TITLE\", then, if BODY is not blank, a blank line and BODY."
+  (concat (format "%s: %s" id title)
+          (if (and body (not (string-blank-p body)))
+              (concat "\n\n" (string-trim body))
+            "")))
+
 (defun rat-kingdom-story--check (space story _workflow step)
   "Begin STEP for the taken token STORY in SPACE.
-Merge its commit in a candidate worktree and run the configured check
+Put its commit onto its target in a candidate worktree, as the
+configuration's :git :integrate says, and run the configured check
 there, after the setup if there is one, by
-`rat-kingdom-story-check-candidate'.  Both are looked up with
-`rat-kingdom-story-commands' for the story's repository, epic and
-task.  The outcome is recorded in SPACE as a `checked' tuple."
+`rat-kingdom-story-check-candidate'.  The commands are looked up with
+`rat-kingdom-story-commands', and the mode with
+`rat-kingdom-story-config', for the story's repository, epic and task,
+when the check begins.  The outcome is recorded in SPACE as a
+`checked' tuple."
   (let* ((id (plist-get story :identity))
          (payload (plist-get story :payload))
          (repo (rat-kingdom-story--repo space story))
@@ -932,7 +1058,11 @@ task.  The outcome is recorded in SPACE as a `checked' tuple."
                                             (plist-get payload :task))
                 (rat-kingdom-story-commands space :setup (plist-get repo :name)
                                             (plist-get payload :epic)
-                                            (plist-get payload :task)))))
+                                            (plist-get payload :task))
+                (plist-get (rat-kingdom-story-config space story :git)
+                           :integrate)
+                (rat-kingdom-story-squash-message
+                 id (plist-get payload :title) (plist-get payload :summary)))))
     (condition-case err
         (rat-kingdom-story--wait space story step "check"
                                  :candidate candidate :base base)
@@ -941,8 +1071,9 @@ task.  The outcome is recorded in SPACE as a `checked' tuple."
        (ignore-errors (rat-kingdom-story--remove-candidate path candidate))
        (signal (car err) (cdr err))))))
 
-(defun rat-kingdom-story--check-reason (checked)
-  "Return what a worker is told when the check recorded as CHECKED failed."
+(defun rat-kingdom-story--check-reason (checked &optional target)
+  "Return what a worker is told when the check recorded as CHECKED failed.
+TARGET is the branch the work goes into."
   (let ((output (plist-get checked :output)))
     (pcase (plist-get checked :reason)
       ("merge conflict"
@@ -950,6 +1081,17 @@ task.  The outcome is recorded in SPACE as a `checked' tuple."
 the target branch. Merge the target branch into your branch, resolve the \
 conflicts, commit, and finish again. Files in conflict:\n%s"
                (or output "unknown")))
+      ("rebase conflict"
+       (format "rebase conflict: your branch no longer rebases cleanly onto \
+the target branch. Rebase your branch onto %s, resolve the conflicts, \
+commit, and finish again. Files in conflict:\n%s"
+               (or target "the target branch")
+               (if (string-blank-p (or output "")) "unknown" output)))
+      ("nothing to integrate"
+       (format "nothing to integrate: your branch makes no change against \
+%s, so there is nothing to squash into it. Commit the work the story asks \
+for, and finish again."
+               (or target "the target branch")))
       ("setup failed"
        (concat "The check did not run because the repository's "
                (rat-kingdom-story--setup-reason checked)
@@ -1007,9 +1149,15 @@ with \"fix\".  ACTOR is who gave the verdict."
 
 (defun rat-kingdom-story--clean-up (space story path head)
   "Remove what the integrated token STORY left behind in SPACE.
-PATH is its repository, whose target branch is now at HEAD.  Failures
+PATH is its repository, whose target branch is now at HEAD.  The story
+branch is deleted if it is an ancestor of HEAD, as after a merge, or,
+when the story was integrated by \=`rebase' or \=`squash' (its
+`:integrate'), if its tip is still the commit that was checked, its
+`:commit'; otherwise someone has added to it, and it is kept.  Failures
 are reported and otherwise ignored: the work is already merged."
-  (let ((payload (plist-get story :payload)))
+  (let* ((payload (plist-get story :payload))
+         (branch (plist-get payload :branch))
+         (ref (and branch (concat "refs/heads/" branch))))
     (with-demoted-errors "rat-kingdom: cleaning up: %S"
       (rat-kingdom-story--remove-candidate path (plist-get payload :candidate)))
     (with-demoted-errors "rat-kingdom: cleaning up: %S"
@@ -1017,9 +1165,14 @@ are reported and otherwise ignored: the work is already merged."
     (with-demoted-errors "rat-kingdom: cleaning up: %S"
       ;; Not forced: a worktree the worker dirtied after reporting stays.
       (rat-kingdom-git path "worktree" "remove" (plist-get payload :worktree))
-      (when (rat-kingdom-git-ancestor-p
-             path (concat "refs/heads/" (plist-get payload :branch)) head)
-        (rat-kingdom-git path "branch" "-D" (plist-get payload :branch))))))
+      (when (and ref
+                 (or (rat-kingdom-git-ancestor-p path ref head)
+                     (and (memq (rat-kingdom-story--integrate-mode
+                                 (plist-get payload :integrate))
+                                '(rebase squash))
+                          (equal (ignore-errors (rat-kingdom-git-rev path ref))
+                                 (plist-get payload :commit)))))
+        (rat-kingdom-git path "branch" "-D" branch)))))
 
 (defun rat-kingdom-story--merge (space story _workflow step)
   "Begin STEP for the taken token STORY in SPACE.
@@ -1206,10 +1359,14 @@ was started: %s"
     (if (equal $value "pass")
         (rat-kingdom-story--leave rat-kingdom-reaction-space story :pass
                                   :head (plist-get checked :head)
-                                  :base (plist-get checked :base))
+                                  :base (plist-get checked :base)
+                                  :integrate (plist-get checked :integrate))
       (rat-kingdom-story--leave
        rat-kingdom-reaction-space story :fail
-       :reason (rat-kingdom-story--check-reason checked)))))
+       :reason (rat-kingdom-story--check-reason
+                checked (ignore-errors
+                          (rat-kingdom-story-target rat-kingdom-reaction-space
+                                                    story)))))))
 
 (rat-kingdom-defreaction rat-kingdom-story-judged
   "Move on a story that has been given a verdict."
