@@ -76,6 +76,7 @@
 (require 'rat-kingdom-king)
 (require 'rat-kingdom-fact)
 (require 'rat-kingdom-message)
+(require 'rat-kingdom-doc)
 (require 'rat-kingdom-epic)
 (require 'rat-kingdom-plan)
 (require 'rat-kingdom-foreman)
@@ -235,7 +236,8 @@ PATTERN, if given, is a story pattern the story must match."
            nil t)))))
 
 ;;;###autoload
-(defun rat-kingdom-add-repo (path &optional check setup task-prefix mixins)
+(defun rat-kingdom-add-repo (path &optional check setup task-prefix git
+                                  mixins)
   "Register the repository at PATH, with CHECK as its merge check.
 CHECK is a command as a list of strings, run without a shell in a
 candidate worktree; work is merged only if it succeeds.  SETUP is a
@@ -243,9 +245,11 @@ command of the same kind run in each new worktree before a worker
 starts and before the check, such as one that installs dependencies.
 If the checkout has no br workspace, one is created with TASK-PREFIX,
 by default the repository's name, as its issue prefix; see
-`rat-kingdom-task-br-ensure'.  MIXINS, a list of mixin names such as
-\(no-review), is applied to every workflow its stories follow.  .rk
-and .beads are then kept out of
+`rat-kingdom-task-br-ensure'.  GIT, from Lisp only, is the :git
+configuration of the registration layer, such as (:branch
+\"rats/%s-%i\" :integrate squash).  MIXINS, from Lisp only, a list of
+mixin names such as (no-review), is applied to every workflow its
+stories follow.  .rk and .beads are then kept out of
 Git, or not, as the configuration's :track says; see
 `rat-kingdom-config-track-apply'."
   (interactive
@@ -265,7 +269,7 @@ repository's name): ")))
                (and (not (string-blank-p prefix)) prefix))))))
   (let ((repo (rat-kingdom-repo-add (rat-kingdom-space-default) path
                                     :check check :setup setup
-                                    :task-prefix task-prefix
+                                    :task-prefix task-prefix :git git
                                     :mixins mixins)))
     (message "Registered %s; finished work is merged into %s%s%s"
              (plist-get repo :name)
@@ -389,7 +393,8 @@ See `rat-kingdom-git-publish'."
     "rat-kingdom-mcp" "rat-kingdom-inspector" "rat-kingdom-agent-shell"
     "rat-kingdom-run" "rat-kingdom-workflow" "rat-kingdom-task"
     "rat-kingdom-config" "rat-kingdom-story" "rat-kingdom-king"
-    "rat-kingdom-fact" "rat-kingdom-message" "rat-kingdom-epic"
+    "rat-kingdom-fact" "rat-kingdom-message" "rat-kingdom-doc"
+    "rat-kingdom-epic"
     "rat-kingdom-plan" "rat-kingdom-foreman" "rat-kingdom")
   "The package's files, each after the files it requires.")
 

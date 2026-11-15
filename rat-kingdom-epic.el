@@ -1050,10 +1050,11 @@ cause, then epic_resume lands it again."
 
 (defun rat-kingdom-epic--land (space repo id from)
   "Begin landing the epic ID of REPO in SPACE, if it is in a state of FROM.
-Its feature branch is merged into its target in a fresh candidate
-worktree, and the setup and check configured for the repository and
-the epic run there (`rat-kingdom-story-commands'), by
-`rat-kingdom-story-check-candidate', as for a story.  The outcome is a
+Its feature branch is put onto its target in a fresh candidate
+worktree, as the :git :integrate of the repository and the epic says
+\(a squashed commit's message names the tasks merged), and the setup
+and check configured for them run there (`rat-kingdom-story-commands'),
+by `rat-kingdom-story-check-candidate', as for a story.  The outcome is a
 `checked' tuple named by the epic, which
 `rat-kingdom-epic-landing-checked' takes from there.  The epic is
 `landing', waiting for the check, meanwhile.  If the check cannot be
@@ -1081,7 +1082,13 @@ registered" repo)))
            (format "Merge the epic %s: %s" id
                    (rat-kingdom-epic--payload record :title))
            (rat-kingdom-story-commands space :check repo id)
-           (rat-kingdom-story-commands space :setup repo id)))
+           (rat-kingdom-story-commands space :setup repo id)
+           (plist-get (rat-kingdom-config-get space :git :repo repo :epic id)
+                      :integrate)
+           (rat-kingdom-story-squash-message
+            id (rat-kingdom-epic--payload record :title)
+            (mapconcat (lambda (task) (format "%s" task))
+                       (rat-kingdom-epic--payload record :merged) "\n"))))
       (error
        (rat-kingdom-epic--stop-landing
         space repo id (format "its check could not be begun: %s"
@@ -1130,12 +1137,19 @@ RECORD is the epic, TARGET where it lands, and CHECKED the outcome of
 its landing check."
   (let* ((branch (rat-kingdom-epic--payload record :branch))
          (name (rat-kingdom-epic--name record))
-         (conflict (equal (plist-get checked :reason) "merge conflict")))
+         (conflict (member (plist-get checked :reason)
+                           '("merge conflict" "rebase conflict"))))
     (concat
      (pcase (plist-get checked :reason)
        ("merge conflict"
         (format "The epic %s cannot land on %s: its branch %s no longer \
 merges cleanly into %s, which has moved on since." name target branch target))
+       ("rebase conflict"
+        (format "The epic %s cannot land on %s: its branch %s no longer \
+rebases cleanly onto %s, which has moved on since." name target branch target))
+       ("nothing to integrate"
+        (format "The epic %s cannot land on %s: its branch %s makes no \
+change against %s, so there is nothing to squash." name target branch target))
        ("setup failed"
         (format "The epic %s cannot land on %s: with its branch %s merged \
 into %s, the repository's setup %s exited with %s, so the check did not run."
@@ -1177,6 +1191,16 @@ what breaks, is started on that branch."
                                                     "")
                                                 "\n" t)
                                   ", ")))
+       ("rebase conflict" (format "its branch no longer rebases cleanly onto \
+%s, which has moved on (in conflict: %s)"
+                                  target
+                                  (string-join
+                                   (split-string (or (plist-get checked :output)
+                                                     "")
+                                                 "\n" t)
+                                   ", ")))
+       ("nothing to integrate"
+        (format "its branch makes no change against %s" target))
        ("setup failed" "the repository's setup failed with the branch merged")
        (_ (format "the check failed with the branch merged (exit %s)"
                   (plist-get checked :exit)))))))
@@ -1406,9 +1430,11 @@ epic_verdict")))))
 (defun rat-kingdom-epic--story-event (space event story)
   "Keep the epic of the token STORY in SPACE up to date after EVENT.
 For `rat-kingdom-story-event-functions'.  A merged story's task is
-recorded as merged.  A story that ended otherwise, or was cancelled,
-leaves its task held, so that dispatch does not start it again when it
-is released, unless its epic has ended."
+recorded as merged, as is the task of a story done in a workflow
+that merges nothing; see `rat-kingdom-story-complete-p'.  A story
+that ended otherwise, or was cancelled, leaves its task held, so that
+dispatch does not start it again when it is released, unless its epic
+has ended."
   (let* ((payload (plist-get story :payload))
          (id (plist-get payload :epic))
          (task (plist-get payload :task))
@@ -1417,7 +1443,9 @@ is released, unless its epic has ended."
     (when record
       (pcase event
         ('done
-         (if (plist-get payload :integrated)
+         ;; A story of a workflow that merges nothing, such as research,
+         ;; counts as merged once it is done.
+         (if (rat-kingdom-story-complete-p space story)
              (rat-kingdom-epic--update
               space repo id
               (lambda (payload)
@@ -1465,7 +1493,8 @@ None of them starts until it is merged."
                                    dependents)))
                          (t "No other task of the epic waits on it.")))))
         ((or 'cancelled
-             (and 'done (guard (not (plist-get payload :integrated)))))
+             (and 'done (guard (not (rat-kingdom-story-complete-p space
+                                                                   story)))))
          (format "Its task %s of the epic %s is now held: the engine will not \
 start it again by itself. If it should be done after all, call epic_retry \
 with %s and %s."

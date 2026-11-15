@@ -70,8 +70,13 @@ otherwise). Nothing is pushed unless the user asks, and the user's checkout \
 is never touched. The user merges the target branch into their own branch \
 when they choose.
 - Each story follows a workflow. `story` has a review by you before the \
-merge; `story-lite` has none. The user may define others in workflow \
-files, some for one repository only. Use `workflow_list` to see them.
+merge; `story-lite` has none. `research` gives the task to a researcher, \
+who writes docs instead of code; you review them with `story_show` and \
+`story_diff`, and a pass approves them, so that every later worker in the \
+repository is told of them. Nothing is merged. Use `doc_list` and \
+`doc_show` to read docs, and `doc_forget` to remove a wrong one. The user \
+may define other workflows in workflow files, some for one repository \
+only. Use `workflow_list` to see them.
 - Every repository has a task tracker, a br (Rust Beads) workspace in the \
 user's checkout, which repo_add creates, kept out of Git, if it is \
 missing. `status` lists its ready tasks under Available tasks. A story started for one of them should pass its id \
@@ -414,6 +419,26 @@ another."
                             failures "\n"))
        ""))))
 
+(defvar rat-kingdom-king-show-functions nil
+  "Functions that add to what `story_show' and `story_diff' show of a story.
+Each is called with the space, the story's token, live or archived, and
+the tool, `show' or `diff', and returns text or nil.  For `show' the
+text is a line, or lines, of the story's entry, after the worker's
+report.  For `diff' it is shown before the Git diff, which is then left
+out if the story has no commits of its own.  rat-kingdom-doc.el puts
+one here, which shows a story's docs.  Add to it with `add-hook', so
+that reloading does not add a function twice.")
+
+(defun rat-kingdom-king--show-texts (space story tool)
+  "Return the texts `rat-kingdom-king-show-functions' give for TOOL.
+Each is called with SPACE, the token STORY and TOOL."
+  (let (texts)
+    (dolist (function rat-kingdom-king-show-functions)
+      (with-demoted-errors "rat-kingdom: show function: %S"
+        (when-let* ((text (funcall function space story tool)))
+          (push text texts))))
+    (nreverse texts)))
+
 (defun rat-kingdom-king--find-story (space id)
   "Return the token of the story ID in SPACE, live or archived.
 The second value, in a cons, is non-nil if it is archived."
@@ -517,6 +542,9 @@ see `rat-kingdom-king-story-start'."
                 (and (plist-get payload :checks)
                      (format "Checks the worker ran: %s"
                              (plist-get payload :checks)))
+                (when-let* ((texts (rat-kingdom-king--show-texts
+                                    space story 'show)))
+                  (string-join texts "\n"))
                 (and checked
                      (format "Check: %s%s%s"
                              (plist-get checked :value)
@@ -573,6 +601,7 @@ see `rat-kingdom-king-story-start'."
   (pcase-let* ((`(,story . ,_) (rat-kingdom-king--find-story space id))
                (_ (when check (funcall check 'story story)))
                (payload (plist-get story :payload))
+               (texts (rat-kingdom-king--show-texts space story 'diff))
                (repo (or (rat-kingdom-repo-get space (plist-get story :scope))
                          (error "Repository %s is no longer registered"
                                 (plist-get story :scope))))
@@ -583,11 +612,16 @@ see `rat-kingdom-king-story-start'."
                               path "rev-parse" "--verify" "--quiet"
                               (concat "refs/heads/" (plist-get payload :branch)))
                              (plist-get payload :branch))
-                        (error "%s has no commits yet" id)))
+                        (and (not texts)
+                             (error "%s has no commits yet" id))))
                (from (or (plist-get payload :base)
-                         (rat-kingdom-story-target space story))))
-    (or (rat-kingdom-king-diff-text path from tip)
-        (format "%s has no commits of its own yet." id))))
+                         (rat-kingdom-story-target space story)))
+               (diff (and tip (rat-kingdom-king-diff-text path from tip))))
+    (cond
+     ((null texts)
+      (or diff (format "%s has no commits of its own yet." id)))
+     (diff (concat (string-join texts "\n\n") "\n\n" diff))
+     (t (string-join texts "\n\n")))))
 
 ;;;; News for the king
 
@@ -679,9 +713,13 @@ the work another way."
             ('review
              (when (equal (plist-get (rat-kingdom-story--step space story) :with)
                           'king)
-               (format "%s passed its check and waits for your review. Read \
-story_diff and story_show for %s, then give a verdict."
-                       name id)))
+               (format "%s %s waits for your review. Read story_diff and \
+story_show for %s, then give a verdict."
+                       name
+                       (if (plist-get payload :commit)
+                           "passed its check and"
+                         "is done and")
+                       id)))
             ('stuck
              (format "%s looks stuck. %s" name (plist-get payload :reason)))
             ('cancelled
@@ -1038,7 +1076,12 @@ called with the story's token first; see above."
   (when check
     (funcall check 'story (car (rat-kingdom-king--find-story space story))))
   (pcase (rat-kingdom-story-verdict space story value notes actor)
-    ("pass" (format "Recorded. %s will be merged now." story))
+    ("pass"
+     (if (when-let* ((token (rat-kingdom-story-get space story))
+                     (workflow (rat-kingdom-story--workflow space token)))
+           (not (rat-kingdom-story-merges-p workflow)))
+         (format "Recorded. %s has passed; its workflow merges nothing." story)
+       (format "Recorded. %s will be merged now." story)))
     (_ (format "Recorded. %s goes back to a worker with your notes." story))))
 
 (rat-kingdom-king--deftool "status"
@@ -1254,6 +1297,12 @@ rk/integration. It must not be a branch that is checked out.")
       (:name "task_prefix" :type string :optional t
        :description "The issue prefix of the br workspace, if one has to \
 be created. Default the repository's name.")
+      (:name "git" :type string :optional t
+       :description "The :git configuration of the registration layer, as \
+Emacs Lisp text read as config_set reads a value, e.g. (:branch \"rats/%s-%i\" \
+:integrate squash). :branch is the format of story branch names (%i story \
+id, %s title slug, %r repo, %e epic or none, %% a %); :integrate is merge, \
+rebase or squash. Leave out for the defaults.")
       (:name "mixins" :type string :optional t
        :description "Mixins applied to every workflow its stories follow, \
 as Emacs Lisp text: a list of names such as (no-review). See workflow_list \
@@ -1279,6 +1328,8 @@ for the mixins there are."))
                :setup (and (arg 'setup) (split-string-and-unquote (arg 'setup)))
                :target (arg 'target) :workflow (arg 'workflow)
                :task-prefix (arg 'task_prefix)
+               :git (and (arg 'git) (rat-kingdom-config-read-value
+                                     (arg 'git)))
                :mixins (and (arg 'mixins)
                             (rat-kingdom-config-read-value (arg 'mixins))))))
     (string-join
@@ -1322,7 +1373,8 @@ else. Required unless task is given.")
        :description "The id of a tracker task, as listed under Available \
 tasks in status. Title and description default to the task's.")
       (:name "workflow" :type string :optional t
-       :description "The workflow to follow. Default the task's \
+       :description "The workflow to follow, such as story, story-lite or \
+research (a researcher writes docs; nothing is merged). Default the task's \
 rk-workflow: label if it has one, else the repository's own.")
       (:name "agent" :type string :optional t
        :description "Chooses the agent the story's workers run: claude \
@@ -1344,13 +1396,15 @@ branch without this."))
 
 (rat-kingdom-king--deftool "story_show"
     "Show everything recorded about one story, in progress or finished: \
-where it is, why it stopped, the worker's report and the check's outcome."
+where it is, why it stopped, the worker's report, its docs and the check's \
+outcome."
     '((:name "story" :type string :description "The story's id, like S-1a2b."))
   (rat-kingdom-king--show space (arg 'story)))
 
 (rat-kingdom-king--deftool "story_diff"
     "Show the commits and the diff a story's work makes against its \
-target branch."
+target branch. For a story with docs, such as a research story, each doc's \
+text comes first, and the diff only if the branch has commits."
     '((:name "story" :type string :description "The story's id."))
   (rat-kingdom-king--diff space (arg 'story)))
 
