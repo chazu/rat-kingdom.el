@@ -448,13 +448,26 @@ expansion fail.
 **Aspect forms.** STEP-BODY is a step's property list without `:from` or
 a name: `(:run (format))`, `(:spawn rat :brief "…")`. It has exactly one
 kind. It may name its other outcomes, but not its first, which the aspect
-places.
+places. A `:before` body may also have `:entry` (below).
 
 - **`(:before MATCH STEP-BODY)`** adds a place and a step, both named
-  `before-STEP`, STEP the matched step's name. Every outcome that led to
-  the matched step's place now reaches the new place, and so does the
-  start if it was the matched place. The new step's first outcome leads to
-  the matched place.
+  `before-STEP`, STEP the matched step's name. Its STEP-BODY may include
+  `:entry ENTRY`, which says which ways into the matched place the new
+  step catches. ENTRY is `all` or `start`, and `all` is the default.
+  - With `:entry all`, every outcome that led to the matched step's place
+    now reaches the new place, and so does the start if it was the
+    matched place.
+  - With `:entry start`, only the workflow's start is redirected to the
+    new place, and only when the matched place is the start. Every
+    outcome that led to the matched place still leads there directly. If
+    the matched place is not the start, the aspect adds nothing for that
+    match and is skipped, as a MATCH that matches nothing is.
+
+  In both cases the new step's first outcome leads to the matched place.
+  `:entry` is removed from the body before the step is made. It is
+  invalid on `:after`, on `:around`, and with any value other than `all`
+  or `start`; an aspect with an invalid `:entry` has the wrong shape, so
+  the expansion fails, or the mixin file is invalid.
 - **`(:after MATCH STEP-BODY)`** adds a place and a step named `after-STEP`
   on the matched step's first outcome: that outcome now leads to the new
   place, and the new step's first outcome leads to where it used to go.
@@ -473,9 +486,10 @@ places.
   is free. So when a step is matched more than once, by two aspects, the
   second step is `after-check-2`.
 
-Every way into a matched place passes through a `:before` step: with
-`tdd`, a failed check or a review that asks for changes also leads back
-through `before-implement` (open question 7, section 16).
+By default every way into a matched place passes through a `:before`
+step. `tdd` uses `:entry start` so that its tests worker runs once, at
+the beginning: a failed check or a review that asks for changes leads
+straight back to `implement`, not through `before-implement`.
 
 **Built-in mixins**, defined with `rat-kingdom-workflow-define-mixin`,
 which validates a mixin's shape as a mixin file is validated:
@@ -487,13 +501,16 @@ which validates a mixin's shape as a mixin file is validated:
 
 (rat-kingdom-workflow-define-mixin 'tdd
   :doc "A worker writes failing tests before another implements the task."
-  :aspects '((:before implement :spawn rat
+  :aspects '((:before implement :entry start :spawn rat
               :brief "Write failing tests for the task and commit them; \
 do not implement it.")))
 ```
 
-`tdd`'s step is `before-implement`. Its first outcome, `:to`, leads to
-`implement`'s place, and its `:blocked` to the failure place.
+`tdd`'s step is `before-implement`, and its place becomes the start
+when `implement`'s place is the start, as in `story`. Its first outcome,
+`:to`, leads to `implement`'s place, and its `:blocked` to the failure
+place. Every other way into `implement`'s place is unchanged. In a
+workflow whose start is not `implement`'s place, `tdd` adds nothing.
 
 **Mixin files.** Mixins can also be files:
 `~/.emacs.d/rat-kingdom/mixins/NAME.eld` (`mixins` in
@@ -1856,8 +1873,7 @@ but a disposable bare repository.
 5. Does the king see every `fact`, or only those a reaction promotes?
    Today it can `query` every one, and is told none unasked.
 6. The package layout.
-7. Should a `:before` step catch every way into its place? As specified
-   (7.1) it does, so with `tdd` a failed check or a review that asks for
-   changes sends the story through `before-implement` again, and a
-   tests worker runs before each fix. A later form could catch only the
-   start, if that proves wasteful.
+7. Should a `:before` step catch every way into its place? Answered by
+   `:entry` (7.1): by default it does, and with `:entry start` it catches
+   only the start. `tdd` uses `:entry start`, so its tests worker runs
+   once and fixes loop straight back to `implement`.
