@@ -106,7 +106,8 @@ if it has one. When a story's token reaches a terminal place, its owned
 tuples move to an archive table in the same transaction. The live space
 holds only work in flight. Facts worth keeping past a story are written
 with no owner, scoped to the repo, so no sweep takes them; the king
-removes a wrong one with `fact_forget`, which retracts it.
+removes a wrong one with `fact_forget`, which retracts it. Docs are kept
+the same way, and removed with `doc_forget` (section 9).
 
 Each `out` and `in` is also appended to an operations log table. That log
 is the audit trail and can be replayed.
@@ -115,7 +116,7 @@ is the audit trail and can be replayed.
 
 | Category | Modality | Written by | Meaning |
 |---|---|---|---|
-| `story` | linear | engine | the token: `(story S :at PLACE :workflow W :task T)`, with `:target` if it has a target of its own |
+| `story` | linear | engine | the token: `(story S :at PLACE :workflow W :task T)`, with `:target` if it has a target of its own; a child story (7.1) has `:parent` instead of `:task` and `:epic` |
 | `available` | linear | task adapter | a ready task with no story yet |
 | `run` | persistent | engine | a live or stopped agent run and its state |
 | `result` | persistent | worker `finish` | commit, summary, reported checks |
@@ -125,7 +126,9 @@ is the audit trail and can be replayed.
 | `review` | linear | engine | a request for the king or user to judge |
 | `verdict` | linear | king or user | `pass` or `fix` with notes |
 | `message` | linear | engine, king `tell` | text for the king, or for a story's working run, delivered at a turn boundary |
-| `doc` | persistent | research worker | a design or research document and its status |
+| `doc` | persistent | researcher `write_doc` | a design or research document, scoped to the repo, named `D-` and four hex digits, with no owner: `:title :body :topic :status :story :run`, `:status` `draft` or `approved` (7.1) |
+| `signal` | linear | king `story_signal` | opens a story's `:gate (:signal NAME)`: scoped to the story's repo, named and owned by the story, `:name NAME`; taken when the gate opens (7.1) |
+| `ran` | persistent | engine | how a `:run` step's commands came out, named by the story (7.1) |
 | `fact` | persistent | workers | something learned about the repo |
 | `policy` | persistent | king `config_set` | an epic or task override of configuration (7.3), scoped to the repo, named and owned by the epic or task, its payload the keys that layer allows; replaced whole |
 | `event` | affine | ingress, engine | something happened outside or inside |
@@ -218,34 +221,351 @@ parked. A target branch that moved after the check leads back to
 `checking`; a commit that was already reviewed is not reviewed again.
 Workers are capped; the rest queue (section 7.2).
 
-The sketch this grew from, kept for the parts not yet built:
+**Spec: workflow composition**, step 8 of the build order (section 15).
+The rest of this section says what the engine is to do. None of it is
+built yet.
+
+The starting workflows are `story`, `story-lite` (no review) and
+`research` (writes docs, no code; below). **Epics are not a workflow.**
+An epic is a collection of stories, dispatched by reactions on the `epic`
+tuple (section 10). Each of its stories runs whatever workflow it is
+given.
+
+A workflow file that uses most of what follows:
 
 ```elisp
-(workflow story
-  :places (ready implementing checking review integrating done blocked)
-  :steps ((implement :from ready       :spawn rat          :to checking)
-          (check     :from checking    :run (lint test)    :pass review :fail implementing)
-          (review    :from review      :by king            :pass integrating :fix implementing)
-          (integrate :from integrating :merge :into target :to done))
-  :mixins (git-feature-branch)
-  :aspects ((:around check :timeout "15m")
-            (:after implement :run (format))))
+(:name careful
+ :doc "As story, test first, with the code formatted before the check."
+ :places (ready checking review integrating done blocked)
+ :start ready
+ :final (done)
+ :steps ((implement :from ready :spawn rat :to checking)
+         (check :from checking :check (lint test) :pass review :fail ready)
+         (review :from review :review king :pass integrating :fix ready)
+         (integrate :from integrating :merge t :to done :stale checking))
+ :mixins (tdd)
+ :aspects ((:around check :timeout 900)
+           (:after implement :run (format))))
 ```
 
-Step kinds, first cut: `:spawn` a role, `:run` named commands, `:by` a
-judge (king or user), `:merge`, `:gate` (wait for a tuple or a timer),
-`:workflow` (run a child workflow).
+**Step kinds.** A step still has exactly one kind, a name, `:from`, and
+optionally `:timeout` and `:attempts`. The first outcome of each kind must
+be given a place; the others lead to the failure place unless given one,
+as now. `rat-kingdom-workflow-kinds` gains the last three rows.
 
-- **Mixins** are named fragments merged into a workflow: `no-review`,
-  `tdd`, `git-feature-branch`.
-- **Aspects** add steps before, after or around every step matching a
-  pattern.
-- **Named commands** such as `lint` and `test` resolve to argument arrays
-  in configuration. They run without a shell.
+| Kind | Value | Outcomes | What it does |
+|---|---|---|---|
+| `:spawn` | a role, `rat` or `researcher` | `:to`, `:blocked` | starts a worker, as built; may have `:brief` |
+| `:check` | `t`, or a list of command names | `:pass`, `:fail` | merges in a candidate and runs a check, as built |
+| `:review` | `king` or `user` | `:pass`, `:fix` | waits for a verdict, as built |
+| `:merge` | `t` | `:to`, `:stale` | moves the target, as built; how it integrates is `:git :integrate` (7.3) |
+| `:run` | a list of command names | `:pass`, `:fail` | runs commands in the story's worktree and commits what they change |
+| `:gate` | `(:after SECONDS)` or `(:signal NAME)` | `:to` | waits, with no process |
+| `:workflow` | a workflow name | `:to`, `:fail` | runs a child story |
 
-Starting workflows: `story`, `story-lite` (no review), `research` (writes a
-doc, no code), `epic` (dispatches child stories in dependency order;
-built instead as dispatch by reactions on an `epic` tuple, section 10).
+The normalized step keeps the kind's value as `:with`, as now, and
+`:brief` when it has one. `rat-kingdom-workflow-validate` checks each
+value's shape as below; a value of the wrong shape makes the workflow
+invalid.
+
+- **`:spawn ROLE`** takes an optional `:brief STRING`: extra instructions
+  for this step's worker. They go in its prompt after the task's
+  description, under the line "For this step (STEP):". This is how a step
+  such as `tests` says "write failing tests first". `:brief` on a step of
+  another kind, or a ROLE other than `rat` or `researcher`, makes the
+  workflow invalid.
+- **`:check t`** keeps today's meaning: the configured setup, then the
+  configured check (7.3). **`:check (NAME ...)`**, a non-empty list of
+  symbols, runs those commands from the merged `:commands` for the
+  story's repository, epic and task, in that order, in place of the
+  configured `:check`. The configured setup still runs first. A name that
+  `:commands` does not define makes the step fail to begin, with the
+  reason (7.2): "Step check could not be begun: lint is not a command;
+  the commands are …". The `checked` tuple records `:names` and the
+  failing command, as now.
+- **`:run (NAME ...)`**, a non-empty list of symbols, outcomes `:pass`
+  (required) and `:fail`. The names are resolved as for `:check (NAME
+  ...)`, and an unknown one fails the step's beginning in the same way.
+  1. The worktree must be clean (`git status --porcelain` shows nothing)
+     and its `HEAD` must be the token's `:commit`. Otherwise the step fails
+     to begin, naming the files or the two commits. The setup is not run
+     again.
+  2. The commands run in the story's own worktree, not in a candidate, one
+     after another, as processes without a shell, stopping at the first
+     that fails. They are the story's process, as a check is: one at a
+     time, killed when the story is moved or cancelled, and run again by
+     reconciling (8.4) if Emacs stopped while they ran. The story waits
+     for "run". Its limit is the step's `:timeout`, else the
+     configuration's `:timeouts :check`.
+  3. If a command fails, the outcome is `:fail`, with the reason "run
+     failed: the command NAME (ARGV) exited with N. The end of its
+     output: …". That is what the next worker is told if `:fail` leads
+     back to one.
+  4. If all succeed and the worktree is changed, the engine commits every
+     change on the story's branch (`git add -A`, then `git commit
+     --no-verify -m "rat-kingdom: run NAMES"`, NAMES the names joined by
+     spaces) and records the new commit as the token's `:commit`. The
+     outcome is `:pass`. If nothing changed, it is `:pass` with `:commit`
+     as it was. A commit that fails is `:fail`, with Git's message.
+  5. The outcome is a persistent `ran` tuple named by the story (5.4):
+     `:value` (`pass` or `fail`), `:names`, `:command` and `:argv` (the
+     command that failed, or the last that ran), `:exit`, `:output` and
+     `:commit`. A reaction joins it with the waiting token, as the
+     `checked` one does. The story's earlier `ran` tuple is retracted when
+     the step begins, so an old outcome never ends a new run.
+
+  This is the step an aspect such as `(:after implement :run (format))`
+  inserts.
+- **`:gate SPEC`**, outcome `:to` (required). It waits without any
+  process and holds no worker. The story waits for "gate". SPEC is one
+  of:
+  - `(:after SECONDS)`, SECONDS a positive number. When the step begins,
+    the time it opens (now, as `rat-kingdom-space-now-function` gives it,
+    plus SECONDS) is stored on the token as `:until`, so it survives a
+    restart. `rat-kingdom-story-open-gates` moves on by `:to`, each in its
+    own transaction, every token that waits for "gate" and whose `:until`
+    has passed. A timer set when the step begins calls it, and so do the
+    watchdog, once a minute, and reconciling. A gate entered again after
+    a loop gets a new `:until`.
+  - `(:signal NAME)`, NAME a symbol or string, kept on the token as a
+    string under `:signal`. The gate opens when a `signal` tuple (5.4)
+    with the story's scope and identity and `:name NAME` is in the space:
+    a reaction takes both the token and the signal and moves the token on
+    by `:to`. So a signal written before the gate began opens it as soon
+    as it begins. The king's `story_signal` (section 9) writes signals.
+
+  A gate has no default timeout, like a review. A step `:timeout` makes
+  the watchdog report it stuck once that has passed.
+- **`:workflow NAME`**, outcomes `:to` (required) and `:fail`. NAME is a
+  symbol or string. It starts a child story (below) and waits for it.
+  Whether a workflow of that name exists is checked when the step begins.
+
+**Child stories.** A `:workflow` step starts a child story that runs
+workflow NAME in the parent's worktree, on its branch, from its commit.
+
+- The child's id is PARENT/STEP, for example `S-1a2b/lint`. If that id
+  was used before, because the step runs again after a loop, it is
+  `S-1a2b/lint-2`, then `-3`. Where an id names a file, `/` is written
+  `+`: the child's candidate is `candidates/REPO/S-1a2b+lint`, never a
+  directory inside its parent's candidate.
+- Its token is a story token in the parent's repository, owned by itself,
+  at its workflow's start, with `:attempt 0`, the parent's `:agent`, the
+  title "TITLE (STEP)" and the parent's description. It takes from the
+  parent `:worktree`, `:branch`, `:commit`, `:head` and `:base`, and the
+  parent's target (`rat-kingdom-story-target`) as its `:target`. It has
+  `:parent`, the parent's id, and `:depth`, one more than the parent's (a
+  story with no parent has depth 0).
+- The parent's epic and task are on the child as `:config-epic` and
+  `:config-task`, not as `:epic` and `:task`. `rat-kingdom-story-config`
+  reads them for a token that has them, so the child's configuration,
+  and with it its `:commands`, `:check` and `:mixins`, is the parent's.
+  Because the child has no `:task` or `:epic`, it never claims, closes or
+  releases the parent's task, and its epic neither counts it nor records
+  it. News of a child is routed by its `:config-epic` as its parent's
+  is by `:epic` (8.2), so an epic's foreman hears of it.
+- Its spawn steps find the worktree and branch already there, so no setup
+  runs, and each worker is told of the earlier work. It has its own count
+  of workers.
+- A child's workflow may not have a `:merge` step. A NAME whose expansion
+  has one, or that is not a workflow, makes the parent's step fail to
+  begin.
+- **Limits.** Before the child starts, the engine follows the `:workflow`
+  steps of NAME's expansion, and of theirs in turn, for the story's
+  configuration. The step fails to begin if that would make a story
+  deeper than 4, or would reach NAME again, or the workflow of the story
+  or of any of its ancestors: "the workflow lint would contain itself".
+- The parent waits in its step for "child", with the child's id as
+  `:child`. It holds no worker.
+- When the child reaches a final place, it is archived as any story is,
+  and in the same transaction the parent takes the child's `:commit`,
+  `:head` and `:base` (each one the child has; one it lacks stays as the
+  parent had it) and leaves by `:to`.
+- When the child reaches its failure place, or is parked anywhere else,
+  it is archived, and in the same transaction the parent leaves by `:fail`
+  with the child's reason: "The child S-1a2b/lint stopped at blocked:
+  REASON". The worktree is left as it is.
+- Moving or cancelling the parent cancels the child first, as
+  `story_cancel` would; the worktree and branch are the parent's and are
+  kept. Cancelling the child alone sends the parent on by `:fail`, with
+  "The child S-1a2b/lint was cancelled". The child can be moved, told and
+  signalled by its own id, as any story.
+- `status` shows the child on its own line, indented under its parent's,
+  and `story_show` of either names the other.
+- The watchdog reports as stuck a parent that waits for "child" when the
+  child's token is gone.
+
+**Mixins and aspects.**
+
+- **Where they appear.** A workflow, built in or in a file, may have
+  `:mixins (NAME ...)` and `:aspects (ASPECT ...)`.
+  `rat-kingdom-workflow-define` takes both keys, and so does a workflow
+  file (`rat-kingdom-config-workflow-keys`).
+- **Order of application.** The workflow's own mixins are applied in
+  order, then the mixins of the configuration's `:mixins` for the story
+  (7.3), in order, then the workflow's own aspects, in order. A mixin
+  named twice is applied once, where it first appears. Expansion works on
+  the workflow with every step's outcomes written out, defaults included.
+  The result is validated as a whole by `rat-kingdom-workflow-validate`,
+  then normalized.
+- **When expansion happens.** At lookup, so a change to a workflow, a
+  mixin or `:mixins` applies from a token's next move, as for workflows
+  today. `rat-kingdom-config-workflow` takes the story's epic and task as
+  well as its repository, to read `:mixins`, and `rat-kingdom-story--workflow`
+  passes the token's. A token whose step is no longer in the expansion
+  gets the existing error, "Its workflow no longer has the step STEP".
+- **An expansion that fails**, because a mixin is not defined, an aspect
+  has the wrong shape, or the validator refuses the result, is to the
+  engine a workflow that is not defined (7.3), except that the reason the
+  token and the watchdog give says what is wrong: "The workflow story
+  cannot be built: there is no mixin called tdd2". A workflow file whose
+  own mixins and aspects do not expand, with the mixins its own directory
+  can see, is ignored with the error shown, as any invalid file is.
+
+**What a mixin is.** A named property list, applied in the order of its
+keys here:
+
+| Key | Value |
+|---|---|
+| `:doc` | a string |
+| `:remove` | a list of step names, `(STEP ...)` |
+| `:places` | a list of extra places |
+| `:steps` | a list of extra steps, written as in a workflow |
+| `:aspects` | a list of aspects |
+
+Its removals come first, then its places and steps are added after the
+workflow's, then its aspects are applied. A place or step it adds whose
+name is taken makes the expansion fail.
+
+**Removing a step.** The engine drops the step and its place, and sends
+every outcome that led to that place to where the removed step's first
+outcome led. If the place was the start, that place becomes the start.
+Removing `review` from `story` gives exactly `story-lite`'s routing:
+`check :pass` then leads to `integrating`. A step the workflow does not
+have is skipped, so a mixin such as `no-review` can apply to any
+workflow. A first outcome that led back to the removed place makes the
+expansion fail.
+
+**Aspect forms.** STEP-BODY is a step's property list without `:from` or
+a name: `(:run (format))`, `(:spawn rat :brief "…")`. It has exactly one
+kind. It may name its other outcomes, but not its first, which the aspect
+places.
+
+- **`(:before MATCH STEP-BODY)`** adds a place and a step, both named
+  `before-STEP`, STEP the matched step's name. Every outcome that led to
+  the matched step's place now reaches the new place, and so does the
+  start if it was the matched place. The new step's first outcome leads to
+  the matched place.
+- **`(:after MATCH STEP-BODY)`** adds a place and a step named `after-STEP`
+  on the matched step's first outcome: that outcome now leads to the new
+  place, and the new step's first outcome leads to where it used to go.
+- In both cases the new step's other outcomes go to the failure place
+  unless the body names them.
+- **`(:around MATCH PROPS)`** sets `:timeout`, `:attempts` or `:brief`, the
+  keys PROPS may have, on each matched step, replacing what it had.
+  `:brief` is set only on matched `:spawn` steps and skipped on the rest.
+- **MATCH** is a step name (a symbol), a kind keyword such as `:check`
+  (every step of that kind), or `t` (every step). It is matched against
+  the workflow as it is when the aspect is applied. A MATCH that matches
+  nothing is skipped.
+- Steps that an aspect adds are never matched by another aspect.
+- **Names.** If `before-STEP` or `after-STEP` is already the name of a
+  place or a step, it gets a suffix, `-2`, `-3` and so on, the first that
+  is free. So when a step is matched more than once, by two aspects, the
+  second step is `after-check-2`.
+
+Every way into a matched place passes through a `:before` step: with
+`tdd`, a failed check or a review that asks for changes also leads back
+through `before-implement` (open question 7, section 16).
+
+**Built-in mixins**, defined with `rat-kingdom-workflow-define-mixin`,
+which validates a mixin's shape as a mixin file is validated:
+
+```elisp
+(rat-kingdom-workflow-define-mixin 'no-review
+  :doc "No review: work whose check passes is merged."
+  :remove '(review))
+
+(rat-kingdom-workflow-define-mixin 'tdd
+  :doc "A worker writes failing tests before another implements the task."
+  :aspects '((:before implement :spawn rat
+              :brief "Write failing tests for the task and commit them; \
+do not implement it.")))
+```
+
+`tdd`'s step is `before-implement`. Its first outcome, `:to`, leads to
+`implement`'s place, and its `:blocked` to the failure place.
+
+**Mixin files.** Mixins can also be files:
+`~/.emacs.d/rat-kingdom/mixins/NAME.eld` (`mixins` in
+`rat-kingdom-directory`) for every repository, and
+`<repo>/.rk/mixins/NAME.eld` for one. The file's name, less `.eld`, is the
+mixin's name. It holds one property list of the keys above, read with
+`read` and never evaluated, and checked for shape when it is read: each
+key's value as above, each aspect one of the forms, each MATCH and
+STEP-BODY as described. They are looked up as workflow files are: the
+repository's file, then the global file, then the built-in mixin. They
+are read again when they change, and an invalid file is ignored with its
+error shown in `status`. `rat-kingdom-config-mixins` returns a
+repository's view, each mixin with its origin and file, and
+`rat-kingdom-config-mixin` resolves one name for a repository.
+
+**Showing expansions.** `workflow_list` shows each workflow expanded,
+with a line saying what it was built from: its own mixins, the mixins
+`:mixins` adds for the view (the repository's, or the global layer's
+without one) and the layer they come from, and its aspects as written.
+The mixins of the view follow the workflows, each with its origin. A
+story's workflow can differ from that view by an epic's or task's
+`:mixins`; `story_show` names the mixins its workflow was expanded with.
+`config_show` shows `:mixins` with its layer, as any key.
+
+**Research and docs.** Docs live in the space (open question 4, section
+16).
+
+- **The `research` workflow** is built in:
+
+  ```elisp
+  (rat-kingdom-workflow-define 'research
+    :doc "A researcher writes docs and the king reviews them. No code is merged."
+    :places '(ready review done blocked)
+    :start 'ready
+    :final '(done)
+    :steps '((research :from ready :spawn researcher :to review)
+             (review :from review :review king :pass done :fix ready)))
+  ```
+
+  It has no check and no merge.
+- **The `researcher` role** works in a story worktree like a rat: the
+  same worktree, branch, setup and worker limit. Its job is to write
+  documents, not to commit code. Its instructions are
+  `rat-kingdom-run-researcher-instructions`, and its tools are listed in
+  section 9: `write_doc`, `read_doc`, `note_fact`, `inbox`, `block` and
+  `finish`.
+- **A doc** is a persistent `doc` tuple (5.4) scoped to the repo, with no
+  owner, so it outlives the story. Its identity is `D-` and four hex
+  digits, unused in the live space and the archive. Its payload is
+  `:title :body :topic :status :story :run`; `:status` is `draft` or
+  `approved`, and `:story` and `:run` are the story and run that last
+  wrote it.
+- **`finish` for a researcher** takes a summary, and optionally the
+  checks it ran. It needs at least one doc whose `:story` is this story,
+  and refuses otherwise. It needs no commit and does not look at the
+  worktree. Its `result` has `:commit` nil and `:docs`, the ids of the
+  story's docs.
+- **What the king sees.** For a story with docs, `story_show` lists them
+  (id, title, topic, status, length), and `story_diff` gives each one's
+  text in full, followed by the Git diff if the branch has commits of its
+  own.
+- **Verdicts.** A pass, on any story, sets `:status approved` on every
+  draft whose `:story` is the story, replacing each doc in the
+  transaction that moves the story on. A fix sends the story back to a new
+  researcher with the notes, and the docs stay drafts for it to revise:
+  its brief lists them (8.3). A story with no commit is never let through
+  a review as already reviewed.
+- **When a research story ends.** At a final place, a story whose workflow
+  has no `:merge` step has its worktree removed and its branch deleted,
+  unless the branch has commits of its own; then both are kept and the
+  king's news says so. A cancelled research story leaves its drafts as
+  they are, for the king to `doc_forget`.
 
 ### 7.2 Not getting stuck
 
@@ -280,6 +600,13 @@ built instead as dispatch by reactions on an `epic` tuple, section 10).
 
 All of this is built.
 
+**Spec** (7.1): a story waiting in a `:run` step has a process, as a
+check does, and the watchdog reports it stuck if that is not running or
+has run past the check's limit. A story waiting at a gate, or a parent
+waiting for its child, has no process and holds no worker; it is stuck
+only past its step's own `:timeout`, or, for a parent, when its child is
+gone.
+
 ### 7.3 Configuration layers
 
 Configuration says, per repository and, where it matters, per epic and
@@ -287,8 +614,8 @@ task: which workflow a story runs, the target branch, the commands for
 setup and check, which agent runs each role, the time limits and
 attempts, the worker limit, and whether rat-kingdom's directories are
 kept in Git. This section is the spec for step 7 of the build order
-(section 15). Mixins, aspects and git discipline beyond the target branch
-(branch naming, merge or rebase) come later.
+(section 15), which is built. The keys `:mixins` and `:git` (below) are
+the spec for step 8, and not built yet.
 
 **Format.** A configuration file is one Emacs Lisp property list, read
 with `read` and never evaluated. Its extension is `.eld`. Anything after
@@ -321,6 +648,8 @@ the list, other than whitespace and comments, makes the file invalid.
 | `:attempts` | how many workers a story is given before it is parked, a positive integer | all |
 | `:max-workers` | how many workers run at once, across all repositories, a positive integer | global |
 | `:track` | a property list: `:rk`, `:beads`, each `t` to track that directory in Git or `nil` to keep it out | global, repo |
+| `:mixins` | a list of mixin names, symbols, applied to whatever workflow a story runs (7.1) | global, registration, repo, epic, task |
+| `:git` | a property list: `:branch`, a format for story branch names; `:integrate`, `merge`, `rebase` or `squash` | all |
 
 - `:setup` and `:check` are either one argument list (`("make" "test")`,
   every element a string) or a list of command names (`(lint test)`,
@@ -346,7 +675,8 @@ the list, other than whitespace and comments, makes the file invalid.
   labels, `foreman_start` with an agent. Configuration gives the default
   they replace.
 - Review mode is chosen by the workflow, `story` (the king reviews) or
-  `story-lite` (no review), for now. There is no `:review` key.
+  `story-lite` (no review), or, once step 8 is built, by the mixin
+  `no-review` in `:mixins`. There is no `:review` key.
 - An unknown key is invalid, and so is a key set at a layer the table
   does not allow.
 
@@ -356,7 +686,7 @@ the list, other than whitespace and comments, makes the file invalid.
 |---|---|---|
 | defaults | the existing user options, below | user, with Customize |
 | global | `~/.emacs.d/rat-kingdom/config.eld`, that is `config.eld` in `rat-kingdom-directory` | user, or king with `config_set` |
-| registration | the `:workflow`, `:target`, `:check` and `:setup` stored on the `repo` tuple by `repo_add` or `rat-kingdom-add-repo` | user, when registering |
+| registration | the `:workflow`, `:target`, `:check` and `:setup`, and in step 8 `:mixins` and `:git`, stored on the `repo` tuple by `repo_add` or `rat-kingdom-add-repo` | user, when registering |
 | repo | `<repo>/.rk/config.eld` in the user's checkout | user, or king with `config_set` |
 | epic | the epic's `policy` tuple | king with `config_set` |
 | task | the task's `policy` tuple | king with `config_set` |
@@ -372,7 +702,8 @@ the list, other than whitespace and comments, makes the file invalid.
   `rat-kingdom-story-max-workers`, `:track :beads` from
   `rat-kingdom-task-br-untracked` (non-nil there is `nil` here), and
   `:track :rk` is `nil`. There is no default `:commands`, `:setup` or
-  `:check`.
+  `:check`. In step 8, `:git` is `(:branch "rats/%i" :integrate merge)`,
+  today's behaviour, and there is no default `:mixins`.
 - Registration stays a layer of its own, between global and repo, so a
   repository registered before configuration existed needs nothing
   migrated. Its values are written only by registering.
@@ -385,10 +716,12 @@ the list, other than whitespace and comments, makes the file invalid.
   is a property list of the keys its layer allows, in the same form as a
   file. A story with no epic or task has no layer there.
 - **Most specific wins, key by key.** For `:commands`, `:agents`,
-  `:timeouts` and `:track` the merge goes sub-key by sub-key: a repo
-  file with `:commands (:test ("make" "test"))` keeps the global `:lint`.
+  `:timeouts`, `:track` and `:git` the merge goes sub-key by sub-key: a
+  repo file with `:commands (:test ("make" "test"))` keeps the global
+  `:lint`. `:mixins` is a list, and a more specific layer replaces it; it
+  is not merged.
 - Every lookup can report the layer each value came from, and for the
-  four property-list keys, each sub-key's layer. Code reads configuration
+  property-list keys, each sub-key's layer. Code reads configuration
   through one function that takes the repository and optionally the epic
   and task, so the engine never reads a user option or a `repo` field
   directly for these keys again.
@@ -518,6 +851,58 @@ evaluated.
   `rat-kingdom-config-repo-directory`. Setting a key to the value it has
   writes nothing.
 
+**Spec: `:mixins`** (step 8). A list of mixin names, symbols, each a
+built-in mixin or a mixin file the repository can see (7.1). It applies
+those mixins after the workflow's own mixins, to whatever workflow a
+story runs; the story's repository, epic and task decide its value.
+`repo_add` and `rat-kingdom-add-repo` take an optional `mixins`, Emacs Lisp
+text read as `config_set` reads a value, for the registration layer. As
+for `:check`, a less specific layer's `:mixins` cannot be turned off at a
+more specific one except by replacing it with another list. A name that
+is not a mixin, or a merged `:mixins` with which the merged `:workflow`
+does not expand, is a problem of the merged result: `status` shows it,
+`config_set` refuses to make it, and a story whose workflow does not
+expand cannot move (7.1).
+
+**Spec: `:git`** (step 8). A property list with two sub-keys, merged sub-key
+by sub-key. `repo_add` and `rat-kingdom-add-repo` take an optional `git`
+for the registration layer, as for `mixins`.
+
+- **`:branch`** is a format for a story's branch name, by default
+  `"rats/%i"`. Its specifiers are:
+  - `%i`, the story id;
+  - `%s`, a slug of the title: lowercased, every run of characters other
+    than `a`–`z` and `0`–`9` made one `-`, dashes trimmed from both ends,
+    cut to at most 40 characters and trimmed again, `story` if nothing is
+    left;
+  - `%r`, the repo;
+  - `%e`, the epic id, or `none`;
+  - `%%`, a literal `%`.
+
+  The result must pass `git check-ref-format --branch`. The format is
+  validated where it is set (a file read, or `config_set`): a `%`
+  followed by anything else is invalid, and so is a format that, filled
+  with `S-0000`, `title`, `repo` and `none`, breaks the rules of
+  `git check-ref-format` (checked in Lisp: no `..`, `@{`, `//`, space,
+  control character or any of `~^:?*[\`; no component starting with `.`
+  or ending with `.lock`; not ending with `/` or `.`; not `@`).
+  The name is made when a story starts, from the story's configuration,
+  checked with `git check-ref-format --branch` (a failure is an error
+  that starts nothing), and kept on the token as `:branch-name`. When the
+  story's worktree is first made, a name that is taken by a local branch
+  gets `-2`, `-3` and so on, the first that is free, and the branch made
+  is recorded as `:branch`, as now. Only new stories use the format: a
+  token with no `:branch-name` gets `rats/ID`, as today. A child story
+  uses its parent's branch, and an epic's feature branch stays
+  `rk/epic/ID`.
+- **`:integrate`** is `merge` (the default, today's behaviour), `rebase` or
+  `squash`: how a story's work goes into its target. Section 11 says what
+  each does. It is read for the story's repository, epic and task when
+  its check begins, kept on the `checked` tuple as `:integrate` and
+  copied to the token with `:head` and `:base`, so the merge step and the
+  clean-up use the mode that was checked. When an epic's feature branch
+  lands, it is read for the epic's repository and epic.
+
 **Built: a feature branch per epic**, chosen per epic rather than through
 configuration: `epic_start` with `feature_branch` (section 10). The epic's
 branch is `rk/epic/ID`, cut from the repository's target. Its stories
@@ -644,8 +1029,22 @@ repo's facts, newest first, with topic and files, capped at
 `rat-kingdom-fact-brief-max-count` (40) facts and
 `rat-kingdom-fact-brief-max-chars` (8000) characters, saying how many
 older ones are left out. A repo with no facts adds no section. rat-kingdom-message.el adds
-another after it: the story's waiting messages (8.2). Docs and
-policy are not in the brief yet.
+another after it: the story's waiting messages (8.2). Policy is not in
+the brief yet.
+
+**Spec: docs in the brief** (step 8, in a new `rat-kingdom-doc.el`). Every
+worker's brief lists the repo's approved docs, through
+`rat-kingdom-story-brief-functions`, in a section after the facts and
+before the messages: "Approved docs for this repository (read one with
+read_doc):", then one line per doc, `D-1a2b: TITLE (topic)`, newest
+first. It is capped like facts, at `rat-kingdom-doc-brief-max-count` (40)
+docs and `rat-kingdom-doc-brief-max-chars` (4000) characters, saying how
+many older ones are left out. A repo with no approved docs adds no
+section. The bodies are not in the brief; a worker reads one with
+`read_doc` (id), which returns its title, topic, status and text, for a
+doc of its own repo only. A story that has drafts of its own, as a
+research story does after a fix, gets another section, "Your drafts, to
+revise with write_doc:", listing each draft's id, title and topic.
 
 ### 8.4 Recovery
 
@@ -780,9 +1179,9 @@ go, and it lets a role be denied built-in tools as well.
 
 | Role | Lifetime | Tools |
 |---|---|---|
-| king | long-lived, global, no worktree | built: `status` (with the tracker tasks available, each with its epic and agent), `repo_add`, `repo_sync`, `workflow_list`, `story_start` (optionally from a `task`, with an `agent`; a task's `rk-agent:` and `rk-workflow:` labels are the defaults), `story_show`, `story_diff`, `story_move`, `story_cancel`, `verdict`, `publish`, `query`, `fact_forget`, `task_create`, `epic_create`, `epic_propose` (the epic plan surface, 14.1), `epic_start` (optionally with a `feature_branch`, and a `foreman`), `epic_pause`, `epic_resume`, `epic_cancel`, `epic_retry`, `epic_show`, `epic_diff`, `epic_verdict` (section 10), `tell`, `foreman_start`, `foreman_stop`, `config_show` and `config_set` (7.3); `story_start` also takes a rarely needed `target` |
-| rat (worker) | one task | built: `finish`, `block`, `note_fact`, `inbox` |
-| researcher | one task | `finish_doc`, `note_fact`, `block` |
+| king | long-lived, global, no worktree | built: `status` (with the tracker tasks available, each with its epic and agent), `repo_add`, `repo_sync`, `workflow_list`, `story_start` (optionally from a `task`, with an `agent`; a task's `rk-agent:` and `rk-workflow:` labels are the defaults), `story_show`, `story_diff`, `story_move`, `story_cancel`, `verdict`, `publish`, `query`, `fact_forget`, `task_create`, `epic_create`, `epic_propose` (the epic plan surface, 14.1), `epic_start` (optionally with a `feature_branch`, and a `foreman`), `epic_pause`, `epic_resume`, `epic_cancel`, `epic_retry`, `epic_show`, `epic_diff`, `epic_verdict` (section 10), `tell`, `foreman_start`, `foreman_stop`, `config_show` and `config_set` (7.3); `story_start` also takes a rarely needed `target`; spec (step 8): `story_signal`, `doc_list`, `doc_show`, `doc_forget`, and `mixins` and `git` on `repo_add` |
+| rat (worker) | one task | built: `finish`, `block`, `note_fact`, `inbox`; spec (step 8): `read_doc` |
+| researcher | one task | spec (step 8): `write_doc`, `read_doc`, `note_fact`, `inbox`, `block`, `finish` |
 | foreman | one epic, optional | built: `status` (its epic: the `epic_show` view and its stories' lines), `story_show`, `story_diff`, `verdict`, `tell`, `query`, `task_create` (its epic is the parent), `epic_retry`, `story_start` (for a task of its epic), `report` (to the king); every one but `query` limited to its epic |
 | ambient | one event | set by the reaction that starts it |
 
@@ -838,6 +1237,39 @@ from the operations log, time, and the payload, cut to
 `rat-kingdom-fact-query-payload-limit` characters; it says how many
 matched and whether the list was cut off. It never writes.
 `fact_forget` retracts one `fact` by id and refuses any other tuple.
+
+**Spec: tools for docs and signals** (step 8; 7.1, 8.3).
+
+- `write_doc` (researcher): `title`, `body` (Markdown), optionally `topic`
+  and `id`, the id of a doc to revise. It writes a `doc` tuple scoped to
+  the run's repo, with no owner, the payload `:title :body :topic :status
+  draft :story :run`, and the run as the actor. Without `id` it makes a
+  new doc; with one it replaces that doc whole, keeping its id, as a
+  draft of this story, even if it was approved. It refuses a blank title
+  or body, a body over `rat-kingdom-doc-max-length` (100000) characters,
+  an `id` that is not a doc of this repo, and a run that is not its
+  story's working run. It answers with the doc's id.
+- `read_doc` (rat, researcher): `id`. It returns the doc's title, topic,
+  status and body, and refuses a doc of another repo.
+- `finish` (researcher): `summary` and `checks`, as a rat's. It needs at
+  least one doc whose `:story` is this story, and no commit (7.1).
+- `note_fact`, `inbox` and `block` (researcher) are the rat's.
+- `doc_list` (king): `repo`, optionally `status` (`draft` or `approved`).
+  One line per doc, newest first: id, status, title, topic, the story
+  that last wrote it, and when.
+- `doc_show` (king): `id`. The doc in full, with its payload's fields and
+  who wrote it, from the operations log.
+- `doc_forget` (king): `id`. It retracts one `doc`, as `fact_forget`
+  retracts a fact, and refuses any other tuple.
+- `story_signal` (king): `story` and `name`. It writes a linear `signal`
+  tuple scoped to the story's repo, named and owned by the story, with
+  `:name NAME` (5.4). It refuses an unknown or finished story and a blank
+  name. It answers whether the story waits at a gate for that name now,
+  so it opens, or not, in which case the signal is kept until a gate
+  waits for it or the story ends. The engine consumes it when the gate
+  opens.
+- `repo_add` (king) takes optional `mixins` and `git`, Emacs Lisp text read
+  as `config_set` reads a value, for the registration layer (7.3).
 
 The king's chores from imp and rk2 (run the check, merge, close the task,
 clean the worktree, notice a finished worker, start an epic's next
@@ -1080,6 +1512,46 @@ by the same steps: its branch merged into a candidate, the setup and
 check run there, and, after the king's `epic_verdict`, the target moved by
 compare-and-swap. A conflict or a failed check there becomes a task of
 the epic, done on its branch (section 10).
+
+**Spec: how work goes into the target** (step 8), `:git :integrate`
+(7.3). Steps 1 and 3 above depend on it; the check, the setup and step 4
+do not.
+
+- **`merge`**, the default, is today's behaviour: the candidate is
+  detached at the target's head and the story's commit is merged with
+  `--no-ff` and the message `Merge ID: TITLE` (an epic's: `Merge the epic
+  ID: TITLE`).
+- **`rebase`** replays the story's commits onto the target in the
+  candidate: the candidate is detached at the story's commit and `git
+  rebase BASE` runs there, BASE the target's head. Git drops merge
+  commits, and commits already in BASE, as it does by default. The
+  rebased head is `:head`, a descendant of BASE, so the merge step moves
+  the target by fast-forward. A conflict takes the files in conflict
+  (`git diff --name-only --diff-filter=U`), runs `git rebase --abort`, and
+  fails the check with the reason "rebase conflict" and the files as its
+  output. The worker is told: "rebase conflict: your branch no longer
+  rebases cleanly onto the target branch. Rebase your branch onto TARGET,
+  resolve the conflicts, commit, and finish again. Files in conflict: …".
+- **`squash`** makes one commit on the target: the candidate is detached
+  at the target's head, `git merge --squash` takes the story's commit,
+  and the commit's message is `ID: TITLE`, a blank line, then the
+  worker's summary (the token's `:summary`). A conflict fails as for
+  `merge`, "merge conflict". A story that changes nothing against the
+  target fails the check with the reason "nothing to integrate". For an
+  epic, the message is `ID: TITLE` followed by the ids of the tasks it
+  merged, one per line.
+- **Cleaning up.** After `merge`, the story branch is deleted when it is
+  an ancestor of the target's new head, as now. After `rebase` or
+  `squash` it is not, so the branch is deleted when its tip is still the
+  commit that was checked, the token's `:commit`. Otherwise it is kept,
+  since someone has added to it.
+- **Staleness** is unchanged: the target must still be at `:base`, or the
+  story goes back to its check.
+- `rat-kingdom-story-check-candidate` takes the mode, and the squash
+  message, besides what it takes now. The same setting applies when an
+  epic's feature branch lands, read for the epic's context; the branch
+  is kept after landing, as now.
+- **Branch names** come from `:git :branch` (7.3).
 
 Publication is a king tool that pushes one named branch to one named
 remote, only on the user's explicit request, and writes a receipt.
@@ -1345,11 +1817,21 @@ wait longer for review than for implementation.
    key with the layer of each value, ignored files reported in `status`,
    `:track` kept in `info/exclude`, workflow files global and per repo,
    and the king's `config_show` and validated `config_set`. Mixins and
-   aspects come after.
-8. **Dashboard** additions with the factory floor, attention queue and
-   review card (surfaces 1 to 3), then the **research** workflow, docs and
-   the remaining surfaces.
-9. **Ingress** sidecar and ambient agents.
+   aspects are step 8.
+8. **Workflow composition** (this epic; spec in 7.1, 7.3, 8.3, 9 and 11,
+   none of it built yet):
+   - step kinds: `:spawn` with `:brief`, `:check` with named commands,
+     `:run`, `:gate` and `:workflow` with child stories;
+   - mixins and aspects, expanded at lookup, the built-in `no-review` and
+     `tdd`, mixin files global and per repo, and the `:mixins` key;
+   - the `research` workflow, the `researcher` role, `doc` tuples, docs in
+     every worker's brief, `read_doc`, and the king's `doc_list`,
+     `doc_show`, `doc_forget` and `story_signal`;
+   - git options: the `:git` key with `:branch` and `:integrate` (`merge`,
+     `rebase`, `squash`), for stories and for an epic's landing.
+9. **Dashboard** additions with the factory floor, attention queue and
+   review card (surfaces 1 to 3), then the remaining surfaces.
+10. **Ingress** sidecar and ambient agents.
 
 Tests use scripted fake agents and disposable repositories, as rk2's
 acceptance suite does. No test calls a model, and no test pushes anywhere
@@ -1367,7 +1849,15 @@ but a disposable bare repository.
    is no automatic policy yet; an epic's policy could ask for one once
    configuration (step 7) exists.
 4. Where do design docs live: in the repo, or in the project's org-roam
-   hub?
+   hub? Answered: in the space, as `doc` tuples scoped to the repo with
+   no owner, written by the researcher's `write_doc` and approved by a
+   review (7.1). A doc is not a file in the repo; a story that should
+   commit one does so as code.
 5. Does the king see every `fact`, or only those a reaction promotes?
    Today it can `query` every one, and is told none unasked.
 6. The package layout.
+7. Should a `:before` step catch every way into its place? As specified
+   (7.1) it does, so with `tdd` a failed check or a review that asks for
+   changes sends the story through `before-implement` again, and a
+   tests worker runs before each fix. A later form could catch only the
+   start, if that proves wasteful.
