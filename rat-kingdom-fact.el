@@ -118,7 +118,7 @@ Make it shorter, or record it as several facts"
 this repository, for the workers who come after you: a convention, a pitfall, \
 how to build or test something, where something lives. Every later worker in \
 this repository is told it. Do not use it to report progress on your task."
- :roles '(rat)
+ :roles '(rat researcher)
  :args '((:name "fact" :type string
           :description "The fact, as a self-contained statement that makes \
 sense without your task, e.g. \"Tests need the ELDEV_LOCAL variable set; run \

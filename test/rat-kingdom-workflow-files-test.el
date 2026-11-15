@@ -64,7 +64,8 @@ is a property list whose keys replace those of the workflow."
 (ert-deftest rat-kingdom-workflow-files-test-built-in-only ()
   (rat-kingdom-config-engine-test-with-repo (space _path)
     (should (equal (rat-kingdom-workflow-files-test--names space "demo")
-                   '(("story" . built-in) ("story-lite" . built-in))))
+                   '(("research" . built-in) ("story" . built-in)
+                     ("story-lite" . built-in))))
     (should (equal (rat-kingdom-config-workflow space 'story "demo")
                    (rat-kingdom-workflow-get 'story)))
     (should-not (rat-kingdom-config-workflow space "nothing" "demo"))
@@ -227,8 +228,8 @@ is a property list whose keys replace those of the workflow."
           (good (rat-kingdom-workflow-files-test--global
                  "good.eld" (rat-kingdom-workflow-files-test--spec 'good))))
       (should (equal (rat-kingdom-workflow-files-test--names space "demo")
-                     '(("good" . global) ("story" . built-in)
-                       ("story-lite" . built-in))))
+                     '(("good" . global) ("research" . built-in)
+                       ("story" . built-in) ("story-lite" . built-in))))
       (should (string-search "The start b is not a place"
                              (rat-kingdom-workflow-files-test--error unsound)))
       (should (string-search "a list is not closed"
@@ -317,9 +318,9 @@ is a property list whose keys replace those of the workflow."
         (should (string-search (format "quick: The workflow quick.\n  (global, \
 from %s)\n" quick) text))
         (should (string-search "Repository demo has: mine (its own), quick \
-\(global), story (built-in), story-lite (its own)." text))
-        (should (string-search "Repository other has: quick (global), story \
-\(built-in), story-lite (built-in)." text))
+\(global), research (built-in), story (built-in), story-lite (its own)." text))
+        (should (string-search "Repository other has: quick (global), research \
+\(built-in), story (built-in), story-lite (built-in)." text))
         (should (string-search (format "mine: The workflow mine.\n  (this \
 repository's own, from %s)\n" mine) text))
         (should (string-search (format "story-lite: The workflow story-lite.\n\

@@ -462,9 +462,10 @@ had before, if it is a function.  Return non-nil if it was answered."
                 (funcall previous permission))))))
 
 (defun rat-kingdom-agent-shell--buffer-name (run)
-  "Return the name for the shell buffer of RUN."
-  (if (equal (plist-get run :role) "rat")
-      (format "rat %s" (plist-get run :id))
+  "Return the name for the shell buffer of RUN.
+A worker's, a rat's or a researcher's, starts with its role."
+  (if (member (plist-get run :role) '("rat" "researcher"))
+      (format "%s %s" (plist-get run :role) (plist-get run :id))
     (plist-get run :id)))
 
 (defun rat-kingdom-agent-shell-run-config (run token)

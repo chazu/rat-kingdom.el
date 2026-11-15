@@ -813,7 +813,7 @@ Return what finish answered."
                            '((jsonrpc . "2.0") (id . 7) (method . "tools/list")))
                           :result)
                          :tools))))
-      (should (equal (names 'rat) '("finish" "block" "note_fact" "inbox")))
+      (should (equal (names 'rat) '("finish" "block" "note_fact" "inbox" "read_doc")))
       (should (member "story_start" (names 'king)))
       (should-not (member "finish" (names 'king)))
       (should-not (names 'nobody)))
@@ -860,7 +860,7 @@ Return what finish answered."
                                        (json-parse-string
                                         (cdr answer) :object-type 'alist
                                         :array-type 'list))))
-                             '("finish" "block" "note_fact" "inbox"))))
+                             '("finish" "block" "note_fact" "inbox" "read_doc"))))
             (should (string-search
                      "404" (car (post (concat url "x") "{\"id\":1}"))))
             (should (string-search "400" (car (post url "not json"))))

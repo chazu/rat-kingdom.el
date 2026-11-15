@@ -538,6 +538,18 @@ story's workflow can differ from that view by an epic's or task's
 **Research and docs.** Docs live in the space (open question 4, section
 16).
 
+**Built** (`rat-kingdom-doc.el`), as below, with these details. A pass
+approves the story's drafts through `rat-kingdom-story-verdict-functions`,
+called by the engine inside the transaction that moves the story on.
+`story_show` and `story_diff` show docs through
+`rat-kingdom-king-show-functions`, for archived stories too. A story is
+complete (`rat-kingdom-story-complete-p`) when it was merged or reached a
+final place of a workflow with no `:merge` step; the task of a complete
+story is closed and an epic counts it as merged. `doc_forget` moves the
+doc to the archive (`rat-kingdom-space-archive`, reason `forget`) rather
+than retracting it, so `query` with `archived` still finds it and its id
+is never reused.
+
 - **The `research` workflow** is built in:
 
   ```elisp
@@ -1049,7 +1061,7 @@ older ones are left out. A repo with no facts adds no section. rat-kingdom-messa
 another after it: the story's waiting messages (8.2). Policy is not in
 the brief yet.
 
-**Spec: docs in the brief** (step 8, in a new `rat-kingdom-doc.el`). Every
+**Built: docs in the brief** (`rat-kingdom-doc.el`). Every
 worker's brief lists the repo's approved docs, through
 `rat-kingdom-story-brief-functions`, in a section after the facts and
 before the messages: "Approved docs for this repository (read one with
@@ -1196,9 +1208,9 @@ go, and it lets a role be denied built-in tools as well.
 
 | Role | Lifetime | Tools |
 |---|---|---|
-| king | long-lived, global, no worktree | built: `status` (with the tracker tasks available, each with its epic and agent), `repo_add`, `repo_sync`, `workflow_list`, `story_start` (optionally from a `task`, with an `agent`; a task's `rk-agent:` and `rk-workflow:` labels are the defaults), `story_show`, `story_diff`, `story_move`, `story_cancel`, `verdict`, `publish`, `query`, `fact_forget`, `task_create`, `epic_create`, `epic_propose` (the epic plan surface, 14.1), `epic_start` (optionally with a `feature_branch`, and a `foreman`), `epic_pause`, `epic_resume`, `epic_cancel`, `epic_retry`, `epic_show`, `epic_diff`, `epic_verdict` (section 10), `tell`, `foreman_start`, `foreman_stop`, `config_show` and `config_set` (7.3); `story_start` also takes a rarely needed `target`; spec (step 8): `story_signal`, `doc_list`, `doc_show`, `doc_forget`, and `mixins` and `git` on `repo_add` |
-| rat (worker) | one task | built: `finish`, `block`, `note_fact`, `inbox`; spec (step 8): `read_doc` |
-| researcher | one task | spec (step 8): `write_doc`, `read_doc`, `note_fact`, `inbox`, `block`, `finish` |
+| king | long-lived, global, no worktree | built: `status` (with the tracker tasks available, each with its epic and agent), `repo_add`, `repo_sync`, `workflow_list`, `story_start` (optionally from a `task`, with an `agent`; a task's `rk-agent:` and `rk-workflow:` labels are the defaults), `story_show`, `story_diff`, `story_move`, `story_cancel`, `verdict`, `publish`, `query`, `fact_forget`, `task_create`, `epic_create`, `epic_propose` (the epic plan surface, 14.1), `epic_start` (optionally with a `feature_branch`, and a `foreman`), `epic_pause`, `epic_resume`, `epic_cancel`, `epic_retry`, `epic_show`, `epic_diff`, `epic_verdict` (section 10), `tell`, `foreman_start`, `foreman_stop`, `config_show` and `config_set` (7.3), `doc_list`, `doc_show` and `doc_forget` (7.1); `story_start` also takes a rarely needed `target`; spec (step 8): `story_signal`, and `mixins` and `git` on `repo_add` |
+| rat (worker) | one task | built: `finish`, `block`, `note_fact`, `inbox`, `read_doc` |
+| researcher | one task | built: `write_doc`, `read_doc`, `note_fact`, `inbox`, `block`, `finish` |
 | foreman | one epic, optional | built: `status` (its epic: the `epic_show` view and its stories' lines), `story_show`, `story_diff`, `verdict`, `tell`, `query`, `task_create` (its epic is the parent), `epic_retry`, `story_start` (for a task of its epic), `report` (to the king); every one but `query` limited to its epic |
 | ambient | one event | set by the reaction that starts it |
 
@@ -1255,7 +1267,9 @@ from the operations log, time, and the payload, cut to
 matched and whether the list was cut off. It never writes.
 `fact_forget` retracts one `fact` by id and refuses any other tuple.
 
-**Spec: tools for docs and signals** (step 8; 7.1, 8.3).
+**Spec: tools for docs and signals** (step 8; 7.1, 8.3). The doc tools
+are built (`rat-kingdom-doc.el`); `story_signal` and `repo_add`'s new
+arguments are not.
 
 - `write_doc` (researcher): `title`, `body` (Markdown), optionally `topic`
   and `id`, the id of a doc to revise. It writes a `doc` tuple scoped to
@@ -1843,7 +1857,8 @@ wait longer for review than for implementation.
      `tdd`, mixin files global and per repo, and the `:mixins` key;
    - the `research` workflow, the `researcher` role, `doc` tuples, docs in
      every worker's brief, `read_doc`, and the king's `doc_list`,
-     `doc_show`, `doc_forget` and `story_signal`;
+     `doc_show` and `doc_forget` (built, `rat-kingdom-doc.el`), and
+     `story_signal`;
    - git options: the `:git` key with `:branch` and `:integrate` (`merge`,
      `rebase`, `squash`), for stories and for an epic's landing.
 9. **Dashboard** additions with the factory floor, attention queue and
