@@ -17,15 +17,16 @@
 ;;   :phase   enter    it has just arrived and its step is not yet begun
 ;;            wait     its step is in progress; `:step' names it and
 ;;                     `:awaiting' says for what: worker, setup, check,
-;;                     review, run or gate, or "a free worker" while it
-;;                     is queued
+;;                     review, run, gate or child, or "a free worker"
+;;                     while it is queued
 ;;            parked   no step is taken from here; it waits to be moved
 ;;
 ;; The reactions here are the workflow engine.  One begins the step of
 ;; a token that has arrived.  The others each join a waiting token with
 ;; the tuple that ends its step: a worker's `result' or `blocked', a
 ;; `checked', a `verdict', a `ran', a `signal', or a run that ended
-;; without reporting.  A timed gate is opened by
+;; without reporting.  A `:workflow' step starts a child story, whose
+;; own end moves its parent on.  A timed gate is opened by
 ;; `rat-kingdom-story-open-gates', from a timer and from the watchdog.
 ;;
 ;; A step that cannot be begun sends the token to the workflow's failure
@@ -204,14 +205,16 @@ why."
   (let ((payload (plist-get story :payload)))
     (rat-kingdom-config-workflow
      space (plist-get payload :workflow) (plist-get story :scope)
-     (plist-get payload :epic) (plist-get payload :task))))
+     (rat-kingdom-story--config-epic payload)
+     (rat-kingdom-story--config-task payload))))
 
 (defun rat-kingdom-story--workflow-problem (space story)
   "Return why the token STORY in SPACE has no workflow, as a sentence, or nil."
   (let ((payload (plist-get story :payload)))
     (rat-kingdom-config-workflow-problem
      space (plist-get payload :workflow) (plist-get story :scope)
-     (plist-get payload :epic) (plist-get payload :task))))
+     (rat-kingdom-story--config-epic payload)
+     (rat-kingdom-story--config-task payload))))
 
 (defun rat-kingdom-story--repo (space story)
   "Return the record of the repository of the token STORY in SPACE."
@@ -229,14 +232,18 @@ That is a story that was merged, and one that reached a final place of
 a workflow with no merge step, such as `research', which has nothing to
 merge.  Such a story's token has `:phase' \"done\".  A story moved to a
 final place by hand in a workflow that merges was not merged, so it is
-not complete; nor is a cancelled story."
+not complete; nor is a cancelled story.  A child story never is: its
+work is its parent's, whose worktree and branch it shares, so its end
+neither closes a task nor lets its worktree be removed."
   (let ((payload (plist-get story :payload)))
-    (or (and (plist-get payload :integrated) t)
-        (and (equal (plist-get payload :phase) "done")
-             (when-let* ((workflow (rat-kingdom-story--workflow space story)))
-               (and (rat-kingdom-workflow-final-p workflow
-                                                  (plist-get payload :at))
-                    (not (rat-kingdom-story-merges-p workflow))))))))
+    (and (not (plist-get payload :parent))
+         (or (and (plist-get payload :integrated) t)
+             (and (equal (plist-get payload :phase) "done")
+                  (when-let* ((workflow (rat-kingdom-story--workflow space
+                                                                     story)))
+                    (and (rat-kingdom-workflow-final-p workflow
+                                                       (plist-get payload :at))
+                         (not (rat-kingdom-story-merges-p workflow)))))))))
 
 (defun rat-kingdom-story-target (space story)
   "Return the branch the token STORY in SPACE is cut from and merged into.
@@ -261,12 +268,31 @@ That is the merged `:target' (rat-kingdom-config.el): the repository's
   "Return the configuration KEY in SPACE for the token STORY.
 It is looked up with `rat-kingdom-config-get' for the story's
 repository, and its epic and task, if it has them, so their policies
-count.  STORY may also be a story not yet started, as a property list
-with `:scope' and a `:payload' that may have `:epic' and `:task'."
+count.  A child story (`rat-kingdom-story--workflow-step') has its
+parent's epic and task as `:config-epic' and `:config-task', and
+they are read the same way, so its configuration is its parent's.
+STORY may also be a story not yet started, as a property list with
+`:scope' and a `:payload' that may have `:epic' and `:task'."
   (let ((payload (plist-get story :payload)))
     (rat-kingdom-config-get space key :repo (plist-get story :scope)
-                            :epic (plist-get payload :epic)
-                            :task (plist-get payload :task))))
+                            :epic (rat-kingdom-story--config-epic payload)
+                            :task (rat-kingdom-story--config-task payload))))
+
+(defun rat-kingdom-story--config-epic (payload)
+  "Return the epic whose configuration applies to a story with PAYLOAD.
+That is its `:epic', or, for a child story, its parent's, `:config-epic'."
+  (or (plist-get payload :epic) (plist-get payload :config-epic)))
+
+(defun rat-kingdom-story--config-task (payload)
+  "Return the task whose configuration applies to a story with PAYLOAD.
+That is its `:task', or, for a child story, its parent's, `:config-task'."
+  (or (plist-get payload :task) (plist-get payload :config-task)))
+
+(defun rat-kingdom-story-file-name (id)
+  "Return the story id ID as it is written where it names a file.
+A child story's id, PARENT/STEP, has its slash written `+', so that its
+worktree or candidate is never a directory inside its parent's."
+  (string-replace "/" "+" id))
 
 (defun rat-kingdom-story-commands (space key repo &optional epic task)
   "Return the setup or check of REPO in SPACE as the commands to run.
@@ -394,6 +420,8 @@ unless CHANGES gives a new one."
             ;; What a gate waited for goes with it.
             (and (plist-get payload :until) (list :until nil))
             (and (plist-get payload :signal) (list :signal nil))
+            ;; So does the child a parent waited for.
+            (and (plist-get payload :child) (list :child nil))
             (if (plist-member changes :reason)
                 changes
               (append (list :reason nil) changes))))))
@@ -411,11 +439,23 @@ CHANGES is merged into its payload."
          (failure (and workflow (plist-get workflow :failure))))
     (if (or (null failure)
             (equal failure (plist-get (plist-get story :payload) :at)))
-        (rat-kingdom-story--event
-         space 'parked
-         (rat-kingdom-story--put space story :phase "parked" :step nil
-                                 :awaiting nil :reason reason))
+        (rat-kingdom-story--park space story :reason reason)
       (rat-kingdom-story--goto space story failure :reason reason))))
+
+(defun rat-kingdom-story--park (space story &rest changes)
+  "Park the taken token STORY in SPACE: no step is taken until it is moved.
+CHANGES is merged into its payload.  A child story is not left parked:
+it is archived, and its parent leaves its `:workflow' step by `:fail'
+with the child's reason (`rat-kingdom-story--child-ended').  Return
+the token."
+  (let ((parked (apply #'rat-kingdom-story--put space story
+                       :phase "parked" :step nil :awaiting nil changes)))
+    (if (plist-get (plist-get parked :payload) :parent)
+        ;; The parent's step says why it failed; news of the child
+        ;; would ask for a move it can no longer have.
+        (rat-kingdom-story--archive-child space parked)
+      (rat-kingdom-story--event space 'parked parked))
+    parked))
 
 ;;;; Starting a story
 
@@ -707,7 +747,8 @@ ID itself is not counted, since starting a new worker stops the old."
   "Return the worktree of the token STORY, whether or not it exists yet."
   (or (plist-get (plist-get story :payload) :worktree)
       (expand-file-name (format "worktrees/%s/%s" (plist-get story :scope)
-                                (plist-get story :identity))
+                                (rat-kingdom-story-file-name
+                                 (plist-get story :identity)))
                         rat-kingdom-directory)))
 
 (defun rat-kingdom-story--spawn (space story workflow step)
@@ -756,7 +797,8 @@ the step's `:attempts', else the configuration's."
              (setup (and (or fresh (plist-get payload :needs-setup))
                          (rat-kingdom-story-commands
                           space :setup (plist-get repo :name)
-                          (plist-get payload :epic) (plist-get payload :task))))
+                          (rat-kingdom-story--config-epic payload)
+                          (rat-kingdom-story--config-task payload))))
              (run-id (format "%s.%d" id
                              (1+ (length (rat-kingdom-run-list space id))))))
         (when-let* ((old (plist-get payload :run)))
@@ -1153,19 +1195,22 @@ when the check begins.  The outcome is recorded in SPACE as a
          (commit (or (plist-get payload :commit)
                      (error "There is no commit to check")))
          (candidate (expand-file-name
-                     (format "candidates/%s/%s" (plist-get repo :name) id)
+                     (format "candidates/%s/%s" (plist-get repo :name)
+                             (rat-kingdom-story-file-name id))
                      rat-kingdom-directory))
          (base (rat-kingdom-story-check-candidate
                 space story path (rat-kingdom-story-target space story) commit
                 candidate (format "Merge %s: %s" id (plist-get payload :title))
                 (if (eq check 'configured)
-                    (rat-kingdom-story-commands space :check (plist-get repo :name)
-                                                (plist-get payload :epic)
-                                                (plist-get payload :task))
+                    (rat-kingdom-story-commands
+                     space :check (plist-get repo :name)
+                     (rat-kingdom-story--config-epic payload)
+                     (rat-kingdom-story--config-task payload))
                   check)
-                (rat-kingdom-story-commands space :setup (plist-get repo :name)
-                                            (plist-get payload :epic)
-                                            (plist-get payload :task))
+                (rat-kingdom-story-commands
+                 space :setup (plist-get repo :name)
+                 (rat-kingdom-story--config-epic payload)
+                 (rat-kingdom-story--config-task payload))
                 (plist-get (rat-kingdom-story-config space story :git)
                            :integrate)
                 (rat-kingdom-story-squash-message
@@ -1436,6 +1481,195 @@ gate for NAME now."
                              :actor (or actor "user"))
       (and waiting t))))
 
+;;;; Child stories
+
+(defconst rat-kingdom-story-max-depth 4
+  "How deep child stories may nest.
+A story with no parent has depth 0, and a child one more than its
+parent.  A `:workflow' step whose child, or a child of that child's
+workflow, would be deeper fails to begin.")
+
+(defun rat-kingdom-story--ancestors (space story)
+  "Return the live tokens of the ancestors of the token STORY in SPACE.
+Its parent comes first, then its parent's parent, and so on."
+  (let ((seen (list (plist-get story :identity)))
+        ancestors)
+    (while-let ((id (plist-get (plist-get story :payload) :parent))
+                ((not (member id seen)))
+                (parent (rat-kingdom-story-get space id)))
+      (push id seen)
+      (push parent ancestors)
+      (setq story parent))
+    (nreverse ancestors)))
+
+(defun rat-kingdom-story--child-workflow (space story name)
+  "Return the expanded workflow NAME for a child of the token STORY in SPACE.
+It is built for the story's repository, epic and task.  Signal an
+error, which fails the step's beginning, if there is no such workflow
+or it cannot be built; or if, following the `:workflow' steps of its
+expansion and of theirs in turn, a story would be nested deeper than
+`rat-kingdom-story-max-depth', or a workflow would be reached that
+already runs on the chain: NAME again, or the workflow of STORY or of
+one of its ancestors."
+  (let* ((payload (plist-get story :payload))
+         (repo (plist-get story :scope))
+         (epic (rat-kingdom-story--config-epic payload))
+         (task (rat-kingdom-story--config-task payload))
+         (chain (mapcar (lambda (token)
+                          (plist-get (plist-get token :payload) :workflow))
+                        (cons story (rat-kingdom-story--ancestors space
+                                                                  story)))))
+    (cl-labels
+        ((visit (name depth chain)
+           (when (member name chain)
+             (error "the workflow %s would contain itself" name))
+           (when (> depth rat-kingdom-story-max-depth)
+             (error "a story would be nested %d deep, and the limit is %d \
+(through the workflow %s)"
+                    depth rat-kingdom-story-max-depth name))
+           (let ((workflow
+                  (or (condition-case err
+                          (rat-kingdom-config-build-workflow
+                           space name :repo repo :epic epic :task task)
+                        (rat-kingdom-config-error (error "%s" (cadr err))))
+                      (error "there is no workflow called %s; there are: %s"
+                             name
+                             (rat-kingdom-config-workflow-names space repo)))))
+             (dolist (step (plist-get workflow :steps))
+               (when (eq (plist-get step :kind) :workflow)
+                 (visit (rat-kingdom-workflow--name (plist-get step :with))
+                        (1+ depth) (cons name chain))))
+             workflow)))
+      (visit name (1+ (or (plist-get payload :depth) 0)) chain))))
+
+(defun rat-kingdom-story--child-id (space parent step)
+  "Return the id of a new child of the story PARENT in SPACE, for STEP.
+That is PARENT/STEP, or, if that was used before, PARENT/STEP-2, -3
+and so on, the first that is used neither in the space nor in its
+archive."
+  (let* ((base (format "%s/%s" parent step))
+         (id base)
+         (n 1))
+    (while (or (rat-kingdom-space-rd space (list 'story :identity id))
+               (rat-kingdom-space-archived space id))
+      (setq id (format "%s-%d" base (cl-incf n))))
+    id))
+
+(defun rat-kingdom-story-children (space id)
+  "Return the tokens of the child stories in progress of the story ID in SPACE."
+  (rat-kingdom-space-scan space (list 'story :parent id)))
+
+(defun rat-kingdom-story--workflow-step (space story _workflow step)
+  "Begin STEP, a `:workflow' step, for the taken token STORY in SPACE.
+Start a child story that runs the step's workflow in the story's
+worktree, on its branch, from its commit, and wait for it.  The
+child's id is PARENT/STEP (`rat-kingdom-story--child-id').  Its token
+is owned by itself and has `:parent', the story's id, and `:depth',
+one more than the story's.  It takes the story's `:worktree',
+`:branch', `:commit', `:head' and `:base', its target as `:target',
+and its epic and task as `:config-epic' and `:config-task', which
+`rat-kingdom-story-config' reads, so that it never claims, closes or
+releases the task and its epic does not count it.  The story waits for
+\"child\", with the child's id as `:child'.  The limits of
+`rat-kingdom-story--child-workflow' are checked first."
+  (let* ((id (plist-get story :identity))
+         (payload (plist-get story :payload))
+         (name (rat-kingdom-workflow--name (plist-get step :with)))
+         (workflow (rat-kingdom-story--child-workflow space story name))
+         (child (rat-kingdom-story--child-id space id (plist-get step :name)))
+         (target (rat-kingdom-story-target space story))
+         (epic (rat-kingdom-story--config-epic payload))
+         (task (rat-kingdom-story--config-task payload)))
+    (rat-kingdom-space-out
+     space 'story :scope (plist-get story :scope) :identity child :owner child
+     :payload (append
+               (list :workflow name :at (plist-get workflow :start)
+                     :phase "enter"
+                     :title (format "%s (%s)" (plist-get payload :title)
+                                    (plist-get step :name))
+                     :description (plist-get payload :description)
+                     :agent (plist-get payload :agent) :attempt 0
+                     :parent id :depth (1+ (or (plist-get payload :depth) 0))
+                     ;; A parent with no worktree yet has one made for
+                     ;; it by its child, where its own would be.
+                     :worktree (rat-kingdom-story--worktree story))
+               (cl-loop for key in '(:branch :branch-name :commit :head :base)
+                        when (plist-get payload key)
+                        append (list key (plist-get payload key)))
+               (and target (list :target target))
+               (and epic (list :config-epic epic))
+               (and task (list :config-task task))
+               (list :entered (funcall rat-kingdom-space-now-function)))
+     :actor rat-kingdom-story--actor)
+    (rat-kingdom-story--wait space story step "child" :child child
+                             :children (append (plist-get payload :children)
+                                               (list child)))))
+
+(defun rat-kingdom-story--child-results (child parent outcome)
+  "Return what the parent PARENT takes from its child CHILD, both tokens.
+OUTCOME is how the parent leaves, `:to' or `:fail'.  On `:to' it takes
+the child's `:commit', `:head', `:base', `:summary', `:integrated',
+`:integrate' and `:reviewed', each one the child has.  Either way it
+takes the child's `:worktree' and `:branch' if it has none, as when the
+child made the worktree.  The result is a property list."
+  (let ((from (plist-get child :payload))
+        (to (plist-get parent :payload)))
+    (append
+     (and (eq outcome :to)
+          (cl-loop for key in '(:commit :head :base :summary :integrated
+                                        :integrate :reviewed)
+                   when (plist-get from key)
+                   append (list key (plist-get from key))))
+     (cl-loop for key in '(:worktree :branch)
+              when (and (plist-get from key) (not (plist-get to key)))
+              append (list key (plist-get from key))))))
+
+(defun rat-kingdom-story--child-ended (space child outcome &optional reason)
+  "Move on the parent of the child story CHILD, which has ended, in SPACE.
+CHILD is the child's last token.  The parent, if it still waits for it,
+leaves its `:workflow' step by OUTCOME, `:to' or `:fail', with REASON
+and what `rat-kingdom-story--child-results' says it takes.  Return the
+parent's new token, or nil."
+  (let* ((payload (plist-get child :payload))
+         (parent (rat-kingdom-space-in
+                  space (list 'story :scope (plist-get child :scope)
+                              :identity (plist-get payload :parent)
+                              :awaiting "child"
+                              :child (plist-get child :identity))
+                  :actor rat-kingdom-story--actor)))
+    (when parent
+      (apply #'rat-kingdom-story--leave space parent outcome
+             (append (and reason (list :reason reason))
+                     (rat-kingdom-story--child-results child parent
+                                                       outcome))))))
+
+(defun rat-kingdom-story--archive-child (space child)
+  "Archive the parked child story CHILD in SPACE and fail its parent's step.
+CHILD is its token, at its failure place or parked elsewhere.  Its
+worker, check, run or gate is stopped and its candidate removed; the
+worktree is left as it is.  The parent leaves by `:fail' with the
+child's reason."
+  (let* ((payload (plist-get child :payload))
+         (id (plist-get child :identity)))
+    (with-demoted-errors "rat-kingdom: archiving a child: %S"
+      (rat-kingdom-story--abandon space child))
+    (when-let* ((candidate (plist-get payload :candidate))
+                (repo (rat-kingdom-repo-get space (plist-get child :scope))))
+      (ignore-errors
+        (rat-kingdom-story--remove-candidate (plist-get repo :path) candidate)))
+    (rat-kingdom-space-sweep space (plist-get child :owner))
+    (rat-kingdom-story--child-ended
+     space child :fail
+     (format "The child %s stopped at %s: %s" id (plist-get payload :at)
+             (or (plist-get payload :reason) "no reason given")))
+    (rat-kingdom-story-dequeue space)))
+
+(defun rat-kingdom-story--cancel-children (space id actor)
+  "Cancel the child stories of the story ID in SPACE, as ACTOR.
+Their parent is not moved on; it is being moved or cancelled itself."
+  (dolist (child (rat-kingdom-story-children space id))
+    (rat-kingdom-story-cancel space (plist-get child :identity) actor t)))
+
 ;;;; Merging
 
 (defun rat-kingdom-story--clean-up (space story path head)
@@ -1445,7 +1679,9 @@ branch is deleted if it is an ancestor of HEAD, as after a merge, or,
 when the story was integrated by \=`rebase' or \=`squash' (its
 `:integrate'), if its tip is still the commit that was checked, its
 `:commit'; otherwise someone has added to it, and it is kept.  Failures
-are reported and otherwise ignored: the work is already merged."
+are reported and otherwise ignored: the work is already merged.
+A child story's worktree and branch are its parent's, so they are left
+for the parent, which removes them when it ends."
   (let* ((payload (plist-get story :payload))
          (branch (plist-get payload :branch))
          (ref (and branch (concat "refs/heads/" branch))))
@@ -1453,17 +1689,18 @@ are reported and otherwise ignored: the work is already merged."
       (rat-kingdom-story--remove-candidate path (plist-get payload :candidate)))
     (with-demoted-errors "rat-kingdom: cleaning up: %S"
       (rat-kingdom-run-stop space (plist-get payload :run)))
-    (with-demoted-errors "rat-kingdom: cleaning up: %S"
-      ;; Not forced: a worktree the worker dirtied after reporting stays.
-      (rat-kingdom-git path "worktree" "remove" (plist-get payload :worktree))
-      (when (and ref
-                 (or (rat-kingdom-git-ancestor-p path ref head)
-                     (and (memq (rat-kingdom-story--integrate-mode
-                                 (plist-get payload :integrate))
-                                '(rebase squash))
-                          (equal (ignore-errors (rat-kingdom-git-rev path ref))
-                                 (plist-get payload :commit)))))
-        (rat-kingdom-git path "branch" "-D" branch)))))
+    (unless (plist-get payload :parent)
+      (with-demoted-errors "rat-kingdom: cleaning up: %S"
+        ;; Not forced: a worktree the worker dirtied after reporting stays.
+        (rat-kingdom-git path "worktree" "remove" (plist-get payload :worktree))
+        (when (and ref
+                   (or (rat-kingdom-git-ancestor-p path ref head)
+                       (and (memq (rat-kingdom-story--integrate-mode
+                                   (plist-get payload :integrate))
+                                  '(rebase squash))
+                            (equal (ignore-errors (rat-kingdom-git-rev path ref))
+                                   (plist-get payload :commit)))))
+          (rat-kingdom-git path "branch" "-D" branch))))))
 
 (defun rat-kingdom-story--merge (space story _workflow step)
   "Begin STEP for the taken token STORY in SPACE.
@@ -1502,15 +1739,35 @@ another branch there, then move this story back to %s"
 ;;;; The engine
 
 (defun rat-kingdom-story--finish (space story)
-  "Archive the taken token STORY, which is at a final place of SPACE."
-  (with-demoted-errors "rat-kingdom: finishing: %S"
-    (when-let* ((run (plist-get (plist-get story :payload) :run)))
-      (rat-kingdom-run-stop space run)))
-  (rat-kingdom-story--event
-   space 'done (rat-kingdom-story--put space story :phase "done"))
-  (rat-kingdom-space-sweep space (plist-get story :owner))
-  ;; Its run is archived with it, which may free a worker.
-  (rat-kingdom-story-dequeue space))
+  "Archive the taken token STORY, which is at a final place of SPACE.
+A child story's parent leaves its `:workflow' step by `:to', taking
+what the child did (`rat-kingdom-story--child-ended').  A story merged
+by a child of its own has its worktree and branch removed now, as
+`rat-kingdom-story--clean-up' would have done when it merged."
+  (let ((payload (plist-get story :payload)))
+    (with-demoted-errors "rat-kingdom: finishing: %S"
+      (when-let* ((run (plist-get payload :run)))
+        (rat-kingdom-run-stop space run)))
+    ;; A child that merged nothing leaves no candidate behind.
+    (when-let* (((plist-get payload :parent))
+                (candidate (plist-get payload :candidate))
+                (repo (rat-kingdom-repo-get space (plist-get story :scope))))
+      (with-demoted-errors "rat-kingdom: finishing: %S"
+        (rat-kingdom-story--remove-candidate (plist-get repo :path)
+                                             candidate)))
+    (when-let* (((not (plist-get payload :parent)))
+                (head (plist-get payload :integrated))
+                (worktree (plist-get payload :worktree))
+                ((file-directory-p worktree))
+                (repo (rat-kingdom-repo-get space (plist-get story :scope))))
+      (rat-kingdom-story--clean-up space story (plist-get repo :path) head))
+    (let ((done (rat-kingdom-story--put space story :phase "done")))
+      (rat-kingdom-story--event space 'done done)
+      (rat-kingdom-space-sweep space (plist-get story :owner))
+      (when (plist-get payload :parent)
+        (rat-kingdom-story--child-ended space done :to)))
+    ;; Its run is archived with it, which may free a worker.
+    (rat-kingdom-story-dequeue space)))
 
 (defun rat-kingdom-story--enter (space story)
   "Begin the step of the taken token STORY, which has arrived at a place.
@@ -1529,10 +1786,7 @@ from, the token is parked."
      ((rat-kingdom-workflow-final-p workflow place)
       (rat-kingdom-story--finish space story))
      ((null step)
-      (rat-kingdom-story--event
-       space 'parked
-       (rat-kingdom-story--put space story :phase "parked" :step nil
-                               :awaiting nil)))
+      (rat-kingdom-story--park space story))
      (t
       (condition-case err
           (funcall (pcase (plist-get step :kind)
@@ -1542,6 +1796,7 @@ from, the token is parked."
                      (:merge #'rat-kingdom-story--merge)
                      (:run #'rat-kingdom-story--run-step)
                      (:gate #'rat-kingdom-story--gate)
+                     (:workflow #'rat-kingdom-story--workflow-step)
                      (kind (error "Step %s of kind %s is not supported yet"
                                   (plist-get step :name) kind)))
                    space story workflow step)
@@ -1724,8 +1979,9 @@ That is its check, setup or run, its worker, and the timer of its gate."
 (defun rat-kingdom-story-move (space id place &optional note actor)
   "Put the story ID in SPACE at PLACE, whatever it was doing.
 Its worker is stopped and a running check is abandoned; no file is
-touched.  NOTE says why and reaches the next worker.  ACTOR is who
-moved it.  The step taken from PLACE then begins as usual."
+touched.  A child story it waits for is cancelled first.  NOTE says why
+and reaches the next worker.  ACTOR is who moved it.  The step taken
+from PLACE then begins as usual."
   (let* ((story (or (rat-kingdom-story-get space id)
                     (error "There is no story called %s" id)))
          (workflow (or (rat-kingdom-story--workflow space story)
@@ -1736,6 +1992,7 @@ moved it.  The step taken from PLACE then begins as usual."
       (error "%s is not a place of the workflow %s; its places are %s"
              place (plist-get workflow :name)
              (string-join (plist-get workflow :places) ", ")))
+    (rat-kingdom-story--cancel-children space id rat-kingdom-story--actor)
     (rat-kingdom-story--abandon space story)
     (rat-kingdom-space-with-transaction space
       (unless (rat-kingdom-space-in space (list 'story :id (plist-get story :id))
@@ -1744,14 +2001,18 @@ moved it.  The step taken from PLACE then begins as usual."
       (rat-kingdom-story--goto space story place :reason note :attempt 0))
     place))
 
-(defun rat-kingdom-story-cancel (space id &optional actor)
+(defun rat-kingdom-story-cancel (space id &optional actor quiet)
   "Stop the story ID in SPACE for good and archive it.
-Its worker is stopped.  Its worktree and branch are kept.  ACTOR is
-who cancelled it.  Return a sentence saying what is left."
+Its worker is stopped, and its child stories are cancelled first.  Its
+worktree and branch are kept.  ACTOR is who cancelled it.  A child
+story's parent leaves its `:workflow' step by `:fail', unless QUIET is
+non-nil, as when the parent itself is moved or cancelled.  Return a
+sentence saying what is left."
   (let* ((story (or (rat-kingdom-story-get space id)
                     (error "There is no story called %s" id)))
          (payload (plist-get story :payload))
          (rat-kingdom-story--actor (or actor "user")))
+    (rat-kingdom-story--cancel-children space id rat-kingdom-story--actor)
     (rat-kingdom-story--abandon space story)
     (when-let* ((candidate (plist-get payload :candidate))
                 (repo (rat-kingdom-repo-get space (plist-get story :scope))))
@@ -1766,6 +2027,9 @@ who cancelled it.  Return a sentence saying what is left."
        (rat-kingdom-story--put space story :phase "cancelled" :step nil
                                :awaiting nil))
       (rat-kingdom-space-sweep space (plist-get story :owner))
+      (when (and (plist-get payload :parent) (not quiet))
+        (rat-kingdom-story--child-ended
+         space story :fail (format "The child %s was cancelled" id)))
       (rat-kingdom-story-dequeue space))
     (rat-kingdom-task-story-ended space story)
     (if (plist-get payload :worktree)
@@ -1798,7 +2062,8 @@ AWAITING is what the story waits for.  A setup in a worker's worktree
 may take as long as a check.  Otherwise a step's own `:timeout' wins;
 then the configuration's `:timeouts' for the story's repository, epic
 and task: `:worker' for a step that spawns a worker, `:check' for a
-check or a run.  A gate has only its own `:timeout'.  A step of another
+check or a run.  A gate, and a step that waits for a child story, has
+only its own `:timeout'.  A step of another
 kind has the limit `rat-kingdom-story-timeouts' gives it, if any."
   (let ((timeouts (and (or (equal awaiting "setup") step)
                        (rat-kingdom-story-config space story :timeouts))))
@@ -1809,19 +2074,20 @@ kind has the limit `rat-kingdom-story-timeouts' gives it, if any."
                (pcase (plist-get step :kind)
                  (:spawn (plist-get timeouts :worker))
                  ((or :check :run) (plist-get timeouts :check))
-                 (:gate nil)
+                 ((or :gate :workflow) nil)
                  (kind (alist-get kind rat-kingdom-story-timeouts))))))))
 
 (defun rat-kingdom-story-watch (space)
   "Report as stuck each story in SPACE that will not move by itself.
 That is a story whose step or setup has run past its time, whose check,
 setup or run is not running, whose worker is gone, whose workflow is no
-longer defined, or which no reaction has picked up.
-A story queued for a free worker is not stuck; the queue is served
-first, in case a worker is free.  Nor is a story at a gate, which has
-no process, unless its step has a `:timeout' and has run past it.
-Timed gates whose time has come are opened first, by
-`rat-kingdom-story-open-gates'.  Return how many were newly reported."
+longer defined, whose child story is gone, or which no reaction has
+picked up.  A story queued for a free worker is not stuck; the queue is
+served first, in case a worker is free.  Nor is a story at a gate or
+waiting for its child, which has no process, unless its step has a
+`:timeout' and has run past it.  Timed gates whose time has come are
+opened first, by `rat-kingdom-story-open-gates'.  Return how many were
+newly reported."
   (rat-kingdom-story-open-gates space)
   (rat-kingdom-story-dequeue space)
   (let ((now (funcall rat-kingdom-space-now-function))
@@ -1869,6 +2135,10 @@ has begun. Reactions may be off or failing." (plist-get payload :at) waited)))
                         (not (rat-kingdom-run-get space
                                                   (plist-get payload :run))))
                    "Its worker's record is gone.")
+                  ((and (equal awaiting "child")
+                        (not (rat-kingdom-story-get space
+                                                    (plist-get payload :child))))
+                   (format "Its child %s is gone." (plist-get payload :child)))
                   ((and limit (> waited limit))
                    (format "%s has taken %d minutes; its limit is %d."
                            (if (equal awaiting "setup")
@@ -1888,7 +2158,9 @@ setup that was running in a new worktree, still holding its story's
 worker place.  Stories queued for a free worker stay queued, and are
 given one if one is free.  The commands of a `:run' step that was
 running are run again, in the worktree as it is; such a story counts
-among `:checks'.  Timed gates whose time has passed are opened.
+among `:checks'.  A story that waits for a child story that is gone
+leaves its step by `:fail'.  Timed gates whose time has passed are
+opened.
 Return a property list: `:runs', the ids of the interrupted runs,
 `:checks', the ids of the stories checked or run again, and `:setups',
 the ids of the stories whose setup is run again."
@@ -1939,6 +2211,18 @@ the ids of the stories whose setup is run again."
                               (error-message-string err)))))
                 (rat-kingdom-story--leave space story :pass))
               (push id checks))))))
+    ;; A parent whose child is gone cannot be moved on by it.
+    (dolist (story (rat-kingdom-space-scan space '(story :awaiting child)))
+      (let ((child (plist-get (plist-get story :payload) :child)))
+        (unless (rat-kingdom-story-get space child)
+          (rat-kingdom-space-with-transaction space
+            (when (rat-kingdom-space-in
+                   space (list 'story :id (plist-get story :id))
+                   :actor "engine")
+              (rat-kingdom-story--leave
+               space story :fail
+               :reason (format "The child %s is gone: it ended without \
+moving this story on" child)))))))
     (rat-kingdom-story-open-gates space)
     ;; A timed gate still shut gets its timer again.
     (dolist (story (rat-kingdom-space-scan space '(story :awaiting gate)))
