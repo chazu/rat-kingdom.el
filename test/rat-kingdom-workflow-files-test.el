@@ -262,6 +262,66 @@ is a property list whose keys replace those of the workflow."
       (should-not (string-search "Configuration ignored"
                                  (rat-kingdom-king-status space))))))
 
+(ert-deftest rat-kingdom-workflow-files-test-new-step-kinds ()
+  (rat-kingdom-config-engine-test-with-repo (space path)
+    (let ((composed
+           (rat-kingdom-workflow-files-test--repo
+            path "composed.eld"
+            (rat-kingdom-workflow-files-test--spec
+             'composed
+             :places '(todo checking formatting waiting linting integrating
+                            done blocked)
+             :steps '((implement :from todo :spawn rat :to checking
+                                 :brief "Write failing tests first.")
+                      (check :from checking :check (lint test)
+                             :pass formatting :fail todo)
+                      (format :from formatting :run (format) :pass waiting)
+                      (wait :from waiting :gate (:signal approve) :to linting)
+                      (lint :from linting :workflow lint-only
+                            :to integrating :fail todo)
+                      (integrate :from integrating :merge t :to done
+                                 :stale checking)))))
+          (unknown-kind
+           (rat-kingdom-workflow-files-test--repo
+            path "frob.eld"
+            (rat-kingdom-workflow-files-test--spec
+             'frob
+             :steps '((implement :from todo :frobnicate t :to checking)
+                      (check :from checking :check t :pass integrating)
+                      (integrate :from integrating :merge t :to done)))))
+          (bad-value
+           (rat-kingdom-workflow-files-test--repo
+            path "late.eld"
+            (rat-kingdom-workflow-files-test--spec
+             'late
+             :places '(todo waiting checking integrating done blocked)
+             :steps '((implement :from todo :spawn rat :to waiting)
+                      (wait :from waiting :gate (:after 0) :to checking)
+                      (check :from checking :check t :pass integrating
+                             :brief "No.")
+                      (integrate :from integrating :merge t :to done))))))
+      (should-not (rat-kingdom-workflow-files-test--error composed))
+      (let ((workflow (rat-kingdom-config-workflow space 'composed "demo")))
+        (should workflow)
+        (should (equal (plist-get (rat-kingdom-workflow-step-named
+                                   workflow "implement")
+                                  :brief)
+                       "Write failing tests first."))
+        (should (eq (plist-get (rat-kingdom-workflow-step-named
+                                workflow "lint")
+                               :kind)
+                    :workflow)))
+      (should-not (assoc "frob" (rat-kingdom-workflow-files-test--names
+                                 space "demo")))
+      (should (string-search "Step implement needs exactly one of"
+                             (rat-kingdom-workflow-files-test--error
+                              unknown-kind)))
+      (should-not (assoc "late" (rat-kingdom-workflow-files-test--names
+                                 space "demo")))
+      (let ((error (rat-kingdom-workflow-files-test--error bad-value)))
+        (should (string-search "a gate is (:after SECONDS)" error))
+        (should (string-search "only a spawn step may have" error))))))
+
 (ert-deftest rat-kingdom-workflow-files-test-same-name-twice ()
   (rat-kingdom-config-engine-test-with-repo (space _path)
     (let ((one (rat-kingdom-workflow-files-test--global

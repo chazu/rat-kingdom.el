@@ -105,5 +105,203 @@
                    rat-kingdom-workflow-test--sound))
     (should (rat-kingdom-workflow-get 'small))))
 
+;;;; The kinds of step in workflow composition (DESIGN.md, section 7.1)
+
+(defun rat-kingdom-workflow-test--with-step (step)
+  "Return the problems of a workflow whose only step, from ready, is STEP.
+STEP is a step's property list without its name and `:from'.  Every
+outcome of it may lead to done, ready or blocked."
+  (rat-kingdom-workflow-validate
+   (list :places '(ready done blocked)
+         :start 'ready
+         :final '(done)
+         :steps (list (append '(only :from ready) step)))))
+
+(ert-deftest rat-kingdom-workflow-test-new-kinds ()
+  (should (equal (assq :run rat-kingdom-workflow-kinds) '(:run :pass :fail)))
+  (should (equal (assq :gate rat-kingdom-workflow-kinds) '(:gate :to)))
+  (should (equal (assq :workflow rat-kingdom-workflow-kinds)
+                 '(:workflow :to :fail)))
+  ;; Sound values.
+  (dolist (step '((:spawn rat :to done)
+                  (:spawn researcher :to done)
+                  (:spawn rat :to done :brief "Write failing tests first.")
+                  (:check t :pass done)
+                  (:check (lint) :pass done)
+                  (:check (lint test) :pass done :fail ready)
+                  (:run (format) :pass done)
+                  (:run (format lint) :pass done :fail ready)
+                  (:gate (:after 600) :to done)
+                  (:gate (:after 0.5) :to done)
+                  (:gate (:signal approve) :to done)
+                  (:gate (:signal "approve") :to done)
+                  (:workflow lint-only :to done)
+                  (:workflow "lint-only" :to done :fail ready)))
+    (should-not (rat-kingdom-workflow-test--with-step step)))
+  ;; Unsound ones, each with what is said about it.
+  (dolist (case '(((:spawn king :to done) "spawns king, which is not a role")
+                  ((:check nil :pass done) "a check is t or a list")
+                  ((:check () :pass done) "a check is t or a list")
+                  ((:check lint :pass done) "a check is t or a list")
+                  ((:check ("make" "lint") :pass done) "a check is t or a list")
+                  ((:check (lint t) :pass done) "a check is t or a list")
+                  ((:run nil :pass done) "a run is a list of command names")
+                  ((:run t :pass done) "a run is a list of command names")
+                  ((:run format :pass done) "a run is a list of command names")
+                  ((:run (format :lint) :pass done)
+                   "a run is a list of command names")
+                  ((:run ("gofmt" "-w") :pass done)
+                   "a run is a list of command names")
+                  ((:gate 600 :to done) "a gate is (:after SECONDS)")
+                  ((:gate (:after 0) :to done) "a gate is (:after SECONDS)")
+                  ((:gate (:after -5) :to done) "a gate is (:after SECONDS)")
+                  ((:gate (:after soon) :to done) "a gate is (:after SECONDS)")
+                  ((:gate (:after 60 :signal go) :to done)
+                   "a gate is (:after SECONDS)")
+                  ((:gate (:signal nil) :to done) "a gate is (:after SECONDS)")
+                  ((:gate (:signal "") :to done) "a gate is (:after SECONDS)")
+                  ((:gate (:signal 7) :to done) "a gate is (:after SECONDS)")
+                  ((:gate (:until 60) :to done) "a gate is (:after SECONDS)")
+                  ((:workflow nil :to done) "a workflow name is a symbol")
+                  ((:workflow t :to done) "a workflow name is a symbol")
+                  ((:workflow "  " :to done) "a workflow name is a symbol")
+                  ((:workflow (lint) :to done) "a workflow name is a symbol")
+                  ((:run (format)) "does not say where :pass leads")
+                  ((:gate (:after 60)) "does not say where :to leads")
+                  ((:workflow lint-only :fail ready)
+                   "does not say where :to leads")
+                  ((:gate (:after 60) :to mars) "leads to mars")
+                  ((:workflow lint-only :to done :fail mars) "leads to mars")
+                  ((:check t :pass done :brief "Be careful.")
+                   "only a spawn step may have")
+                  ((:run (format) :pass done :brief "x")
+                   "only a spawn step may have")
+                  ((:spawn rat :to done :brief write-tests)
+                   "brief of step only is not a string")
+                  ((:spawn rat :to done :brief nil)
+                   "brief of step only is not a string")
+                  ((:run (format) :gate (:after 60) :pass done)
+                   "needs exactly one of")))
+    (let ((problems (rat-kingdom-workflow-test--with-step (car case))))
+      (unless (cl-some (lambda (problem) (string-search (cadr case) problem))
+                       problems)
+        (ert-fail (list (car case) :expected (cadr case) :got problems))))))
+
+(ert-deftest rat-kingdom-workflow-test-new-kinds-normalized ()
+  (let ((workflow
+         (rat-kingdom-workflow--normalize
+          'composed
+          '(:places (ready formatting waiting linting done blocked)
+            :start ready
+            :final (done)
+            :steps ((implement :from ready :spawn rat :to formatting
+                               :brief "Write the tests first.")
+                    (format :from formatting :run (format) :pass waiting)
+                    (wait :from waiting :gate (:signal approve) :to linting)
+                    (lint :from linting :workflow lint-only :to done
+                          :fail ready))))))
+    (let ((implement (rat-kingdom-workflow-step-named workflow "implement"))
+          (format (rat-kingdom-workflow-step-named workflow "format"))
+          (wait (rat-kingdom-workflow-step-named workflow "wait"))
+          (lint (rat-kingdom-workflow-step-named workflow "lint")))
+      (should (equal (plist-get implement :brief) "Write the tests first."))
+      (should (plist-member format :brief))
+      (should-not (plist-get format :brief))
+      (should (eq (plist-get format :kind) :run))
+      (should (equal (plist-get format :with) '(format)))
+      ;; An outcome left out leads to the failure place.
+      (should (equal (plist-get format :fail) "blocked"))
+      (should (equal (plist-get wait :with) '(:signal approve)))
+      (should (equal (plist-get wait :to) "linting"))
+      (should (eq (plist-get lint :with) 'lint-only))
+      (should (equal (plist-get lint :fail) "ready"))))
+  ;; Built-in steps carry :brief, as nil.
+  (dolist (step (plist-get (rat-kingdom-workflow-get 'story) :steps))
+    (should (plist-member step :brief))
+    (should-not (plist-get step :brief))))
+
+(ert-deftest rat-kingdom-workflow-test-new-kinds-reachability ()
+  ;; Places are reached through the outcomes of the new kinds.
+  (should-not
+   (rat-kingdom-workflow-validate
+    '(:places (ready formatting waiting linting done blocked)
+      :start ready
+      :final (done)
+      :steps ((implement :from ready :spawn rat :to formatting)
+              (format :from formatting :run (format) :pass waiting
+                      :fail ready)
+              (wait :from waiting :gate (:after 60) :to linting)
+              (lint :from linting :workflow lint-only :to done :fail ready)))))
+  ;; A place only a missing outcome would lead to cannot be reached.
+  (should (member
+           "The place linting cannot be reached"
+           (rat-kingdom-workflow-validate
+            '(:places (ready waiting linting done blocked)
+              :start ready
+              :final (done)
+              :steps ((wait :from ready :gate (:after 60) :to done)
+                      (lint :from linting :workflow lint-only :to done))))))
+  ;; A :run's :fail and a :workflow's :fail reach their places.
+  (should-not
+   (rat-kingdom-workflow-validate
+    '(:places (ready fixing done blocked)
+      :start ready
+      :final (done)
+      :steps ((lint :from ready :workflow lint-only :to done :fail fixing)
+              (fix :from fixing :run (format) :pass ready)))))
+  ;; A gate's only outcome must reach a final place somehow.
+  (should (member
+           "No final place can be reached from the start"
+           (rat-kingdom-workflow-validate
+            '(:places (ready waiting done blocked)
+              :start ready
+              :final (done)
+              :steps ((wait :from ready :gate (:after 60) :to waiting)
+                      (again :from waiting :gate (:signal go) :to ready)))))))
+
+(ert-deftest rat-kingdom-workflow-test-describe-new-kinds ()
+  (let ((text (rat-kingdom-workflow-describe
+               (rat-kingdom-workflow--normalize
+                'composed
+                '(:doc "Composed."
+                  :places (ready checking formatting waiting signalled
+                                 linting done blocked)
+                  :start ready
+                  :final (done)
+                  :steps ((implement :from ready :spawn rat :to checking
+                                     :brief "Write failing tests for the \
+task and commit them; do not implement it.")
+                          (check :from checking :check (lint test)
+                                 :pass formatting :fail ready)
+                          (format :from formatting :run (format)
+                                  :pass waiting)
+                          (wait :from waiting :gate (:after 600)
+                                :to signalled)
+                          (approval :from signalled :gate (:signal approve)
+                                    :to linting)
+                          (lint :from linting :workflow lint-only :to done
+                                :fail ready)))))))
+    (dolist (line '("implement: at ready, spawn rat (brief: Write failing \
+tests for the task and ...); to -> checking, blocked -> blocked"
+                    "check: at checking, check (lint test); pass -> \
+formatting, fail -> ready"
+                    "format: at formatting, run (format); pass -> waiting, \
+fail -> blocked"
+                    "wait: at waiting, gate after 600s; to -> signalled"
+                    "approval: at signalled, gate signal approve; to -> linting"
+                    "lint: at linting, workflow lint-only; to -> done, \
+fail -> ready"))
+      (unless (string-search line text)
+        (ert-fail (list :missing line :in text)))))
+  ;; The built-in workflows read as before.
+  (let ((text (rat-kingdom-workflow-describe (rat-kingdom-workflow-get 'story))))
+    (should (string-search "implement: at ready, spawn rat; to -> checking"
+                           text))
+    (should (string-search "check: at checking, check; pass -> review" text))
+    (should (string-search "review: at review, review king; pass -> integrating"
+                           text))
+    (should (string-search "integrate: at integrating, merge; to -> done"
+                           text))))
+
 (provide 'rat-kingdom-workflow-test)
 ;;; rat-kingdom-workflow-test.el ends here

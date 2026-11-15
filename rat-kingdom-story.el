@@ -1094,7 +1094,9 @@ from, the token is parked."
                      (:spawn #'rat-kingdom-story--spawn)
                      (:check #'rat-kingdom-story--check)
                      (:review #'rat-kingdom-story--review)
-                     (:merge #'rat-kingdom-story--merge))
+                     (:merge #'rat-kingdom-story--merge)
+                     (kind (error "Step %s of kind %s is not supported yet"
+                                  (plist-get step :name) kind)))
                    space story workflow step)
         (error
          (rat-kingdom-story--fail
