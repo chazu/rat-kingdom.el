@@ -478,9 +478,20 @@ build order): steps that run named commands (`:run`), wait for a time or a
 signal (`:gate`) or run a child workflow (`:workflow`); mixins such as
 `no-review` and `tdd` and aspects such as `(:after implement :run
 (format))`, with a `:mixins` configuration key; a `research` workflow whose
-researcher writes docs that every later worker is told of; and a `:git`
-key for branch names and for merging, rebasing or squashing into the
-target.
+researcher writes docs that every later worker is told of.
+
+The `:git` configuration key is built. `:branch` is the format of a new
+story's branch name, `"rats/%i"` by default, with `%i` the story id, `%s`
+a slug of its title, `%r` the repository, `%e` the epic or `none` and
+`%%` a `%`; a name already taken gets `-2`, `-3` and so on. `:integrate`
+is how a story's work goes into its target, and how an epic's feature
+branch lands: `merge` (the default, a `--no-ff` merge), `rebase` (the
+story's commits replayed onto the target) or `squash` (one commit, `ID:
+TITLE` and the worker's summary). For example, in `.rk/config.eld`:
+
+```elisp
+(:git (:branch "rats/%s-%i" :integrate squash))
+```
 
 ## Requirements
 

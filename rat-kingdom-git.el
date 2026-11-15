@@ -175,12 +175,14 @@ there was one."
 
 (declare-function rat-kingdom-task-br-ensure "rat-kingdom-task"
                   (repo &optional space))
+(declare-function rat-kingdom-config-validate "rat-kingdom-config"
+                  (plist layer))
 (declare-function rat-kingdom-config-track-apply "rat-kingdom-config"
                   (space repo))
 
 (cl-defun rat-kingdom-repo-add (space path
                                       &key name target check setup workflow
-                                      task-prefix)
+                                      task-prefix git)
   "Register the repository at PATH in SPACE and return its record.
 NAME defaults to the directory's name.  TARGET is the branch finished
 work is merged into, by default `rat-kingdom-git-default-target'; it
@@ -189,7 +191,9 @@ list of strings, that must succeed before work is merged; it is run
 without a shell.  SETUP is a command of the same kind run in each new
 worktree before a worker starts in it and before the check, for example
 to install dependencies.  WORKFLOW names the workflow its stories follow
-unless they say otherwise.  Registering a name again replaces its
+unless they say otherwise.  GIT is the :git configuration of the
+registration layer, a property list with `:branch' and `:integrate'
+\(rat-kingdom-config.el).  Registering a name again replaces its
 record.
 
 Every registered repository has a br workspace for its tasks.  If the
@@ -219,6 +223,9 @@ returned has the warnings as `:track-warnings', which is not stored."
       (error "A setup is a list of strings: %S" setup))
     (when (and task-prefix (string-empty-p task-prefix))
       (error "A task prefix may not be empty"))
+    (when-let* ((problems (and git (rat-kingdom-config-validate
+                                    (list :git git) 'registration))))
+      (error "%s" (string-join problems "; ")))
     (unless (rat-kingdom-git-ok-p top "rev-parse" "--verify" "--quiet" "HEAD")
       (error "%s has no commits yet" top))
     (let* ((record (list :name name :path top :task-prefix task-prefix))
@@ -229,11 +236,14 @@ returned has the warnings as `:track-warnings', which is not stored."
                                     (concat "refs/heads/" target))
         (rat-kingdom-git top "branch" target "HEAD"))
       (rat-kingdom-space-put space 'repo :scope name :identity name
-                             :payload (list :path top :target target
-                                            :check check :setup setup
-                                            :workflow (and workflow
-                                                           (format "%s" workflow))
-                                            :task-prefix task-prefix)
+                             :payload (append
+                                       (list :path top :target target
+                                             :check check :setup setup
+                                             :workflow (and workflow
+                                                            (format "%s"
+                                                                    workflow))
+                                             :task-prefix task-prefix)
+                                       (and git (list :git git)))
                              :actor "user")
       (append (rat-kingdom-repo-get space name)
               (and initialized (list :task-initialized t))
@@ -242,7 +252,7 @@ returned has the warnings as `:track-warnings', which is not stored."
 (defun rat-kingdom-repo-get (space name)
   "Return the record of the repository NAME in SPACE, or nil.
 The record is a property list: `:name', `:path', `:target', `:check',
-`:setup', `:workflow' and `:task-prefix', the issue prefix its br
+`:setup', `:workflow', `:git' and `:task-prefix', the issue prefix its br
 workspace was created with, or nil for its name."
   (when-let* ((tuple (rat-kingdom-space-rd
                       space (list 'repo :scope name :identity name))))

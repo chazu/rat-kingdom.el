@@ -1050,10 +1050,11 @@ cause, then epic_resume lands it again."
 
 (defun rat-kingdom-epic--land (space repo id from)
   "Begin landing the epic ID of REPO in SPACE, if it is in a state of FROM.
-Its feature branch is merged into its target in a fresh candidate
-worktree, and the setup and check configured for the repository and
-the epic run there (`rat-kingdom-story-commands'), by
-`rat-kingdom-story-check-candidate', as for a story.  The outcome is a
+Its feature branch is put onto its target in a fresh candidate
+worktree, as the :git :integrate of the repository and the epic says
+\(a squashed commit's message names the tasks merged), and the setup
+and check configured for them run there (`rat-kingdom-story-commands'),
+by `rat-kingdom-story-check-candidate', as for a story.  The outcome is a
 `checked' tuple named by the epic, which
 `rat-kingdom-epic-landing-checked' takes from there.  The epic is
 `landing', waiting for the check, meanwhile.  If the check cannot be
@@ -1081,7 +1082,13 @@ registered" repo)))
            (format "Merge the epic %s: %s" id
                    (rat-kingdom-epic--payload record :title))
            (rat-kingdom-story-commands space :check repo id)
-           (rat-kingdom-story-commands space :setup repo id)))
+           (rat-kingdom-story-commands space :setup repo id)
+           (plist-get (rat-kingdom-config-get space :git :repo repo :epic id)
+                      :integrate)
+           (rat-kingdom-story-squash-message
+            id (rat-kingdom-epic--payload record :title)
+            (mapconcat (lambda (task) (format "%s" task))
+                       (rat-kingdom-epic--payload record :merged) "\n"))))
       (error
        (rat-kingdom-epic--stop-landing
         space repo id (format "its check could not be begun: %s"
@@ -1130,12 +1137,19 @@ RECORD is the epic, TARGET where it lands, and CHECKED the outcome of
 its landing check."
   (let* ((branch (rat-kingdom-epic--payload record :branch))
          (name (rat-kingdom-epic--name record))
-         (conflict (equal (plist-get checked :reason) "merge conflict")))
+         (conflict (member (plist-get checked :reason)
+                           '("merge conflict" "rebase conflict"))))
     (concat
      (pcase (plist-get checked :reason)
        ("merge conflict"
         (format "The epic %s cannot land on %s: its branch %s no longer \
 merges cleanly into %s, which has moved on since." name target branch target))
+       ("rebase conflict"
+        (format "The epic %s cannot land on %s: its branch %s no longer \
+rebases cleanly onto %s, which has moved on since." name target branch target))
+       ("nothing to integrate"
+        (format "The epic %s cannot land on %s: its branch %s makes no \
+change against %s, so there is nothing to squash." name target branch target))
        ("setup failed"
         (format "The epic %s cannot land on %s: with its branch %s merged \
 into %s, the repository's setup %s exited with %s, so the check did not run."
@@ -1177,6 +1191,16 @@ what breaks, is started on that branch."
                                                     "")
                                                 "\n" t)
                                   ", ")))
+       ("rebase conflict" (format "its branch no longer rebases cleanly onto \
+%s, which has moved on (in conflict: %s)"
+                                  target
+                                  (string-join
+                                   (split-string (or (plist-get checked :output)
+                                                     "")
+                                                 "\n" t)
+                                   ", ")))
+       ("nothing to integrate"
+        (format "its branch makes no change against %s" target))
        ("setup failed" "the repository's setup failed with the branch merged")
        (_ (format "the check failed with the branch merged (exit %s)"
                   (plist-get checked :exit)))))))

@@ -894,20 +894,24 @@ Return what finish answered."
 
 (ert-deftest rat-kingdom-story-test-failed-start-stops-the-story ()
   (rat-kingdom-story-test-with-repo (space path)
-    ;; The branch the story would use already exists.
-    (rat-kingdom-story-test--git path "branch" "rats/S-1" "main")
-    (rat-kingdom-story-start space "demo" "Add a file" nil "S-1")
-    (rat-kingdom-reaction-run space)
-    (should (equal (rat-kingdom-story-test--place space "S-1") "blocked"))
-    (should (string-search "Step implement could not be begun"
-                           (rat-kingdom-story-test--get space "S-1" :reason)))
-    (should-not (rat-kingdom-run-list space))
-    (should-not rat-kingdom-story-test--started)
-    (should-not (rat-kingdom-reaction-failures space))
-    (should-not (file-exists-p
-                 (expand-file-name "worktrees/demo/S-1" rat-kingdom-directory)))
-    ;; With the branch out of the way, moving it back starts the worker.
-    (rat-kingdom-story-test--git path "branch" "-D" "rats/S-1")
+    ;; A file is where the story's worktree would go.
+    (let ((worktree (expand-file-name "worktrees/demo/S-1"
+                                      rat-kingdom-directory)))
+      (make-directory (file-name-directory worktree) t)
+      (with-temp-file worktree (insert "in the way\n"))
+      (rat-kingdom-story-start space "demo" "Add a file" nil "S-1")
+      (rat-kingdom-reaction-run space)
+      (should (equal (rat-kingdom-story-test--place space "S-1") "blocked"))
+      (should (string-search "Step implement could not be begun"
+                             (rat-kingdom-story-test--get space "S-1" :reason)))
+      (should-not (rat-kingdom-run-list space))
+      (should-not rat-kingdom-story-test--started)
+      (should-not (rat-kingdom-reaction-failures space))
+      (should-not (file-directory-p worktree))
+      (should-not (rat-kingdom-git-ok-p path "rev-parse" "--verify" "--quiet"
+                                        "refs/heads/rats/S-1"))
+      ;; With the file out of the way, moving it back starts the worker.
+      (delete-file worktree))
     (rat-kingdom-story-move space "S-1" "ready")
     (rat-kingdom-reaction-run space)
     (should (equal (rat-kingdom-story-test--get space "S-1" :awaiting) "worker"))
