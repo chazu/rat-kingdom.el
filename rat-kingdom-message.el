@@ -420,7 +420,7 @@ reported; its messages are kept for its next worker"))
 started, oldest first. Each is removed once read. Messages also arrive by \
 themselves between your turns; during a long turn, check here now and then, \
 and always before you call finish."
- :roles '(rat)
+ :roles '(rat researcher)
  :args nil
  :function #'rat-kingdom-message--inbox)
 

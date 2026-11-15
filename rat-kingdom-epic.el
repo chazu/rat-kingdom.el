@@ -1430,9 +1430,11 @@ epic_verdict")))))
 (defun rat-kingdom-epic--story-event (space event story)
   "Keep the epic of the token STORY in SPACE up to date after EVENT.
 For `rat-kingdom-story-event-functions'.  A merged story's task is
-recorded as merged.  A story that ended otherwise, or was cancelled,
-leaves its task held, so that dispatch does not start it again when it
-is released, unless its epic has ended."
+recorded as merged, as is the task of a story done in a workflow
+that merges nothing; see `rat-kingdom-story-complete-p'.  A story
+that ended otherwise, or was cancelled, leaves its task held, so that
+dispatch does not start it again when it is released, unless its epic
+has ended."
   (let* ((payload (plist-get story :payload))
          (id (plist-get payload :epic))
          (task (plist-get payload :task))
@@ -1441,7 +1443,9 @@ is released, unless its epic has ended."
     (when record
       (pcase event
         ('done
-         (if (plist-get payload :integrated)
+         ;; A story of a workflow that merges nothing, such as research,
+         ;; counts as merged once it is done.
+         (if (rat-kingdom-story-complete-p space story)
              (rat-kingdom-epic--update
               space repo id
               (lambda (payload)
@@ -1489,7 +1493,8 @@ None of them starts until it is merged."
                                    dependents)))
                          (t "No other task of the epic waits on it.")))))
         ((or 'cancelled
-             (and 'done (guard (not (plist-get payload :integrated)))))
+             (and 'done (guard (not (rat-kingdom-story-complete-p space
+                                                                   story)))))
          (format "Its task %s of the epic %s is now held: the engine will not \
 start it again by itself. If it should be done after all, call epic_retry \
 with %s and %s."

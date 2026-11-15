@@ -157,6 +157,15 @@ list, each after a blank line.  An error in one is reported and its
 section left out.  Add to it with `add-hook', so that reloading does
 not add a function twice.")
 
+(defvar rat-kingdom-story-verdict-functions nil
+  "Functions called when a story's review ends with a verdict.
+Each is called with the space, the story's token as it waited for the
+verdict, and the verdict's payload, which has `:value' (\"pass\" or
+\"fix\") and `:notes'.  They are called inside the transaction that
+moves the story on, before it moves.  rat-kingdom-doc.el puts one here,
+which approves the story's docs on a pass.  Add to it with `add-hook',
+so that reloading does not add a function twice.")
+
 (defvar rat-kingdom-story--actor "engine"
   "Who is recorded as moving tokens.")
 
@@ -189,6 +198,26 @@ workflow whose file changes applies from the token's next move."
   "Return the record of the repository of the token STORY in SPACE."
   (or (rat-kingdom-repo-get space (plist-get story :scope))
       (error "Repository %s is no longer registered" (plist-get story :scope))))
+
+(defun rat-kingdom-story-merges-p (workflow)
+  "Return non-nil if the normalized WORKFLOW has a step that merges."
+  (cl-find :merge (plist-get workflow :steps)
+           :key (lambda (step) (plist-get step :kind))))
+
+(defun rat-kingdom-story-complete-p (space story)
+  "Return non-nil if the token STORY in SPACE ended with its work done.
+That is a story that was merged, and one that reached a final place of
+a workflow with no merge step, such as `research', which has nothing to
+merge.  Such a story's token has `:phase' \"done\".  A story moved to a
+final place by hand in a workflow that merges was not merged, so it is
+not complete; nor is a cancelled story."
+  (let ((payload (plist-get story :payload)))
+    (or (and (plist-get payload :integrated) t)
+        (and (equal (plist-get payload :phase) "done")
+             (when-let* ((workflow (rat-kingdom-story--workflow space story)))
+               (and (rat-kingdom-workflow-final-p workflow
+                                                  (plist-get payload :at))
+                    (not (rat-kingdom-story-merges-p workflow))))))))
 
 (defun rat-kingdom-story-target (space story)
   "Return the branch the token STORY in SPACE is cut from and merged into.
@@ -568,13 +597,15 @@ Each is called with SPACE, the token STORY and RUN-ID."
     (nreverse sections)))
 
 (defun rat-kingdom-story--prompt (space story run-id worktree branch target
-                                        earlier)
+                                        earlier &optional role)
   "Return what the worker RUN-ID is told about the token STORY in SPACE.
 It works in WORKTREE on BRANCH, cut from TARGET.  EARLIER is non-nil
-if the story has been worked on before.  The sections from
+if the story has been worked on before.  ROLE is the worker's role, by
+default a rat; it chooses the instructions the prompt begins with
+\(`rat-kingdom-run-instructions').  The sections from
 `rat-kingdom-story-brief-functions' come last."
   (let ((payload (plist-get story :payload)))
-    (concat rat-kingdom-run-rat-instructions
+    (concat (rat-kingdom-run-instructions (or role "rat"))
             (format "\n\nYou are %s.\nWorktree: %s\nBranch: %s (cut from %s)\
 \n\nTask %s: %s\n"
                     run-id worktree branch target (plist-get story :identity)
@@ -707,7 +738,7 @@ the step's `:attempts', else the configuration's."
                :worktree worktree :branch branch :target target
                :prompt (rat-kingdom-story--prompt
                         space story run-id worktree branch target
-                        (or known (> attempt 1))))
+                        (or known (> attempt 1)) (plist-get step :with)))
               (rat-kingdom-story--wait space story step "worker"
                                        :run run-id :branch branch
                                        :worktree worktree :attempt attempt
@@ -1379,6 +1410,9 @@ was started: %s"
          (verdict (plist-get (cadr rat-kingdom-reaction-tuples) :payload)))
     (rat-kingdom-space-retract space (list 'review :scope $repo
                                            :identity $story))
+    (dolist (function rat-kingdom-story-verdict-functions)
+      (with-demoted-errors "rat-kingdom: verdict function: %S"
+        (funcall function space story verdict)))
     (if (equal $value "pass")
         (rat-kingdom-story--leave
          space story :pass

@@ -601,19 +601,29 @@ ignored."
           (funcall function space story))))))
 
 (declare-function rat-kingdom-story-target "rat-kingdom-story" (space story))
+(declare-function rat-kingdom-story-complete-p "rat-kingdom-story"
+                  (space story))
 
 (defun rat-kingdom-task-story-ended (space story)
   "Settle the task of the token STORY in SPACE, which has ended.
-If it was merged, close the task; otherwise release it.  This is done
-from a timer, outside any transaction in progress."
+If it was merged, close the task.  So too if it reached a final place
+of a workflow that merges nothing, such as `research'
+\(`rat-kingdom-story-complete-p').  Otherwise release it.  This is
+done from a timer, outside any transaction in progress."
   (let ((payload (plist-get story :payload)))
     (when-let* ((task (plist-get payload :task)))
       (run-at-time 0 nil #'rat-kingdom-task--settle
                    space (plist-get story :scope) task
-                   (when-let* ((head (plist-get payload :integrated)))
-                     (format "Merged into %s at %s"
-                             (rat-kingdom-story-target space story)
-                             (substring head 0 (min 7 (length head)))))
+                   (if-let* ((head (plist-get payload :integrated)))
+                       (format "Merged into %s at %s"
+                               (rat-kingdom-story-target space story)
+                               (substring head 0 (min 7 (length head))))
+                     (when (rat-kingdom-story-complete-p space story)
+                       (format "Done: the story %s reached %s in the \
+workflow %s, which merges nothing"
+                               (plist-get story :identity)
+                               (plist-get payload :at)
+                               (plist-get payload :workflow))))
                    story))))
 
 (defun rat-kingdom-task-story-event (space event story)
