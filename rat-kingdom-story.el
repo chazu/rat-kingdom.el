@@ -195,11 +195,23 @@ step in its worktree.")
   "Return the workflow of the token STORY in SPACE, or nil if it is not defined.
 It is resolved for the story's repository, by
 `rat-kingdom-config-workflow': its own workflow files, then the global
-ones, then the built-in workflows.  It is looked up each time, so a
-workflow whose file changes applies from the token's next move."
-  (rat-kingdom-config-workflow
-   space (plist-get (plist-get story :payload) :workflow)
-   (plist-get story :scope)))
+ones, then the built-in workflows.  It is expanded with its mixins and
+aspects and the configuration's `:mixins' for the story's repository,
+epic and task.  It is looked up each time, so a workflow, a mixin or
+`:mixins' that changes applies from the token's next move.  Return nil
+also if it does not expand; `rat-kingdom-story--workflow-problem' says
+why."
+  (let ((payload (plist-get story :payload)))
+    (rat-kingdom-config-workflow
+     space (plist-get payload :workflow) (plist-get story :scope)
+     (plist-get payload :epic) (plist-get payload :task))))
+
+(defun rat-kingdom-story--workflow-problem (space story)
+  "Return why the token STORY in SPACE has no workflow, as a sentence, or nil."
+  (let ((payload (plist-get story :payload)))
+    (rat-kingdom-config-workflow-problem
+     space (plist-get payload :workflow) (plist-get story :scope)
+     (plist-get payload :epic) (plist-get payload :task))))
 
 (defun rat-kingdom-story--repo (space story)
   "Return the record of the repository of the token STORY in SPACE."
@@ -452,7 +464,10 @@ branch that is not checked out (`rat-kingdom-story-check-target')."
            (name (rat-kingdom-workflow--name
                   (or workflow
                       (rat-kingdom-story-config space where :workflow))))
-           (workflow (or (rat-kingdom-config-workflow space name repo)
+           (workflow (or (condition-case err
+                             (rat-kingdom-config-build-workflow
+                              space name :repo repo :epic epic :task task)
+                           (rat-kingdom-config-error (error "%s" (cadr err))))
                          (error "There is no workflow called %s; there are: %s"
                                 name
                                 (rat-kingdom-config-workflow-names space
@@ -1508,8 +1523,9 @@ from, the token is parked."
      ((null workflow)
       (rat-kingdom-story--fail
        space story
-       (format "There is no workflow called %s"
-               (plist-get (plist-get story :payload) :workflow))))
+       (or (rat-kingdom-story--workflow-problem space story)
+           (format "There is no workflow called %s"
+                   (plist-get (plist-get story :payload) :workflow)))))
      ((rat-kingdom-workflow-final-p workflow place)
       (rat-kingdom-story--finish space story))
      ((null step)
@@ -1822,10 +1838,15 @@ Timed gates whose time has come are opened first, by
               (pcase (plist-get payload :phase)
                 ((and (or "enter" "wait")
                       (guard (not (rat-kingdom-story--workflow space story))))
-                 (format "Its workflow %s is not defined for %s any more, \
+                 (let ((problem (rat-kingdom-story--workflow-problem space
+                                                                     story)))
+                   (if (and problem (string-search "cannot be built" problem))
+                       (format "%s, so it cannot move. Fix the workflow, its \
+mixins or the configuration's :mixins, or cancel the story." problem)
+                     (format "Its workflow %s is not defined for %s any more, \
 so it cannot move. Restore the workflow's file, or cancel the story."
-                         (plist-get payload :workflow)
-                         (plist-get story :scope)))
+                             (plist-get payload :workflow)
+                             (plist-get story :scope)))))
                 ("enter"
                  (and (> waited 60)
                       (format "It arrived at %s %d seconds ago and no step \

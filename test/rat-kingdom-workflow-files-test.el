@@ -386,7 +386,7 @@ repository's own, from %s)\n" mine) text))
         (should (string-search (format "story-lite: The workflow story-lite.\n\
   (this repository's own, from %s; it shadows the built-in one)\n" lite)
                                text))
-        (should (string-search "Workflow files ignored" text))
+        (should (string-search "Workflow and mixin files ignored" text))
         (should (string-search broken text)))
       ;; For one repository.
       (let ((text (rat-kingdom-king-workflow-list space "other")))

@@ -546,6 +546,12 @@ see `rat-kingdom-king-story-start'."
                        (format "%s: %s"
                                (capitalize (plist-get payload :awaiting))
                                detail)))
+                (unless archived
+                  (if-let* ((workflow (rat-kingdom-story--workflow space story)))
+                      (when-let* ((composition (rat-kingdom-workflow-composition
+                                                workflow)))
+                        (format "Its workflow is built from %s." composition))
+                    (rat-kingdom-story--workflow-problem space story)))
                 (and (plist-get payload :reason)
                      (format "Reason: %s" (plist-get payload :reason)))
                 (and stuck (format "Stuck: %s" (plist-get stuck :reason)))
@@ -1154,13 +1160,61 @@ returns.  SHADOWED, if given, is the entry it takes the place of."
          (format "; it shadows the %s one" (nth 1 shadowed))
        ""))))
 
+(defun rat-kingdom-king--describe-workflow (space entry view &optional shadowed)
+  "Return text describing the workflow of ENTRY, expanded for VIEW in SPACE.
+ENTRY is (WORKFLOW ORIGIN FILE), as `rat-kingdom-config-workflows'
+returns.  VIEW is a repository record, or nil for every repository:
+the workflow is expanded with the `:mixins' its configuration gives.
+SHADOWED, if given, is the entry it takes the place of.  A workflow
+that cannot be built is described as written, with the reason."
+  (let* ((base (car entry))
+         (layer (nth 2 (assq :mixins (rat-kingdom-config-explain
+                                      space :repo view))))
+         (problem nil)
+         (workflow (condition-case err
+                       (rat-kingdom-config-build-workflow
+                        space (plist-get base :name) :repo view)
+                     (rat-kingdom-config-error
+                      (setq problem (cadr err))
+                      nil))))
+    (concat
+     (rat-kingdom-workflow-describe
+      (or workflow base)
+      (rat-kingdom-king--workflow-origin entry shadowed)
+      layer)
+     (if problem
+         (format "\n  %s, so no story can follow it here (tell the user)."
+                 problem)
+       ""))))
+
+(defun rat-kingdom-king--mixin-origin (entry)
+  "Return text saying where the mixin of ENTRY, (MIXIN ORIGIN FILE), is from."
+  (pcase-let ((`(,_ ,origin ,file) entry))
+    (pcase origin
+      ('built-in "built-in")
+      ('global (format "global, from %s" file))
+      (_ (format "this repository's own, from %s" file)))))
+
+(defun rat-kingdom-king--describe-mixins (entries)
+  "Return lines describing the mixins of ENTRIES, each with its origin.
+ENTRIES is as `rat-kingdom-config-mixins' returns."
+  (mapconcat (lambda (entry)
+               (concat "- " (rat-kingdom-workflow-describe-mixin
+                             (car entry)
+                             (rat-kingdom-king--mixin-origin entry))))
+             entries "\n"))
+
 (defun rat-kingdom-king-workflow-list (space &optional repo)
   "Return the text of `workflow_list' in SPACE, for REPO or for all.
 REPO is a repository's name.  With REPO, it describes each workflow a
-story there can follow and where it comes from.  Without, it describes
-those every repository has, and then, for each registered repository,
-names the workflows it has and describes those its own files define.
-Workflow files being ignored follow, with the reason."
+story there can follow, expanded with its mixins and aspects and the
+repository's `:mixins', and where it comes from, then the mixins the
+repository can use.  Without, it describes those every repository has,
+expanded with the global `:mixins', and the mixins every repository
+can use, and then, for each registered repository, names the
+workflows it has and describes those its own files define, and its own
+mixin files.  Workflow and mixin files being ignored follow, with the
+reason."
   (when (and repo (not (rat-kingdom-repo-get space repo)))
     (error "No repository called %s is registered" repo))
   (let* ((every (rat-kingdom-config-workflows space))
@@ -1168,29 +1222,40 @@ Workflow files being ignored follow, with the reason."
                     (list (rat-kingdom-repo-get space repo))
                   (rat-kingdom-repo-list space)))
          (sections nil))
-    (cl-flet ((describe (entry)
-                (rat-kingdom-workflow-describe
-                 (car entry)
-                 (rat-kingdom-king--workflow-origin
-                  entry
-                  (and (eq (nth 1 entry) 'repo)
-                       (cl-find (plist-get (car entry) :name) every
-                                :key (lambda (other)
-                                       (plist-get (car other) :name))
-                                :test #'equal))))))
+    (cl-flet ((describe (entry view)
+                (rat-kingdom-king--describe-workflow
+                 space entry view
+                 (and (eq (nth 1 entry) 'repo)
+                      (cl-find (plist-get (car entry) :name) every
+                               :key (lambda (other)
+                                      (plist-get (car other) :name))
+                               :test #'equal)))))
       (unless repo
         (push (concat "Workflows of every repository:\n\n"
-                      (mapconcat #'describe every "\n\n"))
+                      (mapconcat (lambda (entry) (describe entry nil))
+                                 every "\n\n")
+                      "\n\nMixins of every repository:\n"
+                      (rat-kingdom-king--describe-mixins
+                       (rat-kingdom-config-mixins space)))
               sections))
       (dolist (record repos)
         (let* ((name (plist-get record :name))
                (entries (rat-kingdom-config-workflows space record))
+               (mixins (rat-kingdom-config-mixins space record))
                (own (cl-remove-if-not (lambda (entry)
                                         (eq (nth 1 entry) 'repo))
-                                      entries)))
+                                      entries))
+               (own-mixins (cl-remove-if-not (lambda (entry)
+                                               (eq (nth 1 entry) 'repo))
+                                             mixins))
+               (configured (rat-kingdom-config-get space :mixins
+                                                   :repo record)))
           (push (if repo
                     (concat (format "Workflows of %s:\n\n" name)
-                            (mapconcat #'describe entries "\n\n"))
+                            (mapconcat (lambda (entry) (describe entry record))
+                                       entries "\n\n")
+                            (format "\n\nMixins %s can use:\n" name)
+                            (rat-kingdom-king--describe-mixins mixins))
                   (concat
                    (format "Repository %s has: %s." name
                            (mapconcat
@@ -1200,13 +1265,24 @@ Workflow files being ignored follow, with the reason."
                                           "its own"
                                         (nth 1 entry))))
                             entries ", "))
+                   (if configured
+                       (format " Its :mixins is %s, applied to every workflow \
+there; see workflow_list with repo for the result."
+                               (mapconcat #'symbol-name configured " "))
+                     "")
                    (if own
-                       (concat "\n\n" (mapconcat #'describe own "\n\n"))
+                       (concat "\n\n"
+                               (mapconcat (lambda (entry) (describe entry record))
+                                          own "\n\n"))
+                     "")
+                   (if own-mixins
+                       (concat (format "\n\nMixins of %s's own:\n" name)
+                               (rat-kingdom-king--describe-mixins own-mixins))
                      "")))
                 sections))))
     (when-let* ((errors (rat-kingdom-king--workflow-errors repos)))
-      (push (concat "Workflow files ignored (tell the user; fixing the file \
-is enough):\n"
+      (push (concat "Workflow and mixin files ignored (tell the user; fixing \
+the file is enough):\n"
                     (mapconcat (lambda (error)
                                  (format "- %s: %s" (car error) (cadr error)))
                                errors "\n"))
@@ -1214,17 +1290,21 @@ is enough):\n"
     (string-join (nreverse sections) "\n\n")))
 
 (defun rat-kingdom-king--workflow-errors (repos)
-  "Return the workflow files being ignored that affect REPOS, records.
-They are the global workflow files and those of REPOS, as (SOURCE
-MESSAGE) from `rat-kingdom-config-errors'."
-  (let ((global (rat-kingdom-config-workflow-directory)))
+  "Return the workflow and mixin files being ignored that affect REPOS.
+REPOS are records.  They are the global workflow and mixin files and
+those of REPOS, as (SOURCE MESSAGE) from `rat-kingdom-config-errors'."
+  (let ((global (rat-kingdom-config-workflow-directory))
+        (mixins (rat-kingdom-config-mixin-directory)))
     (cl-remove-duplicates
      (append
-      (cl-remove-if-not (lambda (error) (string-prefix-p global (car error)))
+      (cl-remove-if-not (lambda (error)
+                          (or (string-prefix-p global (car error))
+                              (string-prefix-p mixins (car error))))
                         (rat-kingdom-config-errors))
       (cl-remove-if-not
        (lambda (error)
-         (string-match-p "/\\.rk/workflows/[^/]*\\'" (car error)))
+         (string-match-p "/\\.rk/\\(?:workflows\\|mixins\\)/[^/]*\\'"
+                         (car error)))
        (mapcan (lambda (repo)
                  (rat-kingdom-config-errors (plist-get repo :name)))
                repos)))
@@ -1233,9 +1313,12 @@ MESSAGE) from `rat-kingdom-config-errors'."
 (rat-kingdom-king--deftool "workflow_list"
     "List the workflows a story can follow, with their steps, and where \
 each comes from: built in, a global workflow file, or a repository's own \
-file in .rk/workflows, which counts for that repository only. Without \
-repo, the workflows of every repository and then what each registered \
-repository has; with repo, that repository's."
+file in .rk/workflows, which counts for that repository only. Each is shown \
+expanded with its mixins and aspects and the configuration's :mixins, with \
+a line saying what it was built from; the mixins that can be used follow, \
+each with where it comes from. Without repo, the workflows of every \
+repository and then what each registered repository has; with repo, that \
+repository's."
     '((:name "repo" :type string :optional t
        :description "A registered repository, to list only the workflows \
 its stories can follow."))
@@ -1274,7 +1357,11 @@ be created. Default the repository's name.")
 Emacs Lisp text read as config_set reads a value, e.g. (:branch \"rats/%s-%i\" \
 :integrate squash). :branch is the format of story branch names (%i story \
 id, %s title slug, %r repo, %e epic or none, %% a %); :integrate is merge, \
-rebase or squash. Leave out for the defaults."))
+rebase or squash. Leave out for the defaults.")
+      (:name "mixins" :type string :optional t
+       :description "Mixins applied to every workflow its stories follow, \
+as Emacs Lisp text: a list of names such as (no-review). See workflow_list \
+for the mixins there are."))
   (when-let* ((workflow (arg 'workflow))
               (where (list :path (expand-file-name (arg 'path))
                            :name (or (plist-get (cl-find
@@ -1297,7 +1384,9 @@ rebase or squash. Leave out for the defaults."))
                :target (arg 'target) :workflow (arg 'workflow)
                :task-prefix (arg 'task_prefix)
                :git (and (arg 'git) (rat-kingdom-config-read-value
-                                     (arg 'git))))))
+                                     (arg 'git)))
+               :mixins (and (arg 'mixins)
+                            (rat-kingdom-config-read-value (arg 'mixins))))))
     (string-join
      (cons (format "Registered %s at %s. Finished work is merged into %s.%s"
                    (plist-get repo :name) (plist-get repo :path)
