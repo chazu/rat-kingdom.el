@@ -873,6 +873,25 @@ Return what finish answered."
 
 ;;;; Runs
 
+(ert-deftest rat-kingdom-story-test-unsupported-kind-stops-the-story ()
+  (rat-kingdom-story-test-with-repo (space _path)
+    (let ((rat-kingdom-workflow--table (copy-alist rat-kingdom-workflow--table)))
+      (rat-kingdom-workflow-define
+       'gated
+       :places '(waiting ready checking done blocked)
+       :start 'waiting :final '(done)
+       :steps '((wait :from waiting :gate (:after 60) :to ready)
+                (implement :from ready :spawn rat :to checking)
+                (check :from checking :check t :pass done :fail ready)))
+      (rat-kingdom-story-start space "demo" "Add a file" nil "S-1" 'gated)
+      (rat-kingdom-reaction-run space)
+      (should (equal (rat-kingdom-story-test--place space "S-1") "blocked"))
+      (should (string-search "Step wait of kind :gate is not supported yet"
+                             (rat-kingdom-story-test--get space "S-1"
+                                                          :reason)))
+      (should-not (rat-kingdom-reaction-failures space))
+      (should-not rat-kingdom-story-test--started))))
+
 (ert-deftest rat-kingdom-story-test-failed-start-stops-the-story ()
   (rat-kingdom-story-test-with-repo (space path)
     ;; The branch the story would use already exists.

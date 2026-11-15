@@ -27,13 +27,24 @@
 ;; A step has a name, the place it is taken `:from', exactly one kind,
 ;; and the places its outcomes lead to:
 ;;
-;;   :spawn ROLE   start an agent; `:to' when it finishes, `:blocked'
-;;                 when it reports that it cannot
+;;   :spawn ROLE   start an agent, ROLE `rat' or `researcher'; `:to'
+;;                 when it finishes, `:blocked' when it reports that it
+;;                 cannot.  `:brief STRING' adds instructions for this
+;;                 step's worker; only a spawn step may have it.
 ;;   :check t      merge in a candidate and run the repository's check;
-;;                 `:pass' or `:fail'
+;;                 `:pass' or `:fail'.  `:check (NAME ...)' runs those
+;;                 commands in place of the configured check.
 ;;   :review WHO   wait for a verdict from WHO; `:pass' or `:fix'
 ;;   :merge t      move the target branch; `:to', or `:stale' if the
 ;;                 target moved since the check
+;;   :run (NAME ...)
+;;                 run commands in the story's worktree and commit what
+;;                 they change; `:pass' or `:fail'
+;;   :gate (:after SECONDS) or :gate (:signal NAME)
+;;                 wait, with no process, for a time or a signal; `:to'
+;;   :workflow NAME
+;;                 run a child story with the workflow NAME; `:to', or
+;;                 `:fail' if it stops short of a final place
 ;;
 ;; An outcome with no place leads to the workflow's `:failure' place.  A
 ;; token at a place no step is taken from stays there until it is moved
@@ -61,10 +72,16 @@
   '((:spawn :to :blocked)
     (:check :pass :fail)
     (:review :pass :fix)
-    (:merge :to :stale))
+    (:merge :to :stale)
+    (:run :pass :fail)
+    (:gate :to)
+    (:workflow :to :fail))
   "Each kind of step, followed by its outcomes.
 The first outcome must be given a place; the others default to the
 workflow's failure place.")
+
+(defconst rat-kingdom-workflow-roles '(rat researcher)
+  "The roles a `:spawn' step can start.")
 
 (defvar rat-kingdom-workflow--table nil
   "Alist from workflow name to its normalized property list.")
@@ -81,8 +98,9 @@ workflow's failure place.")
 
 (defun rat-kingdom-workflow--normalize (name spec)
   "Return the workflow NAME described by the property list SPEC, normalized.
-Places and step names become strings, each step gets `:name' and
-`:kind', and outcomes left out get the failure place."
+Places and step names become strings, each step gets `:name',
+`:kind', `:with' (the kind's value) and `:brief', and outcomes left out
+get the failure place."
   (let* ((failure (rat-kingdom-workflow--name
                    (or (plist-get spec :failure) "blocked")))
          (steps
@@ -96,7 +114,8 @@ Places and step names become strings, each step gets `:name' and
                                          (plist-get plist :from))
                                   :with (and kind (plist-get plist kind))
                                   :timeout (plist-get plist :timeout)
-                                  :attempts (plist-get plist :attempts))))
+                                  :attempts (plist-get plist :attempts)
+                                  :brief (plist-get plist :brief))))
                (dolist (outcome (cdr (assq kind rat-kingdom-workflow-kinds)))
                  (setq normal
                        (plist-put normal outcome
@@ -111,6 +130,50 @@ Places and step names become strings, each step gets `:name' and
           :final (mapcar #'rat-kingdom-workflow--name (plist-get spec :final))
           :failure failure
           :steps steps)))
+
+(defun rat-kingdom-workflow--name-symbol-p (value)
+  "Return non-nil if VALUE is a symbol that can be a name.
+That is any symbol but nil, t and keywords."
+  (and value (symbolp value) (not (eq value t)) (not (keywordp value))))
+
+(defun rat-kingdom-workflow--name-p (value)
+  "Return non-nil if VALUE is a name: such a symbol, or a non-blank string."
+  (or (rat-kingdom-workflow--name-symbol-p value)
+      (and (stringp value) (not (string-blank-p value)))))
+
+(defun rat-kingdom-workflow--command-names-p (value)
+  "Return non-nil if VALUE is a non-empty list of command names."
+  (and value (proper-list-p value)
+       (cl-every #'rat-kingdom-workflow--name-symbol-p value)))
+
+(defun rat-kingdom-workflow--value-problem (step)
+  "Return what is wrong with the value of the normalized STEP's kind, or nil."
+  (let ((name (plist-get step :name))
+        (value (plist-get step :with)))
+    (pcase (plist-get step :kind)
+      (:spawn
+       (unless (memq value rat-kingdom-workflow-roles)
+         (format "Step %s spawns %S, which is not a role; the roles are %s"
+                 name value
+                 (mapconcat #'symbol-name rat-kingdom-workflow-roles ", "))))
+      (:check
+       (unless (or (eq value t) (rat-kingdom-workflow--command-names-p value))
+         (format "Step %s checks %S; a check is t or a list of command \
+names such as (lint test)" name value)))
+      (:run
+       (unless (rat-kingdom-workflow--command-names-p value)
+         (format "Step %s runs %S; a run is a list of command names such \
+as (format)" name value)))
+      (:gate
+       (unless (pcase value
+                 (`(:after ,seconds) (and (numberp seconds) (> seconds 0)))
+                 (`(:signal ,signal) (rat-kingdom-workflow--name-p signal)))
+         (format "Step %s waits for %S; a gate is (:after SECONDS), SECONDS \
+a positive number, or (:signal NAME), NAME a symbol or string" name value)))
+      (:workflow
+       (unless (rat-kingdom-workflow--name-p value)
+         (format "Step %s runs the workflow %S; a workflow name is a symbol \
+or string" name value))))))
 
 (defun rat-kingdom-workflow-validate (spec)
   "Return what is wrong with the workflow described by SPEC, as strings.
@@ -181,6 +244,17 @@ nil if the workflow is sound."
                 (unless (member (plist-get step outcome) places)
                   (problem "Step %s leads to %s, which is not a place"
                            name (plist-get step outcome))))
+              (when-let* ((problem (rat-kingdom-workflow--value-problem step)))
+                (problem "%s" problem))
+              (when (plist-member (cdr (assq (intern name)
+                                             (plist-get spec :steps)))
+                                  :brief)
+                (cond
+                 ((not (eq kind :spawn))
+                  (problem "Step %s has a :brief, which only a spawn step \
+may have" name))
+                 ((not (stringp (plist-get step :brief)))
+                  (problem "The brief of step %s is not a string" name))))
               (when (and (plist-get step :timeout)
                          (not (and (numberp (plist-get step :timeout))
                                    (> (plist-get step :timeout) 0))))
@@ -257,6 +331,25 @@ here; `rat-kingdom-config-workflow' also knows workflow files."
   "Return non-nil if PLACE is a final place of WORKFLOW."
   (member place (plist-get workflow :final)))
 
+(defun rat-kingdom-workflow--describe-kind (step)
+  "Return text saying what the normalized STEP does, such as \"run (format)\".
+A brief is shown, shortened, after the kind."
+  (let ((kind (substring (symbol-name (plist-get step :kind)) 1))
+        (value (plist-get step :with))
+        (brief (plist-get step :brief)))
+    (concat
+     (pcase value
+       ('t kind)
+       (`(:after ,seconds) (format "%s after %ss" kind seconds))
+       (`(:signal ,signal) (format "%s signal %s" kind signal))
+       (_ (format "%s %s" kind value)))
+     (if (stringp brief)
+         (format " (brief: %s)"
+                 (truncate-string-to-width
+                  (string-trim (replace-regexp-in-string "[ \t\n]+" " " brief))
+                  40 nil nil "..."))
+       ""))))
+
 (defun rat-kingdom-workflow-describe (workflow &optional origin)
   "Return a few lines of text describing WORKFLOW.
 ORIGIN, if given, is text saying where it comes from, on its own line
@@ -267,12 +360,9 @@ after the first."
    (if origin (format "  (%s)\n" origin) "")
    (mapconcat
     (lambda (step)
-      (format "  %s: at %s, %s%s; %s"
+      (format "  %s: at %s, %s; %s"
               (plist-get step :name) (plist-get step :from)
-              (substring (symbol-name (plist-get step :kind)) 1)
-              (if (eq (plist-get step :with) t)
-                  ""
-                (format " %s" (plist-get step :with)))
+              (rat-kingdom-workflow--describe-kind step)
               (mapconcat (lambda (outcome)
                            (format "%s -> %s" (substring (symbol-name outcome) 1)
                                    (plist-get step outcome)))
