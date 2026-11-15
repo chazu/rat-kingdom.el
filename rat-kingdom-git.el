@@ -182,7 +182,7 @@ there was one."
 
 (cl-defun rat-kingdom-repo-add (space path
                                       &key name target check setup workflow
-                                      task-prefix git)
+                                      task-prefix git mixins)
   "Register the repository at PATH in SPACE and return its record.
 NAME defaults to the directory's name.  TARGET is the branch finished
 work is merged into, by default `rat-kingdom-git-default-target'; it
@@ -193,8 +193,9 @@ worktree before a worker starts in it and before the check, for example
 to install dependencies.  WORKFLOW names the workflow its stories follow
 unless they say otherwise.  GIT is the :git configuration of the
 registration layer, a property list with `:branch' and `:integrate'
-\(rat-kingdom-config.el).  Registering a name again replaces its
-record.
+\(rat-kingdom-config.el).  MIXINS is a list of mixin names, symbols,
+applied to every workflow its stories follow (the registration layer's
+`:mixins').  Registering a name again replaces its record.
 
 Every registered repository has a br workspace for its tasks.  If the
 checkout has none, one is created by `rat-kingdom-task-br-ensure',
@@ -221,6 +222,12 @@ returned has the warnings as `:track-warnings', which is not stored."
       (error "A check is a list of strings: %S" check))
     (unless (and (listp setup) (cl-every #'stringp setup))
       (error "A setup is a list of strings: %S" setup))
+    (unless (and (proper-list-p mixins)
+                 (cl-every (lambda (name)
+                             (and name (symbolp name) (not (eq name t))
+                                  (not (keywordp name))))
+                           mixins))
+      (error "Mixins are a list of names such as (no-review): %S" mixins))
     (when (and task-prefix (string-empty-p task-prefix))
       (error "A task prefix may not be empty"))
     (when-let* ((problems (and git (rat-kingdom-config-validate
@@ -242,7 +249,9 @@ returned has the warnings as `:track-warnings', which is not stored."
                                              :workflow (and workflow
                                                             (format "%s"
                                                                     workflow))
-                                             :task-prefix task-prefix)
+                                             :task-prefix task-prefix
+                                             :mixins (mapcar #'symbol-name
+                                                             mixins))
                                        (and git (list :git git)))
                              :actor "user")
       (append (rat-kingdom-repo-get space name)

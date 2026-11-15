@@ -200,8 +200,8 @@ from it: one begins the step of a token that has arrived at a place, and
 the others each join a waiting token with the tuple that ends its step.
 The step kinds are `:spawn`, `:check`, `:review` and `:merge`, each with
 named outcomes that lead to places; an outcome left out leads to the
-workflow's failure place. And there are no mixins or aspects yet. The two
-workflows that exist are `story` and `story-lite`.
+workflow's failure place. Mixins and aspects are built as specified
+below. The two workflows that exist are `story` and `story-lite`.
 
 ```elisp
 (rat-kingdom-workflow-define 'story
@@ -534,6 +534,18 @@ The mixins of the view follow the workflows, each with its origin. A
 story's workflow can differ from that view by an epic's or task's
 `:mixins`; `story_show` names the mixins its workflow was expanded with.
 `config_show` shows `:mixins` with its layer, as any key.
+
+**Built** (`rat-kingdom-workflow.el`, `rat-kingdom-config.el`): mixins
+and aspects as above. `rat-kingdom-workflow-expand` is the expansion, a
+pure function of the workflow as written, the configured mixins and a
+function that resolves a mixin's name; the expanded workflow keeps
+`:mixins` and `:aspects` as written and adds `:extra-mixins`, the
+configured ones. `rat-kingdom-config-build-workflow` resolves and
+expands a workflow for a repository, epic and task, signalling why it
+cannot be built; `rat-kingdom-config-workflow` returns nil instead, and
+`rat-kingdom-config-workflow-problem` gives the reason, which a story's
+token and the watchdog show. `rat-kingdom-config-workflows` still
+returns the workflows as written. `repo_add` takes `mixins`.
 
 **Research and docs.** Docs live in the space (open question 4, section
 16).
@@ -1854,7 +1866,8 @@ wait longer for review than for implementation.
    - step kinds: `:spawn` with `:brief`, `:check` with named commands,
      `:run`, `:gate` and `:workflow` with child stories;
    - mixins and aspects, expanded at lookup, the built-in `no-review` and
-     `tdd`, mixin files global and per repo, and the `:mixins` key;
+     `tdd`, mixin files global and per repo, and the `:mixins` key
+     (built);
    - the `research` workflow, the `researcher` role, `doc` tuples, docs in
      every worker's brief, `read_doc`, and the king's `doc_list`,
      `doc_show` and `doc_forget` (built, `rat-kingdom-doc.el`), and
