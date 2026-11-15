@@ -16,14 +16,17 @@
 ;;   :at      the place it is at
 ;;   :phase   enter    it has just arrived and its step is not yet begun
 ;;            wait     its step is in progress; `:step' names it and
-;;                     `:awaiting' says for what: worker, setup, check or
-;;                     review, or "a free worker" while it is queued
+;;                     `:awaiting' says for what: worker, setup, check,
+;;                     review, run or gate, or "a free worker" while it
+;;                     is queued
 ;;            parked   no step is taken from here; it waits to be moved
 ;;
 ;; The reactions here are the workflow engine.  One begins the step of
 ;; a token that has arrived.  The others each join a waiting token with
 ;; the tuple that ends its step: a worker's `result' or `blocked', a
-;; `checked', a `verdict', or a run that ended without reporting.
+;; `checked', a `verdict', a `ran', a `signal', or a run that ended
+;; without reporting.  A timed gate is opened by
+;; `rat-kingdom-story-open-gates', from a timer and from the watchdog.
 ;;
 ;; A step that cannot be begun sends the token to the workflow's failure
 ;; place with the reason, so an error leaves a story parked and visible
@@ -161,9 +164,13 @@ not add a function twice.")
   "Who is recorded as moving tokens.")
 
 (defvar rat-kingdom-story--checks (make-hash-table :test #'equal)
-  "Hash table from story id to the process running its check or setup.
-A story runs at most one at a time: its setup in a new worktree, or in
-a candidate its setup and then its check.")
+  "Hash table from story id to the process running its check, setup or run.
+A story runs at most one at a time: its setup in a new worktree, in
+a candidate its setup and then its check, or the commands of a `:run'
+step in its worktree.")
+
+(defvar rat-kingdom-story--gate-timers (make-hash-table :test #'equal)
+  "Hash table from story id to the timer that opens its timed gate.")
 
 ;;;; Tokens
 
@@ -245,6 +252,31 @@ argument list rather than names.  Return nil if there is none.  Signal
       (format "%s (%s)" name (combine-and-quote-strings argv))
     (combine-and-quote-strings argv)))
 
+(defun rat-kingdom-story-named-commands (space story names)
+  "Return the commands NAMES of the token STORY in SPACE, to run in order.
+NAMES is a list of symbols, as a step's `:check' or `:run' gives
+them.  Each is looked up in the merged `:commands' for the story's
+repository, epic and task.  Return a list of (NAME . ARGV), NAME a
+string, as `rat-kingdom-story-commands' does.  Signal an error naming
+the first name that `:commands' does not define, and the names it
+does."
+  (let ((commands (rat-kingdom-story-config space story :commands)))
+    (mapcar
+     (lambda (name)
+       (let ((key (rat-kingdom-config--command-key name)))
+         (unless (plist-member commands key)
+           (error "%s is not a command; %s" name
+                  (if commands
+                      (concat "the commands are "
+                              (mapconcat
+                               (lambda (key) (substring (symbol-name key) 1))
+                               (cl-loop for (key) on commands by #'cddr
+                                        collect key)
+                               ", "))
+                    "no commands are defined (:commands)")))
+         (cons (symbol-name name) (plist-get commands key))))
+     names)))
+
 (defun rat-kingdom-story-check-target (space repo target)
   "Signal an error unless TARGET may be the target of a story in REPO of SPACE.
 It must be an existing local branch, and not one checked out in any
@@ -314,11 +346,16 @@ the new token."
   "Put the taken token STORY at PLACE in SPACE, its step there not begun.
 CHANGES is merged into its payload.  The reason it carried is dropped
 unless CHANGES gives a new one."
-  (apply #'rat-kingdom-story--put space story
-         :at place :phase "enter" :step nil :awaiting nil
-         (if (plist-member changes :reason)
-             changes
-           (append (list :reason nil) changes))))
+  (let ((payload (plist-get story :payload)))
+    (apply #'rat-kingdom-story--put space story
+           :at place :phase "enter" :step nil :awaiting nil
+           (append
+            ;; What a gate waited for goes with it.
+            (and (plist-get payload :until) (list :until nil))
+            (and (plist-get payload :signal) (list :signal nil))
+            (if (plist-member changes :reason)
+                changes
+              (append (list :reason nil) changes))))))
 
 (defun rat-kingdom-story--wait (space story step awaiting &rest changes)
   "Put the taken token STORY back in SPACE, waiting in STEP for AWAITING.
@@ -568,12 +605,15 @@ Each is called with SPACE, the token STORY and RUN-ID."
     (nreverse sections)))
 
 (defun rat-kingdom-story--prompt (space story run-id worktree branch target
-                                        earlier)
+                                        earlier &optional step)
   "Return what the worker RUN-ID is told about the token STORY in SPACE.
 It works in WORKTREE on BRANCH, cut from TARGET.  EARLIER is non-nil
-if the story has been worked on before.  The sections from
+if the story has been worked on before.  STEP is the step that starts
+the worker; its `:brief', if it has one, follows the task's description
+under \"For this step (STEP):\".  The sections from
 `rat-kingdom-story-brief-functions' come last."
-  (let ((payload (plist-get story :payload)))
+  (let ((payload (plist-get story :payload))
+        (brief (plist-get step :brief)))
     (concat rat-kingdom-run-rat-instructions
             (format "\n\nYou are %s.\nWorktree: %s\nBranch: %s (cut from %s)\
 \n\nTask %s: %s\n"
@@ -581,6 +621,9 @@ if the story has been worked on before.  The sections from
                     (plist-get payload :title))
             (when-let* ((description (plist-get payload :description)))
               (concat "\n" description "\n"))
+            (when (and (stringp brief) (not (string-blank-p brief)))
+              (format "\nFor this step (%s):\n%s\n" (plist-get step :name)
+                      (string-trim brief)))
             (when earlier
               (format "\nThis task has been worked on before, and that work \
 is in your worktree. Before you change anything, look at \
@@ -707,7 +750,7 @@ the step's `:attempts', else the configuration's."
                :worktree worktree :branch branch :target target
                :prompt (rat-kingdom-story--prompt
                         space story run-id worktree branch target
-                        (or known (> attempt 1))))
+                        (or known (> attempt 1)) step))
               (rat-kingdom-story--wait space story step "worker"
                                        :run run-id :branch branch
                                        :worktree worktree :attempt attempt
@@ -803,7 +846,16 @@ as its output; the first signals the error."
              (rat-kingdom-story--run-all space id name (cdr commands)
                                          directory then)
            (error (funcall then nil (error-message-string err)
-                           (cadr commands)))))))))
+                           (cadr commands)))))))
+    ;; So that what is running can be shown.
+    (when-let* ((process (gethash id rat-kingdom-story--checks)))
+      (process-put process :command command))))
+
+(defun rat-kingdom-story-running (id)
+  "Return the command the story ID is running now, as (NAME . ARGV), or nil.
+That is a command of its setup, its check or a `:run' step."
+  (when-let* ((process (gethash id rat-kingdom-story--checks)))
+    (and (process-live-p process) (process-get process :command))))
 
 (defun rat-kingdom-story--command-facts (key command commands)
   "Return what is recorded of the COMMAND that ended a setup or check.
@@ -1034,15 +1086,21 @@ It is \"ID: TITLE\", then, if BODY is not blank, a blank line and BODY."
 (defun rat-kingdom-story--check (space story _workflow step)
   "Begin STEP for the taken token STORY in SPACE.
 Put its commit onto its target in a candidate worktree, as the
-configuration's :git :integrate says, and run the configured check
-there, after the setup if there is one, by
-`rat-kingdom-story-check-candidate'.  The commands are looked up with
+configuration's :git :integrate says, and run the check there, after
+the setup if there is one, by `rat-kingdom-story-check-candidate'.
+The check is the configured one for a step `:check t', and for
+`:check (NAME ...)' those commands, by
+`rat-kingdom-story-named-commands'.  The commands are looked up with
 `rat-kingdom-story-commands', and the mode with
 `rat-kingdom-story-config', for the story's repository, epic and task,
 when the check begins.  The outcome is recorded in SPACE as a
 `checked' tuple."
   (let* ((id (plist-get story :identity))
          (payload (plist-get story :payload))
+         (names (plist-get step :with))
+         (check (if (consp names)
+                    (rat-kingdom-story-named-commands space story names)
+                  'configured))
          (repo (rat-kingdom-story--repo space story))
          (path (plist-get repo :path))
          (commit (or (plist-get payload :commit)
@@ -1053,9 +1111,11 @@ when the check begins.  The outcome is recorded in SPACE as a
          (base (rat-kingdom-story-check-candidate
                 space story path (rat-kingdom-story-target space story) commit
                 candidate (format "Merge %s: %s" id (plist-get payload :title))
-                (rat-kingdom-story-commands space :check (plist-get repo :name)
-                                            (plist-get payload :epic)
-                                            (plist-get payload :task))
+                (if (eq check 'configured)
+                    (rat-kingdom-story-commands space :check (plist-get repo :name)
+                                                (plist-get payload :epic)
+                                                (plist-get payload :task))
+                  check)
                 (rat-kingdom-story-commands space :setup (plist-get repo :name)
                                             (plist-get payload :epic)
                                             (plist-get payload :task))
@@ -1144,6 +1204,190 @@ with \"fix\".  ACTOR is who gave the verdict."
                            :payload (list :value value :notes notes)
                            :actor (or actor "user"))
     value))
+
+;;;; Running commands in the worktree
+
+(defun rat-kingdom-story--record-ran (space story value &rest more)
+  "Record in SPACE that the `:run' step of the token STORY came out as VALUE.
+VALUE is \"pass\" or \"fail\".  MORE is a property list for the payload."
+  (rat-kingdom-space-put space 'ran :scope (plist-get story :scope)
+                         :identity (plist-get story :identity)
+                         :owner (plist-get story :owner)
+                         :payload (append (list :value value) more)
+                         :actor "engine"))
+
+(defun rat-kingdom-story--commit-run (worktree names)
+  "Commit what the commands NAMES changed in WORKTREE, if anything.
+Paths under `rat-kingdom-run-ignored-paths' are left out.  Return nil
+if it went well, or Git's message if the commit failed."
+  (when (rat-kingdom-run--dirty-paths worktree)
+    (condition-case err
+        (progn
+          (apply #'rat-kingdom-git worktree "add" "-A" "--" "."
+                 (mapcar (lambda (prefix) (concat ":(exclude)" prefix))
+                         rat-kingdom-run-ignored-paths))
+          (rat-kingdom-git worktree "commit" "-q" "--no-verify" "-m"
+                           (concat "rat-kingdom: run " (string-join names " ")))
+          nil)
+      (error (error-message-string err)))))
+
+(defun rat-kingdom-story--start-run (space story commands worktree)
+  "Run COMMANDS in WORKTREE, the worktree of the token STORY in SPACE.
+COMMANDS is a list of (NAME . ARGV), run in order until one fails.  If
+all succeed, whatever they changed is committed on the story's branch.
+Return at once; the outcome is recorded as a `ran' tuple when they are
+over."
+  (let ((names (mapcar #'car commands)))
+    (rat-kingdom-space-retract
+     space (list 'ran :scope (plist-get story :scope)
+                 :identity (plist-get story :identity)))
+    (rat-kingdom-story--run-all
+     space (plist-get story :identity) "rat-kingdom-run" commands worktree
+     (lambda (exit output command)
+       (let* ((facts (list :names names :command (car command)
+                           :argv (cdr command) :exit exit :output output))
+              (failure (if (eql exit 0)
+                           (rat-kingdom-story--commit-run worktree names)
+                         'failed))
+              (head (ignore-errors (rat-kingdom-git-rev worktree "HEAD"))))
+         (cond
+          ((null failure)
+           (apply #'rat-kingdom-story--record-ran space story "pass"
+                  :commit head facts))
+          ((stringp failure)
+           (apply #'rat-kingdom-story--record-ran space story "fail"
+                  :reason "commit failed" :commit head
+                  (plist-put facts :output failure)))
+          (t
+           (apply #'rat-kingdom-story--record-ran space story "fail"
+                  :reason "run failed" :commit head facts))))))))
+
+(defun rat-kingdom-story--run-step (space story _workflow step &optional again)
+  "Begin STEP, a `:run' step, for the taken token STORY in SPACE.
+Its commands, resolved by `rat-kingdom-story-named-commands', run in
+the story's own worktree, which must be clean and at the story's
+commit, by `rat-kingdom-story--start-run'.  The story waits for
+\"run\".  AGAIN non-nil runs them again after Emacs stopped while they
+ran, whatever the worktree is like."
+  (let* ((id (plist-get story :identity))
+         (payload (plist-get story :payload))
+         (commands (rat-kingdom-story-named-commands
+                    space story (plist-get step :with)))
+         (worktree (plist-get payload :worktree))
+         (commit (plist-get payload :commit)))
+    (unless (and worktree (file-directory-p worktree))
+      (error "The story has no worktree to run %s in"
+             (string-join (mapcar #'car commands) " ")))
+    (unless again
+      (when-let* ((dirty (rat-kingdom-run--dirty-paths worktree)))
+        (error "The worktree %s has uncommitted or untracked files: %s"
+               worktree (string-join dirty ", ")))
+      (let ((head (rat-kingdom-git-rev worktree "HEAD")))
+        (when (and commit (not (equal head commit)))
+          (error "The worktree %s is at %s, not at %s, the commit of the \
+story" worktree head commit))))
+    (rat-kingdom-story--start-run space story commands worktree)
+    (condition-case err
+        (rat-kingdom-story--wait space story step "run")
+      (error
+       (rat-kingdom-story--abandon-check id)
+       (signal (car err) (cdr err))))))
+
+(defun rat-kingdom-story--run-reason (ran)
+  "Return what a worker is told when the `:run' recorded as RAN failed."
+  (if (equal (plist-get ran :reason) "commit failed")
+      (format "run failed: the commands %s succeeded, but committing what \
+they changed failed:\n%s"
+              (string-join (plist-get ran :names) " ")
+              (or (plist-get ran :output) ""))
+    (format "run failed: the command %s exited with %s. The end of its \
+output:\n%s"
+            (rat-kingdom-story-command-text (plist-get ran :argv)
+                                            (plist-get ran :command))
+            (plist-get ran :exit) (or (plist-get ran :output) ""))))
+
+;;;; Gates
+
+(defun rat-kingdom-story--gate (space story _workflow step)
+  "Begin STEP, a `:gate' step, for the taken token STORY in SPACE.
+The story waits for \"gate\", with no process.  A gate (:after
+SECONDS) records on the token `:until', the time it opens, and sets a
+timer that calls `rat-kingdom-story-open-gates' then.  A gate (:signal
+NAME) records NAME, as a string, as `:signal'; the reaction
+`rat-kingdom-story-signalled' opens it."
+  (pcase (plist-get step :with)
+    (`(:after ,seconds)
+     (let ((until (+ (funcall rat-kingdom-space-now-function) seconds)))
+       (rat-kingdom-story--wait space story step "gate" :until until)
+       (rat-kingdom-story--gate-timer space (plist-get story :identity)
+                                      seconds)))
+    (`(:signal ,name)
+     (rat-kingdom-story--wait space story step "gate"
+                              :signal (rat-kingdom-workflow--name name)))
+    (value (error "A gate waits for (:after SECONDS) or (:signal NAME), \
+not %S" value))))
+
+(defun rat-kingdom-story--cancel-gate-timer (id)
+  "Cancel the timer that opens the timed gate of the story ID, if any."
+  (when-let* ((timer (gethash id rat-kingdom-story--gate-timers)))
+    (remhash id rat-kingdom-story--gate-timers)
+    (cancel-timer timer)))
+
+(defun rat-kingdom-story--gate-timer (space id seconds)
+  "Call `rat-kingdom-story-open-gates' on SPACE in SECONDS, for the story ID.
+A timer the story had is replaced."
+  (rat-kingdom-story--cancel-gate-timer id)
+  (puthash id
+           (run-at-time (max 0 seconds) nil
+                        (lambda ()
+                          (remhash id rat-kingdom-story--gate-timers)
+                          (rat-kingdom-story-open-gates space)))
+           rat-kingdom-story--gate-timers))
+
+(defun rat-kingdom-story-open-gates (space)
+  "Open every timed gate in SPACE whose time has come.
+Each story waiting for \"gate\" whose `:until' has passed leaves its
+step by `:to', in its own transaction.  Return the ids of the stories
+moved on.  A space that is closed is left alone."
+  (let (opened)
+    (when (rat-kingdom-space-db space)
+      (let ((now (funcall rat-kingdom-space-now-function)))
+        (dolist (story (rat-kingdom-space-scan space '(story :awaiting gate)))
+          (let ((until (plist-get (plist-get story :payload) :until)))
+            (when (and (numberp until) (<= until now))
+              (with-demoted-errors "rat-kingdom: opening a gate: %S"
+                (rat-kingdom-space-with-transaction space
+                  (when (rat-kingdom-space-in
+                         space (list 'story :id (plist-get story :id))
+                         :actor "engine")
+                    (rat-kingdom-story--cancel-gate-timer
+                     (plist-get story :identity))
+                    (rat-kingdom-story--leave space story :to)
+                    (push (plist-get story :identity) opened)))))))))
+    (nreverse opened)))
+
+(defun rat-kingdom-story-signal (space id name &optional actor)
+  "Send the signal NAME to the story ID in SPACE.
+It is a linear `signal' tuple scoped to the story's repository, named
+and owned by the story, with `:name' NAME, written by ACTOR.  A gate
+\(:signal NAME) of the story takes it and opens, now if the story waits
+there, or else when it reaches such a gate; the signal is kept until
+then or until the story ends.  Signal an error for a story that is not
+in progress or a blank NAME.  Return non-nil if the story waits at a
+gate for NAME now."
+  (let* ((story (or (rat-kingdom-story-get space id)
+                    (error "There is no story in progress called %s" id)))
+         (name (and name (string-trim (rat-kingdom-workflow--name name)))))
+    (when (or (null name) (string-empty-p name))
+      (error "A signal needs a name"))
+    (let ((waiting (rat-kingdom-space-rd
+                    space (list 'story :identity id :awaiting "gate"
+                                :signal name))))
+      (rat-kingdom-space-out space 'signal :scope (plist-get story :scope)
+                             :identity id :owner (plist-get story :owner)
+                             :payload (list :name name)
+                             :actor (or actor "user"))
+      (and waiting t))))
 
 ;;;; Merging
 
@@ -1248,6 +1492,8 @@ from, the token is parked."
                      (:check #'rat-kingdom-story--check)
                      (:review #'rat-kingdom-story--review)
                      (:merge #'rat-kingdom-story--merge)
+                     (:run #'rat-kingdom-story--run-step)
+                     (:gate #'rat-kingdom-story--gate)
                      (kind (error "Step %s of kind %s is not supported yet"
                                   (plist-get step :name) kind)))
                    space story workflow step)
@@ -1370,6 +1616,27 @@ was started: %s"
                           (rat-kingdom-story-target rat-kingdom-reaction-space
                                                     story)))))))
 
+(rat-kingdom-defreaction rat-kingdom-story-ran
+  "Move on a story whose `:run' step's commands have come out."
+  :take (story :scope $repo :identity $story :awaiting run)
+  :read (ran :scope $repo :identity $story :value $value)
+  (let* ((story (car rat-kingdom-reaction-tuples))
+         (ran (plist-get (cadr rat-kingdom-reaction-tuples) :payload)))
+    (if (equal $value "pass")
+        (rat-kingdom-story--leave rat-kingdom-reaction-space story :pass
+                                  :commit (or (plist-get ran :commit)
+                                              (plist-get (plist-get story :payload)
+                                                         :commit)))
+      (rat-kingdom-story--leave rat-kingdom-reaction-space story :fail
+                                :reason (rat-kingdom-story--run-reason ran)))))
+
+(rat-kingdom-defreaction rat-kingdom-story-signalled
+  "Open the gate of a story that waits for a signal it has been sent."
+  :take ((story :scope $repo :identity $story :awaiting gate :signal $name)
+         (signal :scope $repo :identity $story :name $name))
+  (rat-kingdom-story--leave rat-kingdom-reaction-space
+                            (car rat-kingdom-reaction-tuples) :to))
+
 (rat-kingdom-defreaction rat-kingdom-story-judged
   "Move on a story that has been given a verdict."
   :take ((story :scope $repo :identity $story :awaiting review)
@@ -1396,8 +1663,10 @@ was started: %s"
 ;;;; Moving by hand
 
 (defun rat-kingdom-story--abandon (space story)
-  "Stop whatever is in progress for the token STORY in SPACE."
+  "Stop whatever is in progress for the token STORY in SPACE.
+That is its check, setup or run, its worker, and the timer of its gate."
   (rat-kingdom-story--abandon-check (plist-get story :identity))
+  (rat-kingdom-story--cancel-gate-timer (plist-get story :identity))
   (when-let* ((run (plist-get (plist-get story :payload) :run)))
     (rat-kingdom-run-stop space run)))
 
@@ -1478,8 +1747,8 @@ AWAITING is what the story waits for.  A setup in a worker's worktree
 may take as long as a check.  Otherwise a step's own `:timeout' wins;
 then the configuration's `:timeouts' for the story's repository, epic
 and task: `:worker' for a step that spawns a worker, `:check' for a
-check.  A step of another kind has the limit
-`rat-kingdom-story-timeouts' gives it, if any."
+check or a run.  A gate has only its own `:timeout'.  A step of another
+kind has the limit `rat-kingdom-story-timeouts' gives it, if any."
   (let ((timeouts (and (or (equal awaiting "setup") step)
                        (rat-kingdom-story-config space story :timeouts))))
     (if (equal awaiting "setup")
@@ -1488,16 +1757,21 @@ check.  A step of another kind has the limit
            (or (plist-get step :timeout)
                (pcase (plist-get step :kind)
                  (:spawn (plist-get timeouts :worker))
-                 (:check (plist-get timeouts :check))
+                 ((or :check :run) (plist-get timeouts :check))
+                 (:gate nil)
                  (kind (alist-get kind rat-kingdom-story-timeouts))))))))
 
 (defun rat-kingdom-story-watch (space)
   "Report as stuck each story in SPACE that will not move by itself.
-That is a story whose step or setup has run past its time, whose check
-or setup is not running, whose worker is gone, whose workflow is no
+That is a story whose step or setup has run past its time, whose check,
+setup or run is not running, whose worker is gone, whose workflow is no
 longer defined, or which no reaction has picked up.
 A story queued for a free worker is not stuck; the queue is served
-first, in case a worker is free.  Return how many were newly reported."
+first, in case a worker is free.  Nor is a story at a gate, which has
+no process, unless its step has a `:timeout' and has run past it.
+Timed gates whose time has come are opened first, by
+`rat-kingdom-story-open-gates'.  Return how many were newly reported."
+  (rat-kingdom-story-open-gates space)
   (rat-kingdom-story-dequeue space)
   (let ((now (funcall rat-kingdom-space-now-function))
         (count 0))
@@ -1525,12 +1799,13 @@ has begun. Reactions may be off or failing." (plist-get payload :at) waited)))
                  (cond
                   ((equal awaiting rat-kingdom-story-free-worker)
                    nil)
-                  ((and (member awaiting '("check" "setup"))
+                  ((and (member awaiting '("check" "setup" "run"))
                         (not (gethash id rat-kingdom-story--checks))
                         (not (rat-kingdom-space-rd
-                              space (list (if (equal awaiting "check")
-                                              'checked
-                                            'setup)
+                              space (list (pcase awaiting
+                                            ("check" 'checked)
+                                            ("run" 'ran)
+                                            (_ 'setup))
                                           :identity id)))
                         (> waited 5))
                    (format "Its %s is not running." awaiting))
@@ -1555,9 +1830,12 @@ interrupted; the story it worked for is then given a new worker in the
 same worktree.  A check that was running is run again, and so is a
 setup that was running in a new worktree, still holding its story's
 worker place.  Stories queued for a free worker stay queued, and are
-given one if one is free.  Return a property list: `:runs', the ids of
-the interrupted runs, `:checks', the ids of the stories checked again,
-and `:setups', the ids of the stories whose setup is run again."
+given one if one is free.  The commands of a `:run' step that was
+running are run again, in the worktree as it is; such a story counts
+among `:checks'.  Timed gates whose time has passed are opened.
+Return a property list: `:runs', the ids of the interrupted runs,
+`:checks', the ids of the stories checked or run again, and `:setups',
+the ids of the stories whose setup is run again."
   ;; Before runs are marked interrupted, so that their stories, whose
   ;; workers are replaced, keep their places ahead of the queue.
   (rat-kingdom-story-dequeue space)
@@ -1586,6 +1864,34 @@ and `:setups', the ids of the stories whose setup is run again."
                                        (plist-get (plist-get story :payload)
                                                   :at))
               (push id checks))))))
+    (dolist (story (rat-kingdom-space-scan space '(story :awaiting run)))
+      (let ((id (plist-get story :identity)))
+        (unless (or (gethash id rat-kingdom-story--checks)
+                    (rat-kingdom-space-rd space (list 'ran :identity id)))
+          (rat-kingdom-space-with-transaction space
+            (when (rat-kingdom-space-in
+                   space (list 'story :id (plist-get story :id))
+                   :actor "engine")
+              (if-let* ((step (rat-kingdom-story--step space story)))
+                  (condition-case err
+                      (rat-kingdom-story--run-step space story nil step t)
+                    (error
+                     (rat-kingdom-story--fail
+                      space story
+                      (format "Step %s could not be begun again: %s"
+                              (plist-get step :name)
+                              (error-message-string err)))))
+                (rat-kingdom-story--leave space story :pass))
+              (push id checks))))))
+    (rat-kingdom-story-open-gates space)
+    ;; A timed gate still shut gets its timer again.
+    (dolist (story (rat-kingdom-space-scan space '(story :awaiting gate)))
+      (when-let* ((until (plist-get (plist-get story :payload) :until))
+                  ((numberp until))
+                  (id (plist-get story :identity))
+                  ((not (gethash id rat-kingdom-story--gate-timers))))
+        (rat-kingdom-story--gate-timer
+         space id (- until (funcall rat-kingdom-space-now-function)))))
     (list :runs runs :checks (nreverse checks) :setups (nreverse setups))))
 
 (provide 'rat-kingdom-story)

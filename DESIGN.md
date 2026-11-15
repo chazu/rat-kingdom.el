@@ -222,8 +222,11 @@ parked. A target branch that moved after the check leads back to
 Workers are capped; the rest queue (section 7.2).
 
 **Spec: workflow composition**, step 8 of the build order (section 15).
-The rest of this section says what the engine is to do. None of it is
-built yet.
+The rest of this section says what the engine is to do. Built so far:
+the step kinds `:run` and `:gate`, `:check (NAME ...)`, `:brief` on a
+spawn step, and the king's `story_signal`; the shape of every kind's
+value is validated. The rest is not built yet: `:workflow` steps fail to
+begin, saying the kind is not supported yet.
 
 The starting workflows are `story`, `story-lite` (no review) and
 `research` (writes docs, no code; below). **Epics are not a workflow.**
@@ -617,7 +620,8 @@ story's workflow can differ from that view by an epic's or task's
 
 All of this is built.
 
-**Spec** (7.1): a story waiting in a `:run` step has a process, as a
+**Spec** (7.1), built except for child stories: a story waiting in a
+`:run` step has a process, as a
 check does, and the watchdog reports it stuck if that is not running or
 has run past the check's limit. A story waiting at a gate, or a parent
 waiting for its child, has no process and holds no worker; it is stuck
@@ -1196,7 +1200,7 @@ go, and it lets a role be denied built-in tools as well.
 
 | Role | Lifetime | Tools |
 |---|---|---|
-| king | long-lived, global, no worktree | built: `status` (with the tracker tasks available, each with its epic and agent), `repo_add`, `repo_sync`, `workflow_list`, `story_start` (optionally from a `task`, with an `agent`; a task's `rk-agent:` and `rk-workflow:` labels are the defaults), `story_show`, `story_diff`, `story_move`, `story_cancel`, `verdict`, `publish`, `query`, `fact_forget`, `task_create`, `epic_create`, `epic_propose` (the epic plan surface, 14.1), `epic_start` (optionally with a `feature_branch`, and a `foreman`), `epic_pause`, `epic_resume`, `epic_cancel`, `epic_retry`, `epic_show`, `epic_diff`, `epic_verdict` (section 10), `tell`, `foreman_start`, `foreman_stop`, `config_show` and `config_set` (7.3); `story_start` also takes a rarely needed `target`; spec (step 8): `story_signal`, `doc_list`, `doc_show`, `doc_forget`, and `mixins` and `git` on `repo_add` |
+| king | long-lived, global, no worktree | built: `status` (with the tracker tasks available, each with its epic and agent), `repo_add`, `repo_sync`, `workflow_list`, `story_start` (optionally from a `task`, with an `agent`; a task's `rk-agent:` and `rk-workflow:` labels are the defaults), `story_show`, `story_diff`, `story_move`, `story_cancel`, `verdict`, `publish`, `query`, `fact_forget`, `task_create`, `epic_create`, `epic_propose` (the epic plan surface, 14.1), `epic_start` (optionally with a `feature_branch`, and a `foreman`), `epic_pause`, `epic_resume`, `epic_cancel`, `epic_retry`, `epic_show`, `epic_diff`, `epic_verdict` (section 10), `tell`, `foreman_start`, `foreman_stop`, `config_show` and `config_set` (7.3), `story_signal` (7.1); `story_start` also takes a rarely needed `target`; spec (step 8): `doc_list`, `doc_show`, `doc_forget`, and `mixins` and `git` on `repo_add` |
 | rat (worker) | one task | built: `finish`, `block`, `note_fact`, `inbox`; spec (step 8): `read_doc` |
 | researcher | one task | spec (step 8): `write_doc`, `read_doc`, `note_fact`, `inbox`, `block`, `finish` |
 | foreman | one epic, optional | built: `status` (its epic: the `epic_show` view and its stories' lines), `story_show`, `story_diff`, `verdict`, `tell`, `query`, `task_create` (its epic is the parent), `epic_retry`, `story_start` (for a task of its epic), `report` (to the king); every one but `query` limited to its epic |
@@ -1835,8 +1839,9 @@ wait longer for review than for implementation.
    `:track` kept in `info/exclude`, workflow files global and per repo,
    and the king's `config_show` and validated `config_set`. Mixins and
    aspects are step 8.
-8. **Workflow composition** (this epic; spec in 7.1, 7.3, 8.3, 9 and 11,
-   none of it built yet):
+8. **Workflow composition** (this epic; spec in 7.1, 7.3, 8.3, 9 and 11;
+   built so far: `:brief`, named checks, `:run`, `:gate`, `story_signal`
+   and the git options):
    - step kinds: `:spawn` with `:brief`, `:check` with named commands,
      `:run`, `:gate` and `:workflow` with child stories;
    - mixins and aspects, expanded at lookup, the built-in `no-review` and
