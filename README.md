@@ -12,8 +12,8 @@ come from a br (Rust Beads) workspace in each repository, and the king can
 plan an epic there as tasks with dependencies and, once you agree, run it:
 the engine starts each task's story as the task becomes ready. With
 a2ui installed you review, edit and approve the king's epic plan in a
-surface in Emacs. There is
-no research workflow yet, nor a feature branch per epic. The
+surface in Emacs. Workflows can be composed from mixins and aspects,
+and a research workflow writes docs that later workers are told of. The
 path through real agents has been run once for a worker and not yet for
 the king.
 
@@ -477,23 +477,65 @@ A workflow step may also run named commands from `:commands` in the
 story's worktree and commit what they change (`:run (format)`), check with
 named commands in place of the configured check (`:check (lint test)`),
 wait for a time (`:gate (:after 3600)`) or for a signal the king sends
-with `story_signal` (`:gate (:signal deploy-ok)`), and give its worker
-extra instructions (`:spawn rat :brief "..."`).
+with `story_signal` (`:gate (:signal deploy-ok)`), give its worker extra
+instructions (`:spawn rat :brief "..."`), or run another workflow as a
+child story in the same worktree and wait for it to end (`:workflow
+lint`).
 
-Not built yet, and specified in DESIGN.md (section 7.1, step 8 of the
-build order): steps that run a child workflow (`:workflow`); mixins such as
-`no-review` and `tdd` and aspects such as `(:after implement :run
-(format))`, with a `:mixins` configuration key; a `research` workflow whose
-researcher writes docs that every later worker is told of.
+Mixins and aspects change a workflow without copying it. The mixin
+`no-review` removes the review step, and `tdd` starts a worker that
+writes failing tests before the first `implement`. An aspect adds a
+step before, after or around steps the workflow has. A workflow file
+names its own:
 
-The `:git` configuration key is built. `:branch` is the format of a new
-story's branch name, `"rats/%i"` by default, with `%i` the story id, `%s`
-a slug of its title, `%r` the repository, `%e` the epic or `none` and
-`%%` a `%`; a name already taken gets `-2`, `-3` and so on. `:integrate`
-is how a story's work goes into its target, and how an epic's feature
-branch lands: `merge` (the default, a `--no-ff` merge), `rebase` (the
-story's commits replayed onto the target) or `squash` (one commit, `ID:
-TITLE` and the worker's summary). For example, in `.rk/config.eld`:
+```elisp
+(:name careful
+ :doc "As story, test first, with the code formatted before the check."
+ :places (ready checking review integrating done blocked)
+ :start ready
+ :final (done)
+ :steps ((implement :from ready :spawn rat :to checking)
+         (check :from checking :check (lint test) :pass review :fail ready)
+         (review :from review :review king :pass integrating :fix ready)
+         (integrate :from integrating :merge t :to done :stale checking))
+ :mixins (tdd)
+ :aspects ((:after implement :run (format))))
+```
+
+Mixins can be files too, `mixins/*.eld` in `rat-kingdom-directory` and
+`.rk/mixins/*.eld` in a checkout, found as workflow files are. The
+`:mixins` configuration key applies mixins to whatever workflow a
+story runs, for a repository, an epic or a task: `(:mixins (no-review))`
+in `.rk/config.eld`, say, or `repo_add` with `mixins`. `workflow_list`
+shows each workflow expanded, with what it was built from, and
+`story_show` names the mixins a story's workflow was expanded with.
+
+The `research` workflow writes docs, not code. Its worker, a
+researcher, writes them with `write_doc`; the king reviews them, a pass
+approves them, and nothing is merged. Every later worker in the
+repository is told the approved docs' titles and reads one with
+`read_doc`. Ask the king to research something, or have it call
+`story_start` with the workflow:
+
+```json
+{"repo": "app", "workflow": "research",
+ "title": "How app expires sessions",
+ "description": "Find where sessions are made, stored and expired, and write it up."}
+```
+
+The king reads docs with `doc_list` and `doc_show`, and removes a wrong
+one with `doc_forget`.
+
+The `:git` configuration key says how stories' branches are named and
+how their work lands. `:branch` is the format of a new story's branch
+name, `"rats/%i"` by default, with `%i` the story id, `%s` a slug of its
+title, `%r` the repository, `%e` the epic or `none` and `%%` a `%`; a
+name already taken gets `-2`, `-3` and so on. `:integrate` is how a
+story's work goes into its target, and how an epic's feature branch
+lands: `merge` (the default, a `--no-ff` merge), `rebase` (the story's
+commits replayed onto the target) or `squash` (one commit, `ID: TITLE`
+and the worker's summary). `repo_add` takes `git` too. For example, in
+`.rk/config.eld`:
 
 ```elisp
 (:git (:branch "rats/%s-%i" :integrate squash))

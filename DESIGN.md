@@ -198,10 +198,10 @@ form that differs from the sketch below in three ways. The engine is a
 fixed set of reactions that interpret the workflow, not reactions compiled
 from it: one begins the step of a token that has arrived at a place, and
 the others each join a waiting token with the tuple that ends its step.
-The step kinds are `:spawn`, `:check`, `:review` and `:merge`, each with
-named outcomes that lead to places; an outcome left out leads to the
-workflow's failure place. Mixins and aspects are built as specified
-below. The two workflows that exist are `story` and `story-lite`.
+The step kinds are `:spawn`, `:check`, `:review`, `:merge`, `:run`,
+`:gate` and `:workflow`, each with named outcomes that lead to places;
+an outcome left out leads to the workflow's failure place. The built-in
+workflows are `story`, `story-lite` and `research`.
 
 ```elisp
 (rat-kingdom-workflow-define 'story
@@ -221,11 +221,19 @@ parked. A target branch that moved after the check leads back to
 `checking`; a commit that was already reviewed is not reviewed again.
 Workers are capped; the rest queue (section 7.2).
 
-**Spec: workflow composition**, step 8 of the build order (section 15).
-The rest of this section says what the engine is to do. Built: the step
-kinds `:run`, `:gate` and `:workflow` (child stories, below),
-`:check (NAME ...)`, `:brief` on a spawn step, and the king's
-`story_signal`; the shape of every kind's value is validated.
+**Built: workflow composition**, step 8 of the build order (section 15),
+all of it as the rest of this section describes. The step kinds `:run`,
+`:gate` and `:workflow` (child stories, below), `:check (NAME ...)` and
+`:brief` on a spawn step, with the shape of every kind's value validated,
+are in `rat-kingdom-workflow.el` and `rat-kingdom-story.el`. Mixins and
+aspects, with `:entry`, the built-in mixins `no-review` and `tdd`, mixin
+files, the `:mixins` key (7.3) and the expansions `workflow_list` shows
+are in `rat-kingdom-workflow.el` and `rat-kingdom-config.el`. The
+`research` workflow, the `researcher` role, docs, docs in every worker's
+brief (8.3) and the doc tools (9) are in `rat-kingdom-doc.el`. The
+king's `story_signal`, and `repo_add`'s `mixins` and `git` arguments,
+are in `rat-kingdom-king.el`. The paragraphs marked **Built** below give
+the details of each part.
 
 The starting workflows are `story`, `story-lite` (no review) and
 `research` (writes docs, no code; below). **Epics are not a workflow.**
@@ -250,10 +258,10 @@ A workflow file that uses most of what follows:
            (:after implement :run (format))))
 ```
 
-**Step kinds.** A step still has exactly one kind, a name, `:from`, and
+**Step kinds.** A step has exactly one kind, a name, `:from`, and
 optionally `:timeout` and `:attempts`. The first outcome of each kind must
-be given a place; the others lead to the failure place unless given one,
-as now. `rat-kingdom-workflow-kinds` gains the last three rows.
+be given a place; the others lead to the failure place unless given one.
+`rat-kingdom-workflow-kinds` has a row for each kind.
 
 | Kind | Value | Outcomes | What it does |
 |---|---|---|---|
@@ -660,8 +668,7 @@ is never reused.
 
 All of this is built.
 
-**Spec** (7.1), built: a story waiting in a
-`:run` step has a process, as a
+**Built** (7.1): a story waiting in a `:run` step has a process, as a
 check does, and the watchdog reports it stuck if that is not running or
 has run past the check's limit. A story waiting at a gate, or a parent
 waiting for its child, has no process and holds no worker; it is stuck
@@ -676,7 +683,7 @@ setup and check, which agent runs each role, the time limits and
 attempts, the worker limit, and whether rat-kingdom's directories are
 kept in Git. This section is the spec for step 7 of the build order
 (section 15), which is built. The keys `:mixins` and `:git` (below) are
-the spec for step 8; `:git` is built, `:mixins` is not yet.
+step 8, and both are built.
 
 **Format.** A configuration file is one Emacs Lisp property list, read
 with `read` and never evaluated. Its extension is `.eld`. Anything after
@@ -736,8 +743,7 @@ the list, other than whitespace and comments, makes the file invalid.
   labels, `foreman_start` with an agent. Configuration gives the default
   they replace.
 - Review mode is chosen by the workflow, `story` (the king reviews) or
-  `story-lite` (no review), or, once step 8 is built, by the mixin
-  `no-review` in `:mixins`. There is no `:review` key.
+  `story-lite` (no review), or by the mixin `no-review` in `:mixins`. There is no `:review` key.
 - An unknown key is invalid, and so is a key set at a layer the table
   does not allow.
 
@@ -747,7 +753,7 @@ the list, other than whitespace and comments, makes the file invalid.
 |---|---|---|
 | defaults | the existing user options, below | user, with Customize |
 | global | `~/.emacs.d/rat-kingdom/config.eld`, that is `config.eld` in `rat-kingdom-directory` | user, or king with `config_set` |
-| registration | the `:workflow`, `:target`, `:check` and `:setup`, and in step 8 `:mixins` and `:git`, stored on the `repo` tuple by `repo_add` or `rat-kingdom-add-repo` | user, when registering |
+| registration | the `:workflow`, `:target`, `:check`, `:setup`, `:mixins` and `:git`, stored on the `repo` tuple by `repo_add` or `rat-kingdom-add-repo` | user, when registering |
 | repo | `<repo>/.rk/config.eld` in the user's checkout | user, or king with `config_set` |
 | epic | the epic's `policy` tuple | king with `config_set` |
 | task | the task's `policy` tuple | king with `config_set` |
@@ -763,8 +769,9 @@ the list, other than whitespace and comments, makes the file invalid.
   `rat-kingdom-story-max-workers`, `:track :beads` from
   `rat-kingdom-task-br-untracked` (non-nil there is `nil` here), and
   `:track :rk` is `nil`. There is no default `:commands`, `:setup` or
-  `:check`. In step 8, `:git` is `(:branch "rats/%i" :integrate merge)`,
-  today's behaviour, and there is no default `:mixins`.
+  `:check`. `:git` is `(:branch "rats/%i" :integrate merge)`, the
+  behaviour from before `:git` existed, and there is no default
+  `:mixins`.
 - Registration stays a layer of its own, between global and repo, so a
   repository registered before configuration existed needs nothing
   migrated. Its values are written only by registering.
@@ -912,7 +919,7 @@ evaluated.
   `rat-kingdom-config-repo-directory`. Setting a key to the value it has
   writes nothing.
 
-**Spec: `:mixins`** (step 8). A list of mixin names, symbols, each a
+**Built: `:mixins`** (step 8). A list of mixin names, symbols, each a
 built-in mixin or a mixin file the repository can see (7.1). It applies
 those mixins after the workflow's own mixins, to whatever workflow a
 story runs; the story's repository, epic and task decide its value.
@@ -1240,7 +1247,7 @@ go, and it lets a role be denied built-in tools as well.
 
 | Role | Lifetime | Tools |
 |---|---|---|
-| king | long-lived, global, no worktree | built: `status` (with the tracker tasks available, each with its epic and agent), `repo_add`, `repo_sync`, `workflow_list`, `story_start` (optionally from a `task`, with an `agent`; a task's `rk-agent:` and `rk-workflow:` labels are the defaults), `story_show`, `story_diff`, `story_move`, `story_cancel`, `verdict`, `publish`, `query`, `fact_forget`, `task_create`, `epic_create`, `epic_propose` (the epic plan surface, 14.1), `epic_start` (optionally with a `feature_branch`, and a `foreman`), `epic_pause`, `epic_resume`, `epic_cancel`, `epic_retry`, `epic_show`, `epic_diff`, `epic_verdict` (section 10), `tell`, `foreman_start`, `foreman_stop`, `config_show` and `config_set` (7.3), `doc_list`, `doc_show` and `doc_forget` (7.1), `story_signal` (7.1); `story_start` also takes a rarely needed `target`; spec (step 8): `mixins` and `git` on `repo_add` |
+| king | long-lived, global, no worktree | built: `status` (with the tracker tasks available, each with its epic and agent), `repo_add`, `repo_sync`, `workflow_list`, `story_start` (optionally from a `task`, with an `agent`; a task's `rk-agent:` and `rk-workflow:` labels are the defaults), `story_show`, `story_diff`, `story_move`, `story_cancel`, `verdict`, `publish`, `query`, `fact_forget`, `task_create`, `epic_create`, `epic_propose` (the epic plan surface, 14.1), `epic_start` (optionally with a `feature_branch`, and a `foreman`), `epic_pause`, `epic_resume`, `epic_cancel`, `epic_retry`, `epic_show`, `epic_diff`, `epic_verdict` (section 10), `tell`, `foreman_start`, `foreman_stop`, `config_show` and `config_set` (7.3), `doc_list`, `doc_show` and `doc_forget` (7.1), `story_signal` (7.1); `story_start` also takes a rarely needed `target`; built (step 8): `mixins` and `git` on `repo_add` |
 | rat (worker) | one task | built: `finish`, `block`, `note_fact`, `inbox`, `read_doc` |
 | researcher | one task | built: `write_doc`, `read_doc`, `note_fact`, `inbox`, `block`, `finish` |
 | foreman | one epic, optional | built: `status` (its epic: the `epic_show` view and its stories' lines), `story_show`, `story_diff`, `verdict`, `tell`, `query`, `task_create` (its epic is the parent), `epic_retry`, `story_start` (for a task of its epic), `report` (to the king); every one but `query` limited to its epic |
@@ -1299,9 +1306,9 @@ from the operations log, time, and the payload, cut to
 matched and whether the list was cut off. It never writes.
 `fact_forget` retracts one `fact` by id and refuses any other tuple.
 
-**Spec: tools for docs and signals** (step 8; 7.1, 8.3). The doc tools
-are built (`rat-kingdom-doc.el`), and so is `story_signal`
-(`rat-kingdom-king.el`); `repo_add`'s new arguments are not.
+**Built: tools for docs and signals** (step 8; 7.1, 8.3). The doc tools
+are in `rat-kingdom-doc.el`; `story_signal`, and `repo_add`'s `mixins`
+and `git` arguments (7.3), are in `rat-kingdom-king.el`.
 
 - `write_doc` (researcher): `title`, `body` (Markdown), optionally `topic`
   and `id`, the id of a doc to revise. It writes a `doc` tuple scoped to
@@ -1881,21 +1888,24 @@ wait longer for review than for implementation.
    `:track` kept in `info/exclude`, workflow files global and per repo,
    and the king's `config_show` and validated `config_set`. Mixins and
    aspects are step 8.
-8. **Workflow composition** (this epic; spec in 7.1, 7.3, 8.3, 9 and 11;
-   built so far: `:brief`, named checks, `:run`, `:gate`, `:workflow`
-   with child stories, `story_signal`, the research workflow and docs,
-   and the git options):
+8. **Workflow composition** (7.1, 7.3, 8.3, 9 and 11). Built, all of it:
    - step kinds: `:spawn` with `:brief`, `:check` with named commands,
-     `:run`, `:gate` and `:workflow` with child stories;
-   - mixins and aspects, expanded at lookup, the built-in `no-review` and
-     `tdd`, mixin files global and per repo, and the `:mixins` key
-     (built);
+     `:run`, `:gate` and `:workflow` with child stories
+     (`rat-kingdom-workflow.el`, `rat-kingdom-story.el`);
+   - mixins and aspects, with `:entry`, expanded at lookup, the built-in
+     `no-review` and `tdd`, mixin files global and per repo, the
+     `:mixins` key, and the expansions in `workflow_list`
+     (`rat-kingdom-workflow.el`, `rat-kingdom-config.el`);
    - the `research` workflow, the `researcher` role, `doc` tuples, docs in
-     every worker's brief, `read_doc`, and the king's `doc_list`,
-     `doc_show` and `doc_forget` (built, `rat-kingdom-doc.el`), and
-     `story_signal` (built);
+     every worker's brief, `write_doc` and `read_doc`, and the king's
+     `doc_list`, `doc_show` and `doc_forget` (`rat-kingdom-doc.el`), and
+     `story_signal` (`rat-kingdom-king.el`);
    - git options: the `:git` key with `:branch` and `:integrate` (`merge`,
-     `rebase`, `squash`), for stories and for an epic's landing.
+     `rebase`, `squash`), for stories and for an epic's landing
+     (`rat-kingdom-config.el`, `rat-kingdom-story.el`,
+     `rat-kingdom-epic.el`);
+   - `repo_add`'s and `rat-kingdom-add-repo`'s `mixins` and `git`
+     arguments for the registration layer.
 9. **Dashboard** additions with the factory floor, attention queue and
    review card (surfaces 1 to 3), then the remaining surfaces.
 10. **Ingress** sidecar and ambient agents.
