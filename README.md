@@ -95,6 +95,13 @@ Set `rat-kingdom-task-br-untracked` to nil if you would sooner track
 `.beads` yourself. A `.beads` that is already there, tracked or not, is
 left exactly as it is.
 
+`.rk`, which holds a repository's own configuration, and `.a2ui`, where
+a2ui saves UIs, are kept out of Git the same way. The `:track`
+configuration key says which of `.rk`, `.beads` and `.a2ui` to keep in
+Git instead: ask the king to `config_set` it at the global or repo layer,
+`:track (:a2ui t)` to commit saved UIs, say. `config_show` shows each
+sub-key. Nothing is ever committed or removed from Git's index for you.
+
 If br is not installed, refuses the prefix or keeps a different one,
 registration fails with br's message and nothing is registered; whatever
 br had made is removed. Turning on `rat-kingdom-mode` and `M-x
