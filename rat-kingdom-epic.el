@@ -1941,7 +1941,8 @@ task_create" id))
            (branch (and feature-branch (rat-kingdom-epic-branch-name id))))
       (when branch
         (rat-kingdom-epic--prepare-branch
-         (plist-get (rat-kingdom-repo-get space repo) :path) branch target))
+         (plist-get (rat-kingdom-repo-get space repo) :path) branch target)
+        (rat-kingdom-config-push-guard-branch space repo branch))
       (rat-kingdom-space-put
        space 'epic :scope repo :identity id
        :payload (append

@@ -146,8 +146,9 @@ again (%s), %d to set up again (%s)"
 While this is on, stories move: workers are started, their results
 checked, reviewed and merged.  Turning it on first recovers whatever
 an earlier Emacs left in flight, makes sure every registered repository
-has a br workspace and that its info/exclude says what the
-configuration's :track says, then shows each repository's ready tasks as
+has a br workspace, that its info/exclude says what the configuration's
+:track says and that its branches are guarded from a push with no
+remote as :git :push-guard says, then shows each repository's ready tasks as
 `available' in the space, and starts the stories running epics have
 room for.  A repository whose workspace cannot be made is reported and
 skipped."
@@ -164,6 +165,8 @@ skipped."
           (rat-kingdom-task-ensure-all space))
         (with-demoted-errors "rat-kingdom: applying :track: %S"
           (rat-kingdom-config-track-apply-all space))
+        (with-demoted-errors "rat-kingdom: applying :git :push-guard: %S"
+          (rat-kingdom-config-push-guard-apply-all space))
         (with-demoted-errors "rat-kingdom: projecting tasks: %S"
           (rat-kingdom-task-project-all space))
         (with-demoted-errors "rat-kingdom: running epics: %S"

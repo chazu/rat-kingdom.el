@@ -68,6 +68,17 @@
 ;; warning.  `rat-kingdom-config-repo-directory' makes .rk, applying
 ;; :track first.
 ;;
+;; :git :push-guard.  `rat-kingdom-config-push-guard-apply' makes a
+;; repository's target, rats/* branches and the branches of its stories
+;; and epics guarded, in its Git configuration, from a push that names
+;; no remote (`rat-kingdom-git-push-guard') when it is t, and takes the
+;; guard off every branch that has it when it is nil;
+;; `rat-kingdom-config-push-guard-apply-all' does every repository.
+;; Registering a repository, turning on `rat-kingdom-mode' and
+;; config_set apply it, and a branch rat-kingdom makes or moves is
+;; guarded then, by `rat-kingdom-config-push-guard-branch'.  It may be
+;; set only at the global and repo layers.
+;;
 ;; The engine reads its settings through `rat-kingdom-config-get' and,
 ;; for :setup and :check, `rat-kingdom-story-commands'.
 ;;
@@ -163,7 +174,8 @@
      :validate rat-kingdom-config--boolean-problem)
     (:git
      :layers (defaults global registration repo epic task)
-     :sub-keys (:branch :integrate)
+     :sub-keys (:branch :integrate :push-guard)
+     :sub-key-layers ((:push-guard defaults global repo))
      :validate rat-kingdom-config--git-problem
      :by-sub-key t)
     (:mixins
@@ -180,7 +192,9 @@ Each entry is (KEY . PROPERTIES):
                 checks each sub-key's value, and layers are merged
                 sub-key by sub-key
   `:by-sub-key' non-nil if `:validate' takes the sub-key as well, as
-                its first argument, since the sub-keys differ in kind")
+                its first argument, since the sub-keys differ in kind
+  `:sub-key-layers' an alist from a sub-key to the layers that may set
+                it, for a sub-key fewer layers may set than KEY")
 
 (defun rat-kingdom-config--entry (key)
   "Return the schema entry of KEY, or signal an error if it is unknown."
@@ -394,7 +408,8 @@ story it makes %S, which %s" value sample problem))))))
        (format "is %s, not %S"
                (mapconcat #'symbol-name rat-kingdom-config-integrate-modes
                           ", ")
-               value)))))
+               value)))
+    (:push-guard (rat-kingdom-config--boolean-problem value))))
 
 (defun rat-kingdom-config--plist-p (value)
   "Return non-nil if VALUE is a proper list of even length."
@@ -428,6 +443,19 @@ story it makes %S, which %s" value sample problem))))))
                  do (push sub seen)
                  when problem return problem))))))
 
+(defun rat-kingdom-config--sub-key-layer-problem (entry value layer)
+  "Return what is wrong with VALUE of the schema ENTRY at LAYER, or nil.
+That is, a sub-key of VALUE that its `:sub-key-layers' does not allow
+at LAYER."
+  (when (rat-kingdom-config--plist-p value)
+    (cl-loop for (sub) on value by #'cddr
+             for layers = (alist-get sub (plist-get (cdr entry)
+                                                    :sub-key-layers))
+             when (and layers (not (memq layer layers)))
+             return (format "%s %s cannot be set at the %s layer, only at: %s"
+                            (car entry) sub layer
+                            (mapconcat #'symbol-name layers ", ")))))
+
 (defun rat-kingdom-config-validate (plist layer)
   "Return what is wrong with PLIST as the configuration of LAYER, as strings.
 LAYER is one of `rat-kingdom-config-layer-names'.  Return nil if PLIST
@@ -459,6 +487,7 @@ and target exist, is checked on the merged result, by
                    (mapconcat #'symbol-name (plist-get (cdr entry) :layers)
                               ", ")))
           ((null value) nil)
+          ((rat-kingdom-config--sub-key-layer-problem entry value layer))
           (t (when-let* ((problem (rat-kingdom-config--value-problem
                                    entry value)))
                (format "%s %s" key problem))))
@@ -1045,7 +1074,7 @@ if the policy was removed."
            :max-workers rat-kingdom-story-max-workers
            :track (list :rk nil :beads (not rat-kingdom-task-br-untracked))
            :git (list :branch rat-kingdom-config-default-branch-format
-                      :integrate 'merge)))))
+                      :integrate 'merge :push-guard t)))))
 
 (defun rat-kingdom-config-registration (repo)
   "Return the registration layer of REPO, a repository record.
@@ -1389,6 +1418,98 @@ repo layer; applying :track alone never makes the directory."
       (make-directory directory t))
     directory))
 
+;;;; :git :push-guard
+
+(defun rat-kingdom-config-push-guard-p (space repo)
+  "Return non-nil if REPO's :git :push-guard says to guard its branches.
+SPACE holds the configuration; REPO is a repository's name or record."
+  (plist-get (rat-kingdom-config-get space :git :repo repo) :push-guard))
+
+(defun rat-kingdom-config-push-guard-branch (space repo branch)
+  "Guard BRANCH of REPO from a push that names no remote, if it is to be.
+SPACE holds the configuration; REPO is a repository's name or record.
+BRANCH is guarded, by `rat-kingdom-git-push-guard', if REPO's :git
+:push-guard is t.  This is for a branch rat-kingdom has just made or
+moved.  Return non-nil if BRANCH was not guarded before."
+  (let ((record (or (rat-kingdom-config--repo space repo)
+                    (error "There is no repository called %s" repo))))
+    (when (rat-kingdom-config-push-guard-p space record)
+      (rat-kingdom-git-push-guard (plist-get record :path) branch))))
+
+(defun rat-kingdom-config--push-guard-branches (space record)
+  "Return the branches of the repository RECORD in SPACE that rat-kingdom made.
+They are its target, every branch under rats/, and the branch of
+every story and epic of it, those that exist."
+  (let* ((name (plist-get record :name))
+         (existing (mapcar (lambda (ref) (string-remove-prefix "refs/heads/" ref))
+                           (split-string
+                            (rat-kingdom-git (plist-get record :path)
+                                             "for-each-ref" "--format=%(refname)"
+                                             "refs/heads/")
+                            "\n" t)))
+         (made (append
+                (list (rat-kingdom-config-get space :target :repo record))
+                (cl-remove-if-not (lambda (branch)
+                                    (string-prefix-p "rats/" branch))
+                                  existing)
+                (mapcar (lambda (tuple)
+                          (plist-get (plist-get tuple :payload) :branch))
+                        (append (rat-kingdom-space-scan
+                                 space (list 'story :scope name))
+                                (rat-kingdom-space-scan
+                                 space (list 'epic :scope name)))))))
+    (cl-remove-if-not (lambda (branch) (member branch existing))
+                      (cl-remove-duplicates (delq nil made) :test #'equal))))
+
+(defun rat-kingdom-config-push-guard-apply (space repo)
+  "Guard REPO's branches from a push with no remote, or not, as configured.
+SPACE holds the configuration.  REPO is a repository's name or record.
+If its :git :push-guard is t, its target, every rats/* branch and the
+branch of every story and epic of it are guarded, by
+`rat-kingdom-git-push-guard'.  If it is nil, the guard is taken off
+every branch that has it, by `rat-kingdom-git-push-unguard'.  No other
+branch, and nothing else in the configuration, changes.
+
+Return a property list: `:guarded' and `:unguarded', the branches the
+guard was put on and taken off."
+  (let* ((record (or (rat-kingdom-config--repo space repo)
+                     (error "There is no repository called %s" repo)))
+         (path (or (plist-get record :path)
+                   (error "The repository %s has no path"
+                          (plist-get record :name))))
+         guarded unguarded)
+    (if (rat-kingdom-config-push-guard-p space record)
+        (dolist (branch (rat-kingdom-config--push-guard-branches space record))
+          (when (rat-kingdom-git-push-guard path branch)
+            (push branch guarded)))
+      (dolist (branch (rat-kingdom-git-push-guarded-branches path))
+        (when (rat-kingdom-git-push-unguard path branch)
+          (push branch unguarded))))
+    (list :guarded (nreverse guarded) :unguarded (nreverse unguarded))))
+
+(defun rat-kingdom-config-push-guard-apply-all (space)
+  "Apply :git :push-guard, by `rat-kingdom-config-push-guard-apply', to all.
+SPACE holds the repositories.  A repository whose checkout is not
+there is skipped; one that fails otherwise is reported with a warning,
+and the others are still done.  Return an alist from the name of each
+repository done to what `rat-kingdom-config-push-guard-apply' returned."
+  (let (results)
+    (dolist (repo (rat-kingdom-repo-list space))
+      (let ((name (plist-get repo :name))
+            (path (plist-get repo :path)))
+        (when (and path (file-directory-p path))
+          (condition-case err
+              (push (cons name (rat-kingdom-config-push-guard-apply space repo))
+                    results)
+            (error
+             (display-warning
+              'rat-kingdom
+              (format "Could not apply :git :push-guard to the repository \
+%s: %s"
+                      name (error-message-string err))
+              :warning))))))
+    (nreverse results)))
+
 ;;;; Showing the configuration
 
 (defun rat-kingdom-config--value-text (key value)
@@ -1681,6 +1802,23 @@ RESULT is what `rat-kingdom-config-track-apply' returns."
      (mapconcat (lambda (warning) (concat "\nWarning (tell the user): " warning))
                 (plist-get result :warnings) ""))))
 
+(defun rat-kingdom-config--push-guard-text (name result)
+  "Return what applying :git :push-guard to the repository NAME did.
+RESULT is what `rat-kingdom-config-push-guard-apply' returns."
+  (let ((guarded (plist-get result :guarded))
+        (unguarded (plist-get result :unguarded)))
+    (format "Applied :git :push-guard to %s: %s." name
+            (if (or guarded unguarded)
+                (string-join
+                 (delq nil (list (and guarded
+                                      (format "guarded %s from a push that \
+names no remote" (string-join guarded ", ")))
+                                 (and unguarded
+                                      (format "took the guard off %s"
+                                              (string-join unguarded ", ")))))
+                 "; ")
+              "its branches already were so"))))
+
 (defun rat-kingdom-config--effective-text (space key repo epic task)
   "Return KEY's effective value for REPO, EPIC and TASK in SPACE, as lines."
   (string-join (apply #'rat-kingdom-config--key-lines
@@ -1707,8 +1845,9 @@ The global and repo layers are files, written whole and pretty-printed
 with `rat-kingdom-config-file-header'; .rk is made by
 `rat-kingdom-config-repo-directory', which applies :track first.  The
 epic and task layers are `policy' tuples, written as ACTOR, by default
-\"king\".  A change to :track is applied at once.  Return the answer
-of the king's `config_set'."
+\"king\".  A change to :track, or to :git at the global or repo layer,
+for its :push-guard, is applied at once.  Return the answer of the
+king's `config_set'."
   (let* ((layer (intern (string-trim (format "%s" layer))))
          (_ (unless (memq layer rat-kingdom-config-settable-layers)
               (error "The layer is global, repo, epic or task, not %s%s" layer
@@ -1786,6 +1925,21 @@ of the king's `config_set'."
                                repo (rat-kingdom-config-track-apply space
                                                                     record))
                             (error (format "Could not apply :track to %s: %s"
+                                           repo
+                                           (error-message-string err))))))))
+          (when (and (eq key :git) (memq layer '(global repo)))
+            (setq track
+                  (if (eq layer 'global)
+                      (mapcar (lambda (result)
+                                (rat-kingdom-config--push-guard-text
+                                 (car result) (cdr result)))
+                              (rat-kingdom-config-push-guard-apply-all space))
+                    (list (condition-case err
+                              (rat-kingdom-config--push-guard-text
+                               repo (rat-kingdom-config-push-guard-apply
+                                     space record))
+                            (error (format "Could not apply :git :push-guard \
+to %s: %s"
                                            repo
                                            (error-message-string err))))))))
           (string-join
