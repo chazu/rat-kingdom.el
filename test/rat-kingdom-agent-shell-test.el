@@ -181,5 +181,83 @@ and starts nothing."
       (rat-kingdom-agent-shell-stop buffer)
       (should-not rat-kingdom-agent-shell-test--calls))))
 
+;;;; The workers' model
+
+(defmacro rat-kingdom-agent-shell-test-with-claude (&rest body)
+  "Run BODY with the claude agent kind's config stubbed.
+It is made as agent-shell-anthropic makes it, with `:default-model-id' a
+function that returns \"agent-shell-default\".  No agent is started."
+  (declare (indent 0) (debug t))
+  `(let ((rat-kingdom-agent-shell--defined-agents nil)
+         (rat-kingdom-worker-model nil))
+     (cl-letf (((symbol-function 'rat-kingdom-agent-shell-claude-config)
+                (lambda ()
+                  (list (cons :identifier 'claude-code)
+                        (cons :default-model-id
+                              (lambda () "agent-shell-default"))
+                        (cons :client-maker (lambda (_buffer) nil)))))
+               ((symbol-function 'rat-kingdom-agent-shell-codex-config)
+                (lambda ()
+                  (list (cons :identifier 'codex)
+                        (cons :client-maker (lambda (_buffer) nil))))))
+       ,@body)))
+
+(defun rat-kingdom-agent-shell-test--model (run)
+  "Return the model id the config of RUN gives, or nil if it gives none."
+  (when-let* ((function (map-elt (rat-kingdom-agent-shell-run-config
+                                  run "token")
+                                 :default-model-id)))
+    (funcall function)))
+
+(ert-deftest rat-kingdom-agent-shell-test-worker-model-from-the-custom ()
+  (rat-kingdom-agent-shell-test-with-claude
+    (let ((rat-kingdom-worker-model "claude-opus-5-5"))
+      (should (equal (rat-kingdom-agent-shell-test--model
+                      (list :id "S-1.1" :role "rat" :agent "claude"))
+                     "claude-opus-5-5"))
+      (should (equal (rat-kingdom-agent-shell-test--model
+                      (list :id "S-1.2" :role "researcher" :agent "claude"))
+                     "claude-opus-5-5"))
+      (should (equal (rat-kingdom-agent-shell-test--model
+                      (list :id "F-1" :role "foreman"))
+                     "claude-opus-5-5")))))
+
+(ert-deftest rat-kingdom-agent-shell-test-story-model-wins ()
+  (rat-kingdom-agent-shell-test-with-claude
+    (let ((rat-kingdom-worker-model "claude-opus-5-5"))
+      (should (equal (rat-kingdom-agent-shell-test--model
+                      (list :id "S-1.1" :role "rat" :agent "claude"
+                            :model "claude-haiku-5-5"))
+                     "claude-haiku-5-5")))
+    ;; It is given without the custom too.
+    (should (equal (rat-kingdom-agent-shell-test--model
+                    (list :id "S-1.1" :role "rat" :agent "claude"
+                          :model "claude-sonnet-5-5"))
+                   "claude-sonnet-5-5"))))
+
+(ert-deftest rat-kingdom-agent-shell-test-no-model-leaves-the-default ()
+  (rat-kingdom-agent-shell-test-with-claude
+    (should (equal (rat-kingdom-agent-shell-test--model
+                    (list :id "S-1.1" :role "rat" :agent "claude"))
+                   "agent-shell-default"))
+    (let ((rat-kingdom-worker-model ""))
+      (should (equal (rat-kingdom-agent-shell-test--model
+                      (list :id "S-1.1" :role "rat" :agent "claude"
+                            :model ""))
+                     "agent-shell-default")))))
+
+(ert-deftest rat-kingdom-agent-shell-test-king-and-codex-keep-their-model ()
+  (rat-kingdom-agent-shell-test-with-claude
+    (let ((rat-kingdom-worker-model "claude-opus-5-5"))
+      (should (equal (rat-kingdom-agent-shell-test--model
+                      (list :id "king" :role "king"))
+                     "agent-shell-default"))
+      (should (equal (rat-kingdom-agent-shell-test--model
+                      (list :id "king" :role 'king :model "claude-opus-5-5"))
+                     "agent-shell-default"))
+      (should-not (rat-kingdom-agent-shell-test--model
+                   (list :id "S-1.1" :role "rat" :agent "codex"
+                         :model "claude-opus-5-5"))))))
+
 (provide 'rat-kingdom-agent-shell-test)
 ;;; rat-kingdom-agent-shell-test.el ends here

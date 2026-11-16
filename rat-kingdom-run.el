@@ -192,16 +192,18 @@ A record is the tuple's payload with `:id', `:repo' and `:story'."
            space (if story (list 'run :owner story) '(run)))))
 
 (cl-defun rat-kingdom-run-create (space &key id (repo "system") story role
-                                        agent worktree branch target prompt
-                                        resume)
+                                        agent model worktree branch target
+                                        prompt resume)
   "Record a new run in SPACE, to be started by `rat-kingdom-run-launch'.
 ID names the run.  It belongs to STORY in REPO, plays ROLE, runs the
 agent AGENT, and works in WORKTREE on BRANCH, which was cut from
 TARGET.  AGENT names an agent kind, such as \"claude\" or \"codex\"; nil
 leaves it to the backend, which for agent-shell means Claude Code.
-PROMPT is what its agent is told.  RESUME is the id of an agent
-session to take up again, which must be one AGENT started.  A run of
-that name that is over is replaced.  Return the record."
+MODEL, if given, is the Claude model id the agent runs; see
+`rat-kingdom-worker-model'.  PROMPT is what its agent is told.  RESUME
+is the id of an agent session to take up again, which must be one
+AGENT started.  A run of that name that is over is replaced.  Return
+the record."
   (when-let* ((old (rat-kingdom-run-get space id)))
     (when (or (rat-kingdom-run-live-p id)
               (equal (plist-get old :state) "starting"))
@@ -210,6 +212,7 @@ that name that is over is replaced.  Return the record."
    space 'run :scope repo :identity id :owner story
    :payload (append (list :state "starting" :role (format "%s" role))
                     (and agent (list :agent (format "%s" agent)))
+                    (and model (list :model model))
                     (list :worktree worktree :branch branch :target target
                           :prompt prompt :resume resume))
    :actor "engine")

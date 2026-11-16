@@ -576,6 +576,8 @@ its branch"
                                        "over")))
                            children ", ")))
                 (format "Agent: %s" (rat-kingdom-king--agent payload))
+                (and (plist-get payload :model)
+                     (format "Model: %s" (plist-get payload :model)))
                 (format "Workflow %s; at %s%s%s"
                         (plist-get payload :workflow) (plist-get payload :at)
                         (pcase (plist-get payload :phase)
@@ -1105,8 +1107,8 @@ evaluated; the default is the king's alone."
 (defun rat-kingdom-king-story-start (space options &optional check)
   "Start a story in SPACE as `story_start' does, and return its answer.
 OPTIONS is a property list of the tool's arguments: `:repo',
-`:title', `:description', `:task', `:workflow', `:agent' and
-`:target'.  CHECK, if given, is a scope check, called with the task
+`:title', `:description', `:task', `:workflow', `:agent', `:model'
+and `:target'.  CHECK, if given, is a scope check, called with the task
 before anything is started; see above."
   (let* ((repo (plist-get options :repo))
          (task (plist-get options :task))
@@ -1141,7 +1143,7 @@ before anything is started; see above."
                   :description (plist-get options :description)
                   :agent (plist-get options :agent)
                   :workflow (plist-get options :workflow) :epic epic
-                  :target target)
+                  :target target :model (plist-get options :model))
                (rat-kingdom-story-start
                 space repo
                 (or (plist-get options :title)
@@ -1149,7 +1151,8 @@ before anything is started; see above."
                 (or (plist-get options :description)
                     (error "Give a description, or a task to take it from"))
                 nil (plist-get options :workflow) nil
-                (plist-get options :agent) nil target)))
+                (plist-get options :agent) nil target
+                (plist-get options :model))))
          (payload (plist-get (rat-kingdom-story-get space id) :payload))
          (from-labels (delq nil (list (and (plist-get labelled :workflow)
                                            "workflow")
@@ -1486,6 +1489,10 @@ for Claude Code, or codex for OpenAI Codex in full-access mode. Every \
 worker the story is given, after a failed check or a review too, runs it. \
 Default the task's rk-agent: label if it has one, else \
 rat-kingdom-default-agent, the user's setting, which status shows.")
+      (:name "model" :type string :optional t
+       :description "Rarely needed; leave it out. The Claude model id \
+every worker of the story runs, such as claude-opus-5-5, instead of \
+rat-kingdom-worker-model, the user's setting. Only for the claude agent.")
       (:name "target" :type string :optional t
        :description "Rarely needed; leave it out. The branch the worker's \
 worktree is cut from and the work is merged into, instead of the \
@@ -1496,7 +1503,7 @@ branch without this."))
    space (list :repo (arg 'repo) :title (arg 'title)
                :description (arg 'description) :task (arg 'task)
                :workflow (arg 'workflow) :agent (arg 'agent)
-               :target (arg 'target))))
+               :model (arg 'model) :target (arg 'target))))
 
 (rat-kingdom-king--deftool "story_show"
     "Show everything recorded about one story, in progress or finished: \

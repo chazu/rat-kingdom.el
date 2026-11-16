@@ -71,7 +71,9 @@
 ;; A story names the agent its workers run, `:agent' on its token,
 ;; fixed when it starts: "claude" or "codex", or another kind of
 ;; rat-kingdom-agent-shell.el.  Every worker it is given, after a failed
-;; check, a review or a restart too, runs that agent.
+;; check, a review or a restart too, runs that agent.  A story may name
+;; the Claude model its workers run too, `:model' on its token, which
+;; comes before `rat-kingdom-worker-model'.
 ;;
 ;; `rat-kingdom-story-reconcile' is the recovery after Emacs stopped
 ;; with work in flight (DESIGN.md, section 8.4): a worker that was cut
@@ -469,7 +471,8 @@ the token."
     id))
 
 (defun rat-kingdom-story-start (space repo title &optional description id
-                                      workflow task agent epic target)
+                                      workflow task agent epic target
+                                      model)
   "Start a story in SPACE for the repository REPO and return its id.
 TITLE says what to do in a line; DESCRIPTION gives the acceptance
 criteria.  ID names the story; one is made up if it is nil.  WORKFLOW
@@ -487,7 +490,9 @@ given, is the id of the epic the story was started for, kept on its
 token as `:epic'.  TARGET, if given, is the branch the story's worktree
 is cut from and its work merged into, instead of the repository's
 target, kept on its token as `:target'; it must be an existing local
-branch that is not checked out (`rat-kingdom-story-check-target')."
+branch that is not checked out (`rat-kingdom-story-check-target').
+MODEL, if given, is the Claude model id every worker of the story runs,
+kept on its token as `:model', instead of `rat-kingdom-worker-model'."
   (unless (rat-kingdom-repo-get space repo)
     (error "No repository called %s is registered" repo))
   (let ((id (or id (rat-kingdom-story--new-id space)))
@@ -530,7 +535,9 @@ branch that is not checked out (`rat-kingdom-story-check-target')."
                          :entered (funcall rat-kingdom-space-now-function))
                    (and task (list :task task))
                    (and epic (list :epic epic))
-                   (and target (list :target target)))
+                   (and target (list :target target))
+                   (and model (not (string-empty-p model))
+                        (list :model model)))
          :actor "user"))
       (when task
         (rat-kingdom-task-claim-for-story space repo task id))
@@ -591,7 +598,7 @@ Available tasks in status" repo id (error-message-string err)))))))
 (cl-defun rat-kingdom-story-start-for-task (space repo task
                                                   &key title description
                                                   agent workflow epic found
-                                                  target)
+                                                  target model)
   "Start a story in SPACE for the task TASK of the repository REPO.
 Return the story's id.  The task is looked up as `rat-kingdom-story-task'
 does, unless FOUND gives it already.  TITLE defaults to the task's.
@@ -599,9 +606,9 @@ Without DESCRIPTION the story's is the task's own text; with it, or if
 the task has none, it is DESCRIPTION followed by a line naming the task.
 AGENT and WORKFLOW default to the task's rk-agent: and rk-workflow:
 labels, then to the usual defaults.  EPIC, if given, is recorded on the
-token as `:epic', and TARGET as `:target'.  The task's `available'
-tuple is taken and the task is claimed for the story; see
-`rat-kingdom-story-start'."
+token as `:epic', TARGET as `:target' and MODEL as `:model'.  The
+task's `available' tuple is taken and the task is claimed for the
+story; see `rat-kingdom-story-start'."
   (let* ((found (or found (rat-kingdom-story-task space repo task)))
          (title (or title (plist-get found :title)
                     (error "Give a title, or a task to take it from")))
@@ -616,7 +623,7 @@ tuple is taken and the task is claimed for the story; see
      (or workflow (rat-kingdom-task-workflow found))
      task
      (or agent (rat-kingdom-task-agent found))
-     epic target)))
+     epic target model)))
 
 (defun rat-kingdom-story-warnings (space repo &optional target)
   "Return what a person starting a story in REPO in SPACE should know.
@@ -835,6 +842,7 @@ the step's `:attempts', else the configuration's."
                space :id run-id :repo (plist-get repo :name) :story id
                :role (plist-get step :with)
                :agent (plist-get payload :agent)
+               :model (plist-get payload :model)
                :worktree worktree :branch branch :target target
                :prompt (rat-kingdom-story--prompt
                         space story run-id worktree branch target
@@ -1597,6 +1605,8 @@ releases the task and its epic does not count it.  The story waits for
                         when (plist-get payload key)
                         append (list key (plist-get payload key)))
                (and target (list :target target))
+               (and (plist-get payload :model)
+                    (list :model (plist-get payload :model)))
                (and epic (list :config-epic epic))
                (and task (list :config-task task))
                (list :entered (funcall rat-kingdom-space-now-function)))
