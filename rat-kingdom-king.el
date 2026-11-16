@@ -1642,14 +1642,14 @@ setup and check: an argument list run without a shell, (\"make\" \"test\"), \
 or command names defined in commands, run in order, (lint test). agents: \
 (:worker codex :foreman claude). timeouts: seconds, (:worker 7200 :check \
 1800). attempts and max-workers: a positive integer, 5. track: (:rk nil \
-:beads t), t to keep the directory in Git, nil to keep it out. git: \
-(:branch \"rats/%i\" :integrate merge :push-guard t); :branch is the format \
-of story branch names, :integrate is merge, rebase or squash, and \
-:push-guard, default t, guards the target and every rats/* branch from a \
-git push by the user that names no remote (only publish pushes them), nil \
-takes the guard off. A value for commands, agents, timeouts, track or git \
-replaces that key's whole value at this layer; sub-keys it leaves out come \
-from the layers below.")
+:beads t :a2ui nil), t to keep the directory, .rk, .beads or .a2ui, in \
+Git, nil to keep it out. git: (:branch \"rats/%i\" :integrate merge \
+:push-guard t); :branch is the format of story branch names, :integrate is \
+merge, rebase or squash, and :push-guard, default t, guards the target and \
+every rats/* branch from a git push by the user that names no remote (only \
+publish pushes them), nil takes the guard off. A value for commands, agents, \
+timeouts, track or git replaces that key's whole value at this layer; \
+sub-keys it leaves out come from the layers below.")
       (:name "repo" :type string :optional t
        :description "The repository's name. Required for the repo, epic \
 and task layers.")

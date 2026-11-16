@@ -108,7 +108,8 @@ file written twice in one test has two different times."
                    '(:worker 7200 :check 1800)))
     (should (equal (rat-kingdom-config-get space :agents)
                    '(:worker claude :foreman claude)))
-    (should (equal (rat-kingdom-config-get space :track) '(:rk nil :beads nil)))
+    (should (equal (rat-kingdom-config-get space :track)
+                   '(:rk nil :beads nil :a2ui nil)))
     (should (eql (rat-kingdom-config-get space :attempts) 5))
     (should (eql (rat-kingdom-config-get space :max-workers) 3))
     (should-not (rat-kingdom-config-get space :commands))
@@ -118,7 +119,8 @@ file written twice in one test has two different times."
           (rat-kingdom-story-max-workers nil)
           (rat-kingdom-default-agent 'codex))
       (should (equal (rat-kingdom-config-get space :timeouts) '(:worker 60)))
-      (should (equal (rat-kingdom-config-get space :track) '(:rk nil :beads t)))
+      (should (equal (rat-kingdom-config-get space :track)
+                     '(:rk nil :beads t :a2ui nil)))
       (should-not (rat-kingdom-config-get space :max-workers))
       (should (eq (plist-get (rat-kingdom-config-get space :agents) :worker)
                   'codex)))
@@ -204,7 +206,8 @@ file written twice in one test has two different times."
                      '(:agents (:worker claude :foreman codex)
                                (:worker defaults :foreman global))))
       (should (equal (assq :track explained)
-                     '(:track (:rk t :beads nil) (:rk repo :beads defaults))))
+                     '(:track (:rk t :beads nil :a2ui nil)
+                              (:rk repo :beads defaults :a2ui defaults))))
       ;; Every key is there, set or not.
       (should (equal (mapcar #'car explained)
                      (mapcar #'car rat-kingdom-config-schema)))
@@ -223,6 +226,9 @@ file written twice in one test has two different times."
   (should-not (rat-kingdom-config-validate '(:check (lint)) 'task))
   (should-not (rat-kingdom-config-validate '(:track (:beads t)) 'repo))
   (should (rat-kingdom-config-validate '(:track (:beads t)) 'epic))
+  (should-not (rat-kingdom-config-validate '(:track (:a2ui t)) 'global))
+  (should-not (rat-kingdom-config-validate '(:track (:a2ui t)) 'repo))
+  (should (rat-kingdom-config-validate '(:track (:a2ui t)) 'task))
   (should-error (rat-kingdom-config-validate '() 'nowhere))
   (rat-kingdom-config-test-with-repo (space path)
     ;; A repo file that sets a key it may not is ignored as a whole.
@@ -251,6 +257,7 @@ file written twice in one test has two different times."
                  (:attempts 0)
                  (:attempts 1.5)
                  (:track (:rk yes))
+                 (:track (:a2ui "no"))
                  (:nonsense 1)
                  (:attempts 2 :attempts 3)
                  (:attempts)
@@ -262,7 +269,8 @@ file written twice in one test has two different times."
                  :setup (install) :check (lint test)
                  :agents (:worker codex :foreman "claude")
                  :timeouts (:worker 7200 :check 1800)
-                 :attempts 5 :max-workers 3 :track (:rk t :beads nil))
+                 :attempts 5 :max-workers 3
+                 :track (:rk t :beads nil :a2ui t))
                'global)))
 
 ;;;; Files
@@ -511,20 +519,23 @@ branch of demo" p))
       ;; Git's own exclude file, with its comments.
       (should (string-prefix-p "# git ls-files" before))
       (should (equal (rat-kingdom-config-track-apply space "demo")
-                     '(:added ("/.rk/" "/.beads/") :removed nil :warnings nil)))
+                     '(:added ("/.rk/" "/.beads/" "/.a2ui/") :removed nil
+                       :warnings nil)))
       (should (equal (rat-kingdom-config-test--bytes file)
-                     (concat before "/.rk/\n/.beads/\n")))
+                     (concat before "/.rk/\n/.beads/\n/.a2ui/\n")))
       ;; Idempotent: applied again, nothing changes.
       (should (equal (rat-kingdom-config-track-apply space "demo")
                      '(:added nil :removed nil :warnings nil)))
       (should (equal (rat-kingdom-config-test--bytes file)
-                     (concat before "/.rk/\n/.beads/\n")))
+                     (concat before "/.rk/\n/.beads/\n/.a2ui/\n")))
       ;; Applying :track never makes .rk, and writes no .gitignore.
       (should-not (file-exists-p (expand-file-name ".rk" path)))
       (should-not (file-exists-p (expand-file-name ".gitignore" path)))
       ;; Untracked files in the directories kept out do not show.
       (make-directory (expand-file-name ".beads" path))
       (with-temp-file (expand-file-name ".beads/issues.jsonl" path))
+      (make-directory (expand-file-name ".a2ui" path))
+      (with-temp-file (expand-file-name ".a2ui/ui.json" path))
       (should (equal (rat-kingdom-git path "status" "--porcelain") "")))))
 
 (ert-deftest rat-kingdom-config-test-track-toggles-exactly-its-lines ()
@@ -537,50 +548,73 @@ branch of demo" p))
       (rat-kingdom-config-test--write-bytes file original)
       (rat-kingdom-config-track-apply space "demo")
       (should (equal (rat-kingdom-config-test--bytes file)
-                     (concat original "\n/.rk/\n/.beads/\n")))
+                     (concat original "\n/.rk/\n/.beads/\n/.a2ui/\n")))
       ;; :track (:beads t) globally: only the .beads line goes.
       (rat-kingdom-config-test--global "(:track (:beads t))" 10)
       (should (equal (rat-kingdom-config-track-apply space "demo")
                      '(:added nil :removed ("/.beads/") :warnings nil)))
       (should (equal (rat-kingdom-config-test--bytes file)
-                     (concat original "\n/.rk/\n")))
+                     (concat original "\n/.rk/\n/.a2ui/\n")))
       ;; The repo layer wins sub-key by sub-key: :rk t there, :beads t
       ;; still from the global file.
       (rat-kingdom-config-test--repo-file path "(:track (:rk t))")
       (should (equal (rat-kingdom-config-track-apply space "demo")
                      '(:added nil :removed ("/.rk/") :warnings nil)))
       (should (equal (rat-kingdom-config-test--bytes file)
-                     (concat original "\n")))
+                     (concat original "\n/.a2ui/\n")))
       (should (equal (rat-kingdom-config-track-apply space "demo")
                      '(:added nil :removed nil :warnings nil)))
-      ;; Back to the defaults: both lines again, at the end.
+      ;; Back to the defaults: every line again, at the end.
       (rat-kingdom-config-test--global "(:workflow story)")
       (rat-kingdom-config-test--repo-file path "(:attempts 2)" 10)
       (rat-kingdom-config-track-apply space "demo")
       (should (equal (rat-kingdom-config-test--bytes file)
-                     (concat original "\n/.rk/\n/.beads/\n")))
+                     (concat original "\n/.a2ui/\n/.rk/\n/.beads/\n")))
       ;; A line rat-kingdom would have added, wherever it is and however
       ;; often, goes, and nothing else does.
       (rat-kingdom-config-test--write-bytes
-       file (concat "/.beads/\n" original "\n/.beads/\n/.rk/\n/.beads/"))
+       file (concat "/.beads/\n" original
+                    "\n/.beads/\n/.rk/\n/.a2ui/\n/.beads/"))
       (rat-kingdom-config-test--global "(:track (:beads t :rk nil))" 20)
       (should (equal (rat-kingdom-config-track-apply space "demo")
                      '(:added nil :removed ("/.beads/") :warnings nil)))
       (should (equal (rat-kingdom-config-test--bytes file)
-                     (concat original "\n/.rk/\n"))))))
+                     (concat original "\n/.rk/\n/.a2ui/\n"))))))
+
+(ert-deftest rat-kingdom-config-test-track-a2ui-toggles-only-its-line ()
+  (rat-kingdom-config-test-with-repo (space path)
+    (let* ((file (rat-kingdom-config-test--exclude-file path))
+           (original "# mine\n/.a2ui\n/.a2ui/x\nlast\n"))
+      (rat-kingdom-config-test--write-bytes file original)
+      ;; By default .a2ui, where a2ui saves UIs, is kept out of Git.
+      (should (equal (rat-kingdom-config-track-apply space "demo")
+                     '(:added ("/.rk/" "/.beads/" "/.a2ui/") :removed nil
+                       :warnings nil)))
+      ;; :track (:a2ui t) globally: only the .a2ui line goes.
+      (rat-kingdom-config-test--global "(:track (:a2ui t))" 10)
+      (should (equal (rat-kingdom-config-track-apply space "demo")
+                     '(:added nil :removed ("/.a2ui/") :warnings nil)))
+      (should (equal (rat-kingdom-config-test--bytes file)
+                     (concat original "/.rk/\n/.beads/\n")))
+      ;; The repo layer wins: (:a2ui nil) there keeps it out again.
+      (rat-kingdom-config-test--repo-file path "(:track (:a2ui nil))")
+      (should (equal (rat-kingdom-config-track-apply space "demo")
+                     '(:added ("/.a2ui/") :removed nil :warnings nil)))
+      (should (equal (rat-kingdom-config-test--bytes file)
+                     (concat original "/.rk/\n/.beads/\n/.a2ui/\n"))))))
 
 (ert-deftest rat-kingdom-config-test-track-makes-the-exclude-file ()
   (rat-kingdom-config-test-with-repo (space path)
     (let ((file (rat-kingdom-config-test--exclude-file path)))
       (delete-directory (file-name-directory file) t)
       ;; Tracked: nothing to remove, and no file made.
-      (rat-kingdom-config-test--global "(:track (:rk t :beads t))")
+      (rat-kingdom-config-test--global "(:track (:rk t :beads t :a2ui t))")
       (rat-kingdom-config-track-apply space "demo")
       (should-not (file-exists-p file))
       (rat-kingdom-config-test--global "(:workflow story)" 10)
       (rat-kingdom-config-track-apply space "demo")
       (should (equal (rat-kingdom-config-test--bytes file)
-                     "/.rk/\n/.beads/\n")))))
+                     "/.rk/\n/.beads/\n/.a2ui/\n")))))
 
 (ert-deftest rat-kingdom-config-test-track-linked-worktree-uses-common-dir ()
   (rat-kingdom-config-test-with-repo (space path)
@@ -594,7 +628,7 @@ branch of demo" p))
       (let ((before (rat-kingdom-config-test--bytes file)))
         (rat-kingdom-config-track-apply space "linked")
         (should (equal (rat-kingdom-config-test--bytes file)
-                       (concat before "/.rk/\n/.beads/\n"))))
+                       (concat before "/.rk/\n/.beads/\n/.a2ui/\n"))))
       (should-not (file-exists-p
                    (expand-file-name ".git/worktrees/linked/info/exclude"
                                      path)))
@@ -620,7 +654,8 @@ branch of demo" p))
       (rat-kingdom-config-test-with-warnings warnings
         (let ((result (rat-kingdom-config-track-apply space "demo")))
           ;; The line is added anyway; the warning is returned and shown.
-          (should (equal (plist-get result :added) '("/.rk/" "/.beads/")))
+          (should (equal (plist-get result :added)
+                         '("/.rk/" "/.beads/" "/.a2ui/")))
           (should (equal (length (plist-get result :warnings)) 1))
           (should (string-match-p
                    "Git already tracks 2 files in \\.beads of demo"
@@ -662,10 +697,19 @@ branch of demo" p))
                                                                   path)))
     (rat-kingdom-config-test-with-warnings warnings
       (should (equal (rat-kingdom-config-track-apply-all space)
-                     '(("demo" :added ("/.rk/" "/.beads/") :removed nil
-                        :warnings nil))))
+                     '(("demo" :added ("/.rk/" "/.beads/" "/.a2ui/")
+                        :removed nil :warnings nil))))
       ;; A checkout that is not there is skipped, without a warning.
-      (should-not warnings))))
+      (should-not warnings))
+    ;; :track (:a2ui t) globally: every repository's .a2ui line goes.
+    (rat-kingdom-config-test--global "(:track (:a2ui t))")
+    (should (equal (rat-kingdom-config-track-apply-all space)
+                   '(("demo" :added nil :removed ("/.a2ui/")
+                      :warnings nil))))
+    (should (string-suffix-p "\n/.rk/\n/.beads/\n"
+                             (rat-kingdom-config-test--bytes
+                              (rat-kingdom-config-test--exclude-file
+                               path))))))
 
 (ert-deftest rat-kingdom-config-test-repo-directory-applies-track-first ()
   (rat-kingdom-config-test-with-repo (space path)
