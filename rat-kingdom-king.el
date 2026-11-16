@@ -1615,17 +1615,19 @@ an undefined command. It never writes."
 the user asks. Layers: global (every repository; the file config.eld in \
 the rat-kingdom directory), repo (one repository; <repo>/.rk/config.eld \
 in the user's checkout), epic or task (a policy kept by rat-kingdom). A \
-more specific layer wins, and for commands, agents, timeouts and track, \
-sub-key by sub-key. Keys and the layers that may set them: workflow (all), \
-target (global, repo), commands (global, repo), setup (global, repo), check \
-(all), agents (all), timeouts (all), attempts (all), max-workers (global), \
-track (global, repo). Before writing, the change is checked for every \
-repository it affects: an unknown workflow, an undefined command name, a \
+more specific layer wins, and for commands, agents, timeouts, track and \
+git, sub-key by sub-key. Keys and the layers that may set them: workflow \
+(all), target (global, repo), commands (global, repo), setup (global, \
+repo), check (all), agents (all), timeouts (all), attempts (all), \
+max-workers (global), track (global, repo), git (all; its sub-key \
+:push-guard global and repo only). Before writing, the change is checked \
+for every repository it affects: an unknown workflow, an undefined command name, a \
 key not allowed at the layer, a value of the wrong shape or a target that \
 is not a local branch refuses it, and nothing is written. A file is \
 rewritten whole, so comments in it are not kept. A change to track is \
-applied to info/exclude at once. Returns what changed and the value now in \
-effect."
+applied to info/exclude at once, and a change to git's :push-guard to the \
+repositories' Git configuration at once. Returns what changed and the value \
+now in effect."
     '((:name "layer" :type string
        :description "global, repo, epic or task.")
       (:name "key" :type string
@@ -1641,9 +1643,13 @@ or command names defined in commands, run in order, (lint test). agents: \
 (:worker codex :foreman claude). timeouts: seconds, (:worker 7200 :check \
 1800). attempts and max-workers: a positive integer, 5. track: (:rk nil \
 :beads t :a2ui nil), t to keep the directory, .rk, .beads or .a2ui, in \
-Git, nil to keep it out. A value for commands, agents, timeouts or track \
-replaces that key's whole value at this layer; sub-keys it leaves out \
-come from the layers below.")
+Git, nil to keep it out. git: (:branch \"rats/%i\" :integrate merge \
+:push-guard t); :branch is the format of story branch names, :integrate is \
+merge, rebase or squash, and :push-guard, default t, guards the target and \
+every rats/* branch from a git push by the user that names no remote (only \
+publish pushes them), nil takes the guard off. A value for commands, agents, \
+timeouts, track or git replaces that key's whole value at this layer; \
+sub-keys it leaves out come from the layers below.")
       (:name "repo" :type string :optional t
        :description "The repository's name. Required for the repo, epic \
 and task layers.")

@@ -21,7 +21,10 @@
 ;; The one push is `rat-kingdom-git-publish', which the user, or the king
 ;; on the user's explicit request, calls to push one branch to one
 ;; remote.  It never forces, and it writes a `published' tuple as a
-;; receipt.
+;; receipt.  The branches rat-kingdom makes are guarded, in the
+;; repository's Git configuration, from a push that names no remote
+;; (`rat-kingdom-git-push-guard'), so that the user does not push them
+;; by accident; `publish' names its remote, and is not affected.
 ;;
 ;; Everything here returns quickly, except a push, which waits for the
 ;; remote.  A repository's own check is run as a separate process by
@@ -171,6 +174,87 @@ there was one."
           (rat-kingdom-git--exclude-write file))
         removed))))
 
+;;;; Guarding branches from the user's pushes
+
+;; The agents cannot push (rat-kingdom-agent-shell.el), but the user
+;; can, from their own checkout.  So that a bare `git push', or magit's
+;; push to the push-remote, on the target or a worker's branch fails
+;; instead of sending it to the work repository's remote, the branch's
+;; pushRemote, in the repository's own configuration in the common Git
+;; directory, is a URL Git cannot use.  A push that names its remote,
+;; as `rat-kingdom-git-publish' does, is unaffected.
+
+(defconst rat-kingdom-git-push-guard-prefix "rat-kingdom-refuses-to-push::"
+  "What a guarded branch's pushRemote begins with; the branch's name follows.
+It is `rat-kingdom-agent-shell-push-block': Git reads the part before
+\"::\" as the name of a remote helper, which does not exist, so the
+push fails and the error names rat-kingdom.")
+
+(defun rat-kingdom-git-push-guard-url (branch)
+  "Return the pushRemote that guards BRANCH."
+  (concat rat-kingdom-git-push-guard-prefix branch))
+
+(defun rat-kingdom-git--push-remote (directory branch)
+  "Return BRANCH's pushRemote in the repository's own configuration, or nil.
+DIRECTORY is in the repository."
+  (pcase-let ((`(,exit ,output ,_)
+               (rat-kingdom-git--run
+                directory (list "config" "--local" "--get"
+                                (format "branch.%s.pushRemote" branch)))))
+    (and (eql exit 0) output)))
+
+(defun rat-kingdom-git-push-guarded-p (directory branch)
+  "Return non-nil if BRANCH of the repository DIRECTORY is in is guarded."
+  (equal (rat-kingdom-git--push-remote directory branch)
+         (rat-kingdom-git-push-guard-url branch)))
+
+(defun rat-kingdom-git-push-guard (directory branch)
+  "Guard BRANCH of the repository DIRECTORY is in from a push with no remote.
+Set its branch.BRANCH.pushRemote, in the repository's configuration
+in the common Git directory, to `rat-kingdom-git-push-guard-url'.
+Nothing else in the configuration changes.  Return non-nil if it was
+not guarded before."
+  (unless (rat-kingdom-git-push-guarded-p directory branch)
+    (rat-kingdom-git directory "config" "--local"
+                     (format "branch.%s.pushRemote" branch)
+                     (rat-kingdom-git-push-guard-url branch))
+    t))
+
+(defun rat-kingdom-git-push-unguard (directory branch)
+  "Take the guard of `rat-kingdom-git-push-guard' off BRANCH.
+DIRECTORY is in the repository.  A pushRemote that is not the guard
+is left alone.  If the branch's section of the configuration is then
+empty, it goes too, so that guarding and unguarding a branch leaves
+the configuration as it was.  Return non-nil if BRANCH was guarded."
+  (when (rat-kingdom-git-push-guarded-p directory branch)
+    (let ((section (format "branch.%s." branch)))
+      (rat-kingdom-git directory "config" "--local" "--unset"
+                       (concat section "pushRemote"))
+      (unless (cl-some (lambda (name) (string-prefix-p section name t))
+                       (split-string (rat-kingdom-git directory "config"
+                                                      "--local" "--list"
+                                                      "--name-only")
+                                     "\n" t))
+        (rat-kingdom-git-ok-p directory "config" "--local" "--remove-section"
+                              (substring section 0 -1))))
+    t))
+
+(defun rat-kingdom-git-push-guarded-branches (directory)
+  "Return the branches of the repository DIRECTORY is in that are guarded.
+They are those whose pushRemote is the guard of their own name."
+  (pcase-let ((`(,_ ,output ,_)
+               (rat-kingdom-git--run
+                directory (list "config" "--local" "--get-regexp"
+                                "^branch\\..*\\.pushremote$"))))
+    (cl-loop for line in (split-string output "\n" t)
+             for (key value) = (split-string line " ")
+             for branch = (and (string-prefix-p "branch." key)
+                               (string-suffix-p ".pushremote" key)
+                               (substring key 7 -11))
+             when (and branch
+                       (equal value (rat-kingdom-git-push-guard-url branch)))
+             collect branch)))
+
 ;;;; Repositories
 
 (declare-function rat-kingdom-task-br-ensure "rat-kingdom-task"
@@ -178,6 +262,8 @@ there was one."
 (declare-function rat-kingdom-config-validate "rat-kingdom-config"
                   (plist layer))
 (declare-function rat-kingdom-config-track-apply "rat-kingdom-config"
+                  (space repo))
+(declare-function rat-kingdom-config-push-guard-apply "rat-kingdom-config"
                   (space repo))
 
 (cl-defun rat-kingdom-repo-add (space path
@@ -209,7 +295,12 @@ The configuration's :track is then applied, by
 `rat-kingdom-config-track-apply': /.rk/ and /.beads/ are added to or
 taken out of the repository's info/exclude.  If it warns that Git
 already tracks files in a directory meant to be kept out, the record
-returned has the warnings as `:track-warnings', which is not stored."
+returned has the warnings as `:track-warnings', which is not stored.
+
+Last, the configuration's :git :push-guard is applied, by
+`rat-kingdom-config-push-guard-apply': the target, whether it was
+created now or was there already, and every rats/* branch are guarded
+from a push that names no remote, or not."
   (require 'rat-kingdom-task)
   (require 'rat-kingdom-config)
   (let* ((top (rat-kingdom-git path "rev-parse" "--show-toplevel"))
@@ -254,6 +345,7 @@ returned has the warnings as `:track-warnings', which is not stored."
                                                              mixins))
                                        (and git (list :git git)))
                              :actor "user")
+      (rat-kingdom-config-push-guard-apply space name)
       (append (rat-kingdom-repo-get space name)
               (and initialized (list :task-initialized t))
               (and warnings (list :track-warnings warnings))))))

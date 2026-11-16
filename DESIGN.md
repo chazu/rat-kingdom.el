@@ -1709,6 +1709,32 @@ next push. `M-x rat-kingdom-publish` is the user's own way in.
     ("missing config key"), so the block fails closed.
 
   rat-kingdom does not check the user's Codex config.
+- **The user's own pushes of rat-kingdom's branches** are guarded by a
+  fourth layer, in rat-kingdom-git.el, so that the user does not push
+  them by accident from their checkout with `git push` or magit. They go
+  out only through `publish`, when the user asks.
+  4. **pushRemote.** For each branch rat-kingdom makes, it sets
+     `branch.<name>.pushRemote` to `rat-kingdom-refuses-to-push::<name>`
+     in the repository's own Git configuration, in the common Git
+     directory (`rat-kingdom-git-push-guard`). The branches are the
+     target, at `repo_add` (also when the target was already there) and
+     each `repo_sync`, every worker branch a story cuts, and an epic's
+     feature branch. Candidate worktrees are detached and need none. A
+     `git push` that names no remote on such a branch goes to that URL,
+     whatever `push.default` says, and fails with an error that names
+     rat-kingdom. A push that names its remote, such as `git push origin
+     rk/integration`, is unaffected; `publish` pushes that way, so it
+     still works. Nothing is committed and no hook is installed. When
+     Git deletes a branch, it deletes the branch's configuration too.
+
+  The configuration sub-key `:git :push-guard`, default t, may be set at
+  the global and repo layers only. With nil, rat-kingdom sets no guard
+  and takes the guard off every branch that has it; with t, it guards
+  the target, every `rats/*` branch and the branch of every story and
+  epic (`rat-kingdom-config-push-guard-apply`). It is applied to every
+  repository when `rat-kingdom-mode` turns on, and at `config_set`, as
+  `:track` is. A `pushRemote` that is not the guard is never changed,
+  and the user's other branches are never touched.
 - ACP permission requests pass through Emacs, so a policy function can
   refuse a tool call before it runs. This applies only when the session
   mode asks for permission.

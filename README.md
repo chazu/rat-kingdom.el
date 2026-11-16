@@ -359,8 +359,9 @@ configuration in its environment (`GIT_CONFIG_COUNT`) that rewrites every
 push URL to a remote helper that does not exist, so `git push` fails with
 `rat-kingdom-refuses-to-push`, `--no-verify` or not. A Claude session is
 also started with Claude tool rules denying `git push` and `gh`, and Emacs
-refuses any permission request to run them. Nothing is written to your
-Git configuration or hooks, so your own pushes are unaffected. A remote
+refuses any permission request to run them. These layers write nothing to
+your Git configuration or hooks, so your own pushes are unaffected by
+them; the guard on rat-kingdom's own branches is below. A remote
 with an explicit `pushurl` is not rewritten by Git. For Claude the other
 two layers cover that case.
 
@@ -383,6 +384,19 @@ Git in Emacs with your own credentials, never forces (a push that is not a
 fast-forward is refused and the error is reported), and writes a
 `published` tuple as a receipt. `M-x rat-kingdom-publish` does the same by
 hand.
+
+Your own pushes of rat-kingdom's branches are guarded too, so that you do
+not push them by accident. For the target (`rk/integration`), every
+`rats/*` worker branch and an epic's feature branch, rat-kingdom sets
+`branch.<name>.pushRemote` to `rat-kingdom-refuses-to-push::<name>` in the
+repository's own Git configuration. A plain `git push`, or magit's push to
+the push-remote, on one of them then fails with an error that names
+rat-kingdom, whatever `push.default` says. A push that names the remote,
+such as `git push origin rk/integration`, still works, and that is how
+`publish` pushes. Your other branches are not touched, and nothing is
+committed and no hook is installed. Set the configuration sub-key
+`:git :push-guard` to nil, at the global or repo layer, to take the guard
+off. The default is t. See DESIGN.md, section 12.
 
 Everything the king does has a command, for when you would sooner do it
 by hand: `rat-kingdom-add-repo`, `rat-kingdom-start-story`,
@@ -549,8 +563,10 @@ name already taken gets `-2`, `-3` and so on. `:integrate` is how a
 story's work goes into its target, and how an epic's feature branch
 lands: `merge` (the default, a `--no-ff` merge), `rebase` (the story's
 commits replayed onto the target) or `squash` (one commit, `ID: TITLE`
-and the worker's summary). `repo_add` takes `git` too. For example, in
-`.rk/config.eld`:
+and the worker's summary). `:push-guard`, t by default and settable only
+at the global and repo layers, guards rat-kingdom's branches from a
+`git push` that names no remote (see Pushing). `repo_add` takes `git` too,
+without `:push-guard`. For example, in `.rk/config.eld`:
 
 ```elisp
 (:git (:branch "rats/%s-%i" :integrate squash))

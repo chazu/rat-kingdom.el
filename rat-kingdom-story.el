@@ -655,14 +655,17 @@ checkout first." target)))
 
 (defun rat-kingdom-story-sync (space repo)
   "Bring the target branch of REPO in SPACE up to the checkout's HEAD.
-The target is only ever moved forward.  Return a sentence saying what
-was done or why nothing was."
+The target is only ever moved forward, and is guarded from a push that
+names no remote if the configuration's :git :push-guard says so
+\(`rat-kingdom-config-push-guard-branch').  Return a sentence saying
+what was done or why nothing was."
   (let* ((record (or (rat-kingdom-repo-get space repo)
                      (error "No repository called %s is registered" repo)))
          (path (plist-get record :path))
          (target (rat-kingdom-story-repo-target space repo))
          (head (rat-kingdom-git-rev path "HEAD"))
          (old (rat-kingdom-git-rev path target)))
+    (rat-kingdom-config-push-guard-branch space record target)
     (cond
      ((equal head old)
       (format "%s is already at the checkout's HEAD." target))
@@ -825,7 +828,8 @@ the step's `:attempts', else the configuration's."
                (ignore-errors (rat-kingdom-git path "branch" "-D" branch))
                (signal (car err) (cdr err)))))
            (t (rat-kingdom-git path "worktree" "add" "-b" branch worktree
-                               target))))
+                               target)))
+          (rat-kingdom-config-push-guard-branch space repo branch))
         (condition-case err
             (if setup
                 (progn
