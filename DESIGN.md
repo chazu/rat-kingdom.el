@@ -715,7 +715,7 @@ the list, other than whitespace and comments, makes the file invalid.
 | `:timeouts` | a property list: `:worker`, `:check`, each a number of seconds | all |
 | `:attempts` | how many workers a story is given before it is parked, a positive integer | all |
 | `:max-workers` | how many workers run at once, across all repositories, a positive integer | global |
-| `:track` | a property list: `:rk`, `:beads`, each `t` to track that directory in Git or `nil` to keep it out | global, repo |
+| `:track` | a property list: `:rk`, `:beads`, `:a2ui`, each `t` to track that directory in Git or `nil` to keep it out | global, repo |
 | `:mixins` | a list of mixin names, symbols, applied to whatever workflow a story runs (7.1) | global, registration, repo, epic, task |
 | `:git` | a property list: `:branch`, a format for story branch names; `:integrate`, `merge`, `rebase` or `squash` | all |
 
@@ -768,10 +768,10 @@ the list, other than whitespace and comments, makes the file invalid.
   `rat-kingdom-story-attempts`, `:max-workers` from
   `rat-kingdom-story-max-workers`, `:track :beads` from
   `rat-kingdom-task-br-untracked` (non-nil there is `nil` here), and
-  `:track :rk` is `nil`. There is no default `:commands`, `:setup` or
-  `:check`. `:git` is `(:branch "rats/%i" :integrate merge)`, the
-  behaviour from before `:git` existed, and there is no default
-  `:mixins`.
+  `:track :rk` and `:track :a2ui` are `nil`. There is no default
+  `:commands`, `:setup` or `:check`. `:git` is
+  `(:branch "rats/%i" :integrate merge)`, the behaviour from before
+  `:git` existed, and there is no default `:mixins`.
 - Registration stays a layer of its own, between global and repo, so a
   repository registered before configuration existed needs nothing
   migrated. Its values are written only by registering.
@@ -811,7 +811,7 @@ reason (7.2). `config_set` refuses such a change before it is made; only
 a hand-edited file can cause it.
 
 **`:track`.** The engine never commits anything. `:track` only adds or
-removes the line `/.rk/` or `/.beads/` in the repository's
+removes the line `/.rk/`, `/.beads/` or `/.a2ui/` in the repository's
 `info/exclude`, in the directory `git rev-parse --git-common-dir` names,
 which worktrees share. It never writes `.gitignore`.
 
@@ -833,6 +833,10 @@ which worktrees share. It never writes `.gitignore`.
   follows `:track` like any other: kept out by default, with the warning
   above if Git already tracks it. A user who keeps `.beads` in Git sets
   `:track (:beads t)`.
+- `:track :a2ui` is for `.a2ui`, where a2ui (`a2ui-library-directory`)
+  saves UIs in the user's checkout. It is kept out by default, so a saved
+  UI is not committed and pushed by accident. A user who keeps saved UIs
+  in Git sets `:track (:a2ui t)`.
 - Built: `rat-kingdom-config-track-apply` (one repository, returning the
   lines added and removed and any warnings, which `status` and
   `repo_add` also show), `rat-kingdom-config-track-apply-all` (mode

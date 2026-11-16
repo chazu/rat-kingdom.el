@@ -1633,9 +1633,10 @@ setup and check: an argument list run without a shell, (\"make\" \"test\"), \
 or command names defined in commands, run in order, (lint test). agents: \
 (:worker codex :foreman claude). timeouts: seconds, (:worker 7200 :check \
 1800). attempts and max-workers: a positive integer, 5. track: (:rk nil \
-:beads t), t to keep the directory in Git, nil to keep it out. A value for \
-commands, agents, timeouts or track replaces that key's whole value at \
-this layer; sub-keys it leaves out come from the layers below.")
+:beads t :a2ui nil), t to keep the directory, .rk, .beads or .a2ui, in \
+Git, nil to keep it out. A value for commands, agents, timeouts or track \
+replaces that key's whole value at this layer; sub-keys it leaves out \
+come from the layers below.")
       (:name "repo" :type string :optional t
        :description "The repository's name. Required for the repo, epic \
 and task layers.")

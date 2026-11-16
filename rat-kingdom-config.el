@@ -59,14 +59,14 @@
 ;; `rat-kingdom-config-policy-set'; an empty one is removed.
 ;;
 ;; :track.  `rat-kingdom-config-track-apply' makes a repository's
-;; info/exclude, in its common Git directory, have /.rk/ and /.beads/
-;; when :track says to keep them out, and not when it says to track
-;; them, touching no other line; `rat-kingdom-config-track-apply-all'
-;; does every repository.  Registering a repository and turning on
-;; `rat-kingdom-mode' apply it.  Nothing is ever committed or removed
-;; from the index; Git tracking files in a directory kept out is a
-;; warning.  `rat-kingdom-config-repo-directory' makes .rk, applying
-;; :track first.
+;; info/exclude, in its common Git directory, have /.rk/, /.beads/ and
+;; /.a2ui/ when :track says to keep them out, and not when it says to
+;; track them, touching no other line;
+;; `rat-kingdom-config-track-apply-all' does every repository.
+;; Registering a repository and turning on `rat-kingdom-mode' apply it.
+;; Nothing is ever committed or removed from the index; Git tracking
+;; files in a directory kept out is a warning.
+;; `rat-kingdom-config-repo-directory' makes .rk, applying :track first.
 ;;
 ;; The engine reads its settings through `rat-kingdom-config-get' and,
 ;; for :setup and :check, `rat-kingdom-story-commands'.
@@ -159,7 +159,7 @@
      :validate rat-kingdom-config--count-problem)
     (:track
      :layers (defaults global repo)
-     :sub-keys (:rk :beads)
+     :sub-keys (:rk :beads :a2ui)
      :validate rat-kingdom-config--boolean-problem)
     (:git
      :layers (defaults global registration repo epic task)
@@ -1043,7 +1043,8 @@ if the policy was removed."
                              (and check (list :check check)))
            :attempts rat-kingdom-story-attempts
            :max-workers rat-kingdom-story-max-workers
-           :track (list :rk nil :beads (not rat-kingdom-task-br-untracked))
+           :track (list :rk nil :beads (not rat-kingdom-task-br-untracked)
+                         :a2ui nil)
            :git (list :branch rat-kingdom-config-default-branch-format
                       :integrate 'merge)))))
 
@@ -1275,7 +1276,8 @@ are: %s" role kind (string-join (rat-kingdom-agent-names) ", ")))
 
 (defconst rat-kingdom-config-track-directories
   `((:rk ".rk" "/.rk/")
-    (:beads ".beads" ,rat-kingdom-task-br-exclude-line))
+    (:beads ".beads" ,rat-kingdom-task-br-exclude-line)
+    (:a2ui ".a2ui" "/.a2ui/"))
   "The directories :track keeps in or out of Git.
 Each entry is (SUB-KEY DIRECTORY LINE): the :track sub-key, the
 directory at the top of the checkout, and the line in info/exclude
@@ -1308,13 +1310,13 @@ run git rm -r --cached %s and commit to stop tracking them, or set :track \
 SPACE holds the configuration.  REPO is a repository's name or record.
 :track is read with `rat-kingdom-config-get'.  For each directory in
 `rat-kingdom-config-track-directories', a nil sub-key adds its line,
-/.rk/ or /.beads/, to the info/exclude in the repository's common Git
-directory, which linked worktrees share, if it is missing; t removes
-that line if it is there.  No other line, and no other byte of the
-file, changes.  Nothing is committed, and nothing is removed from the
-index: if Git already tracks files in a directory to be kept out, a
-warning says so, with `display-warning' the first time, and the line
-is added anyway.  The warnings are kept for
+/.rk/, /.beads/ or /.a2ui/, to the info/exclude in the repository's
+common Git directory, which linked worktrees share, if it is missing;
+t removes that line if it is there.  No other line, and no other
+byte of the file, changes.  Nothing is committed, and nothing is
+removed from the index: if Git already tracks files in a directory
+to be kept out, a warning says so, with `display-warning' the first
+time, and the line is added anyway.  The warnings are kept for
 `rat-kingdom-config-track-warnings'.
 
 Return a property list: `:added' and `:removed', the lines added and
