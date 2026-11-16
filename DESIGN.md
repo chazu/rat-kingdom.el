@@ -1198,6 +1198,17 @@ a session (`:resume`) is given the agent of the run that started the
 session. Today only the king resumes sessions. `status` lists the agent
 kinds and the default, and shows each story's agent, as does `story_show`.
 
+The Claude model is chosen apart from the king's. `story_start` takes an
+optional `model`, a Claude model id, and so does `rat-kingdom-story-start`.
+When given, it is recorded on the story token as `:model` and on each of
+its workers' runs (and on a child story's token), like `:agent`. When a
+run's config is made, a run that is not the king's and whose agent kind is
+`claude` is given `:default-model-id`, a function that returns the run's
+`:model`, else `rat-kingdom-worker-model` (default nil). With neither, the
+config keeps agent-shell's own `:default-model-id`. The king's config and
+Codex configs are never changed. `story_show` shows the model when one was
+given.
+
 **Codex runs in full access**, the equivalent of `codex --yolo`. codex-acp
 has four session modes: `read-only`, `workspace-write`, `agent` (its
 default, auto review) and `agent-full-access` (approval policy `never`,
@@ -1247,7 +1258,7 @@ go, and it lets a role be denied built-in tools as well.
 
 | Role | Lifetime | Tools |
 |---|---|---|
-| king | long-lived, global, no worktree | built: `status` (with the tracker tasks available, each with its epic and agent), `repo_add`, `repo_sync`, `workflow_list`, `story_start` (optionally from a `task`, with an `agent`; a task's `rk-agent:` and `rk-workflow:` labels are the defaults), `story_show`, `story_diff`, `story_move`, `story_cancel`, `verdict`, `publish`, `query`, `fact_forget`, `task_create`, `epic_create`, `epic_propose` (the epic plan surface, 14.1), `epic_start` (optionally with a `feature_branch`, and a `foreman`), `epic_pause`, `epic_resume`, `epic_cancel`, `epic_retry`, `epic_show`, `epic_diff`, `epic_verdict` (section 10), `tell`, `foreman_start`, `foreman_stop`, `config_show` and `config_set` (7.3), `doc_list`, `doc_show` and `doc_forget` (7.1), `story_signal` (7.1); `story_start` also takes a rarely needed `target`; built (step 8): `mixins` and `git` on `repo_add` |
+| king | long-lived, global, no worktree | built: `status` (with the tracker tasks available, each with its epic and agent), `repo_add`, `repo_sync`, `workflow_list`, `story_start` (optionally from a `task`, with an `agent` and a `model`; a task's `rk-agent:` and `rk-workflow:` labels are the defaults), `story_show`, `story_diff`, `story_move`, `story_cancel`, `verdict`, `publish`, `query`, `fact_forget`, `task_create`, `epic_create`, `epic_propose` (the epic plan surface, 14.1), `epic_start` (optionally with a `feature_branch`, and a `foreman`), `epic_pause`, `epic_resume`, `epic_cancel`, `epic_retry`, `epic_show`, `epic_diff`, `epic_verdict` (section 10), `tell`, `foreman_start`, `foreman_stop`, `config_show` and `config_set` (7.3), `doc_list`, `doc_show` and `doc_forget` (7.1), `story_signal` (7.1); `story_start` also takes a rarely needed `target`; built (step 8): `mixins` and `git` on `repo_add` |
 | rat (worker) | one task | built: `finish`, `block`, `note_fact`, `inbox`, `read_doc` |
 | researcher | one task | built: `write_doc`, `read_doc`, `note_fact`, `inbox`, `block`, `finish` |
 | foreman | one epic, optional | built: `status` (its epic: the `epic_show` view and its stories' lines), `story_show`, `story_diff`, `verdict`, `tell`, `query`, `task_create` (its epic is the parent), `epic_retry`, `story_start` (for a task of its epic), `report` (to the king); every one but `query` limited to its epic |

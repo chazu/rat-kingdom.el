@@ -325,6 +325,14 @@ check, a merge conflict, a review that asks for changes or an Emacs restart,
 runs the same agent, even if the default has changed since. `status` and
 `story_show` say which agent each story has.
 
+Workers and foremen that run Claude Code use the model in
+`rat-kingdom-worker-model`, a Claude model id such as `"claude-opus-5-5"`.
+It is nil by default, which leaves the model to agent-shell and Claude Code.
+A story can name its own model: `story_start` takes `model`, which wins over
+`rat-kingdom-worker-model` for every worker of that story. `story_show` shows
+it. The setting has no effect on Codex workers or on the king, so `/model` in
+the king's session works as before.
+
 Codex runs in full access, the equivalent of `codex --yolo`: the codex-acp
 session mode `agent-full-access`, which never asks for approval and has no
 sandbox. rat-kingdom sets this on the sessions it starts. Your own

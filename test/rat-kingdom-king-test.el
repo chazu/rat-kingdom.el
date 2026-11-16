@@ -127,6 +127,34 @@ codex" (car answer))))
                             :description)))
         (should-not (seq-contains-p (plist-get schema :required) "agent"))))))
 
+(ert-deftest rat-kingdom-king-test-chooses-the-model ()
+  (rat-kingdom-story-test-with-repo (space _path)
+    (rat-kingdom-king-test--start space)
+    ;; The king's own run names no model.
+    (should-not (plist-get (rat-kingdom-run-get space "king") :model))
+    (let* ((answer (rat-kingdom-king-test--ok
+                    "story_start" '(repo . "demo") '(title . "Add a file")
+                    '(description . "Call it feature.txt.")
+                    '(model . "claude-opus-5-5")))
+           (id (progn (string-match "Started \\(S-[0-9a-f]+\\)" answer)
+                      (match-string 1 answer))))
+      (rat-kingdom-reaction-run space)
+      (should (equal (plist-get (rat-kingdom-run-get space (concat id ".1"))
+                                :model)
+                     "claude-opus-5-5"))
+      (should (string-search "\nModel: claude-opus-5-5\n"
+                             (rat-kingdom-king-test--ok "story_show"
+                                                        `(story . ,id)))))
+    ;; Left out, story_show names none.
+    (let* ((answer (rat-kingdom-king-test--ok
+                    "story_start" '(repo . "demo") '(title . "Another")
+                    '(description . "D")))
+           (id (progn (string-match "Started \\(S-[0-9a-f]+\\)" answer)
+                      (match-string 1 answer))))
+      (should-not (string-search "\nModel: "
+                                 (rat-kingdom-king-test--ok "story_show"
+                                                            `(story . ,id)))))))
+
 (ert-deftest rat-kingdom-king-test-resumes-with-the-same-agent ()
   (rat-kingdom-story-test-with-repo (space _path)
     (rat-kingdom-king-test--start space)

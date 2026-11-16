@@ -24,7 +24,9 @@
 ;; `rat-kingdom-agent-shell-define-agent'.  A run that names none, such as
 ;; the king's, gets Claude Code.  A story's workers run the agent the
 ;; story was started with, `rat-kingdom-default-agent' unless it named
-;; one.  Codex runs in its full-access mode, approval policy never and
+;; one.  A worker or foreman that runs Claude Code runs the model its
+;; story was started with, else `rat-kingdom-worker-model', else
+;; agent-shell's default; the king always runs agent-shell's default.  Codex runs in its full-access mode, approval policy never and
 ;; no sandbox, the equivalent of `codex --yolo'.
 ;;
 ;; Each run's shell is given the rat-kingdom tool endpoint with the run's
@@ -114,6 +116,16 @@ always Claude Code."
   :type '(choice (const :tag "Claude Code" claude)
                  (const :tag "Codex, in full-access mode" codex)
                  (symbol :tag "Another defined agent kind"))
+  :group 'rat-kingdom)
+
+(defcustom rat-kingdom-worker-model nil
+  "The Claude model id the workers run, or nil for agent-shell's default.
+An id such as \"claude-opus-5-5\".  It applies to the workers and
+foremen that run the `claude' agent kind only: other kinds, such as
+Codex, are left alone, and the king is never affected.  A story
+started with a model of its own runs that model instead."
+  :type '(choice (const :tag "The agent-shell default" nil)
+                 (string :tag "Model id"))
   :group 'rat-kingdom)
 
 (defconst rat-kingdom-agent-shell-fallback-agent "claude"
@@ -473,16 +485,39 @@ A worker's, a rat's or a researcher's, starts with its role."
       (format "%s %s" (plist-get run :role) (plist-get run :id))
     (plist-get run :id)))
 
+(defun rat-kingdom-agent-shell--model (run)
+  "Return the Claude model id RUN is to run, or nil for the default.
+It is RUN's `:model', the model of its story, or else
+`rat-kingdom-worker-model'.  It is nil for the king's run and for a
+run whose agent kind is not `claude'."
+  (let ((model (seq-find (lambda (model)
+                           (and (stringp model) (not (string-empty-p model))))
+                         (list (plist-get run :model)
+                               rat-kingdom-worker-model))))
+    (and model
+         (not (equal (format "%s" (plist-get run :role)) "king"))
+         (equal (rat-kingdom-agent-name
+                 (or (plist-get run :agent)
+                     rat-kingdom-agent-shell-fallback-agent))
+                "claude")
+         model)))
+
 (defun rat-kingdom-agent-shell-run-config (run token)
   "Return the agent config for RUN, whose tool endpoint token is TOKEN.
 It is the config of RUN's `:agent', with the push guards, the run's
-buffer name and its MCP servers."
-  (rat-kingdom-agent-shell--override
-   (rat-kingdom-agent-shell--guard
-    (rat-kingdom-agent-shell-config (plist-get run :agent))
-    (plist-get run :id))
-   :buffer-name (rat-kingdom-agent-shell--buffer-name run)
-   :mcp-servers (rat-kingdom-agent-shell--servers token)))
+buffer name and its MCP servers.  A worker's or foreman's Claude Code
+is given its model, if one is chosen; see
+`rat-kingdom-agent-shell--model'."
+  (let ((config (rat-kingdom-agent-shell--override
+                 (rat-kingdom-agent-shell--guard
+                  (rat-kingdom-agent-shell-config (plist-get run :agent))
+                  (plist-get run :id))
+                 :buffer-name (rat-kingdom-agent-shell--buffer-name run)
+                 :mcp-servers (rat-kingdom-agent-shell--servers token))))
+    (if-let* ((model (rat-kingdom-agent-shell--model run)))
+        (rat-kingdom-agent-shell--override
+         config :default-model-id (lambda () model))
+      config)))
 
 (defun rat-kingdom-agent-shell-start (run prompt)
   "Start an agent-shell for RUN, send it PROMPT and return its buffer.
