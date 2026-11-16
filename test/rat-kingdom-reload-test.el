@@ -30,6 +30,8 @@
          (rat-kingdom-workflow--table
           (copy-alist rat-kingdom-workflow--table))
          (rat-kingdom-mcp--tools (copy-sequence rat-kingdom-mcp--tools))
+         (rat-kingdom-agent-shell--defined-agents
+          (copy-alist rat-kingdom-agent-shell--defined-agents))
          (rat-kingdom-run--handles (make-hash-table :test #'equal))
          (rat-kingdom-mode nil)
          (inhibit-message t))
@@ -77,14 +79,34 @@
                        rat-kingdom-reaction--registry)))
       (should (rat-kingdom-reload-test--once-each
                (mapcar #'car rat-kingdom-workflow--table)))
-      (should (rat-kingdom-reload-test--once-each
-               (mapcar (lambda (tool) (plist-get tool :name))
-                       rat-kingdom-mcp--tools)))
+      ;; A name may be defined for several roles, but no role is
+      ;; offered it twice.
+      (dolist (role '(king rat foreman))
+        (should (rat-kingdom-reload-test--once-each
+                 (rat-kingdom-mcp-tool-names role))))
       (should (eql (length rat-kingdom-reaction--registry) reactions))
       (should (eql (length rat-kingdom-workflow--table) workflows))
       (should (eql (length rat-kingdom-mcp--tools) tools))
       (should (eq rat-kingdom-run--handles handles))
       (should (eq (rat-kingdom-run-handle "S-1.1") 'handle)))))
+
+(ert-deftest rat-kingdom-reload-test-keeps-agent-kinds ()
+  (rat-kingdom-reload-test--isolated
+    (setq rat-kingdom-agent-shell--defined-agents nil)
+    (rat-kingdom-agent-shell-define-agent 'other #'ignore)
+    (rat-kingdom-agent-shell-define-agent 'other #'identity)
+    (rat-kingdom-reload)
+    (rat-kingdom-reload)
+    ;; The built-in kinds are there once each, and so is one defined
+    ;; before the reload, as last defined.
+    (should (equal (rat-kingdom-agent-names) '("other" "claude" "codex")))
+    (should (eq (alist-get 'other (rat-kingdom-agent-shell-agents))
+                #'identity))
+    (should (eq (alist-get 'codex (rat-kingdom-agent-shell-agents))
+                'rat-kingdom-agent-shell-codex-config))
+    ;; Loading the package does not load Codex's or Claude's adapter.
+    (should-not (featurep 'agent-shell-openai))
+    (should (equal (rat-kingdom-agent-name nil) "claude"))))
 
 (ert-deftest rat-kingdom-reload-test-says-what-happened-to-the-king ()
   (rat-kingdom-reload-test--isolated

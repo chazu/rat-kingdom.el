@@ -13,9 +13,10 @@
 ;; repositories rat-kingdom works in.
 ;;
 ;; A registered repository is a `repo' tuple.  Registering one creates
-;; its target branch, by default rk/integration, from HEAD.  Finished
-;; work is merged into the target and nowhere else: the user's checkout,
-;; index, stash and hooks are never touched.
+;; its target branch, by default rk/integration, from HEAD, and its br
+;; workspace, kept out of Git, if it has none (see rat-kingdom-task.el).
+;; Finished work is merged into the target and nowhere else: the user's
+;; checkout, index, stash and hooks are never touched.
 ;;
 ;; The one push is `rat-kingdom-git-publish', which the user, or the king
 ;; on the user's explicit request, calls to push one branch to one
@@ -100,10 +101,88 @@ Signal `rat-kingdom-git-error' if it fails."
   (rat-kingdom-git-ok-p directory "merge-base" "--is-ancestor"
                         ancestor descendant))
 
+;;;; info/exclude
+
+;; rat-kingdom keeps its own directories out of Git with lines in
+;; info/exclude, never in .gitignore.  These functions add and remove
+;; one exact line and leave every other byte of the file as it was: the
+;; file is read and written without any decoding or conversion.
+
+(defun rat-kingdom-git-exclude-file (directory)
+  "Return the info/exclude file of the Git repository DIRECTORY is in.
+It is in the common Git directory, which linked worktrees share."
+  (let ((top (rat-kingdom-git directory "rev-parse" "--show-toplevel")))
+    (expand-file-name "info/exclude"
+                      (expand-file-name
+                       (rat-kingdom-git top "rev-parse" "--git-common-dir")
+                       top))))
+
+(defun rat-kingdom-git--exclude-read (file)
+  "Insert the bytes of FILE, if it exists, into a unibyte current buffer."
+  (set-buffer-multibyte nil)
+  (when (file-exists-p file)
+    (insert-file-contents-literally file)))
+
+(defun rat-kingdom-git--exclude-write (file)
+  "Write the current buffer's bytes to FILE as they are."
+  (let ((coding-system-for-write 'no-conversion))
+    (write-region nil nil file nil 'silent)))
+
+(defun rat-kingdom-git-excluded-p (file line)
+  "Return non-nil if the exclude FILE has LINE, exactly, as one of its lines."
+  (and (file-exists-p file)
+       (with-temp-buffer
+         (rat-kingdom-git--exclude-read file)
+         (member (encode-coding-string line 'utf-8)
+                 (split-string (buffer-string) "\n")))))
+
+(defun rat-kingdom-git-exclude (file line)
+  "Add LINE to the end of the exclude FILE unless it has it.
+Create FILE and its directory if need be.  If FILE does not end in a
+newline, one is added before LINE.  Nothing else changes.  Return
+non-nil if LINE was added."
+  (unless (rat-kingdom-git-excluded-p file line)
+    (make-directory (file-name-directory file) t)
+    (with-temp-buffer
+      (rat-kingdom-git--exclude-read file)
+      (goto-char (point-max))
+      (unless (or (bobp) (eq (char-before) ?\n))
+        (insert "\n"))
+      (insert (encode-coding-string line 'utf-8) "\n")
+      (rat-kingdom-git--exclude-write file))
+    t))
+
+(defun rat-kingdom-git-unexclude (file line)
+  "Take every line of the exclude FILE that is exactly LINE out of it.
+Each goes with its newline; nothing else changes.  Return non-nil if
+there was one."
+  (when (file-exists-p file)
+    (with-temp-buffer
+      (rat-kingdom-git--exclude-read file)
+      (goto-char (point-min))
+      (let ((pattern (concat "^" (regexp-quote (encode-coding-string line 'utf-8))
+                             "\\(?:\n\\|\\'\\)"))
+            (case-fold-search nil)
+            (removed nil))
+        (while (re-search-forward pattern nil t)
+          (replace-match "" t t)
+          (setq removed t))
+        (when removed
+          (rat-kingdom-git--exclude-write file))
+        removed))))
+
 ;;;; Repositories
 
+(declare-function rat-kingdom-task-br-ensure "rat-kingdom-task"
+                  (repo &optional space))
+(declare-function rat-kingdom-config-validate "rat-kingdom-config"
+                  (plist layer))
+(declare-function rat-kingdom-config-track-apply "rat-kingdom-config"
+                  (space repo))
+
 (cl-defun rat-kingdom-repo-add (space path
-                                      &key name target check setup workflow)
+                                      &key name target check setup workflow
+                                      task-prefix git mixins)
   "Register the repository at PATH in SPACE and return its record.
 NAME defaults to the directory's name.  TARGET is the branch finished
 work is merged into, by default `rat-kingdom-git-default-target'; it
@@ -112,34 +191,78 @@ list of strings, that must succeed before work is merged; it is run
 without a shell.  SETUP is a command of the same kind run in each new
 worktree before a worker starts in it and before the check, for example
 to install dependencies.  WORKFLOW names the workflow its stories follow
-unless they say otherwise.  Registering a name again replaces its
-record."
+unless they say otherwise.  GIT is the :git configuration of the
+registration layer, a property list with `:branch' and `:integrate'
+\(rat-kingdom-config.el).  MIXINS is a list of mixin names, symbols,
+applied to every workflow its stories follow (the registration layer's
+`:mixins').  Registering a name again replaces its record.
+
+Every registered repository has a br workspace for its tasks.  If the
+checkout has none, one is created by `rat-kingdom-task-br-ensure',
+with TASK-PREFIX, by default NAME, as its issue prefix, and kept out of
+Git unless the configuration's :track :beads says to track it; the
+record returned then has `:task-initialized' t, which is not stored.
+If that fails, nothing is registered, no target branch is created, and
+the error is signalled.
+
+The configuration's :track is then applied, by
+`rat-kingdom-config-track-apply': /.rk/ and /.beads/ are added to or
+taken out of the repository's info/exclude.  If it warns that Git
+already tracks files in a directory meant to be kept out, the record
+returned has the warnings as `:track-warnings', which is not stored."
+  (require 'rat-kingdom-task)
+  (require 'rat-kingdom-config)
   (let* ((top (rat-kingdom-git path "rev-parse" "--show-toplevel"))
          (name (or name (file-name-nondirectory (directory-file-name top))))
-         (target (or target rat-kingdom-git-default-target)))
+         (target (or target rat-kingdom-git-default-target))
+         (task-prefix (and task-prefix (format "%s" task-prefix))))
     (unless (string-match-p "\\`[[:alnum:]][[:alnum:]._-]*\\'" name)
       (error "A repository name is letters, digits, dots, dashes: %S" name))
     (unless (and (listp check) (cl-every #'stringp check))
       (error "A check is a list of strings: %S" check))
     (unless (and (listp setup) (cl-every #'stringp setup))
       (error "A setup is a list of strings: %S" setup))
+    (unless (and (proper-list-p mixins)
+                 (cl-every (lambda (name)
+                             (and name (symbolp name) (not (eq name t))
+                                  (not (keywordp name))))
+                           mixins))
+      (error "Mixins are a list of names such as (no-review): %S" mixins))
+    (when (and task-prefix (string-empty-p task-prefix))
+      (error "A task prefix may not be empty"))
+    (when-let* ((problems (and git (rat-kingdom-config-validate
+                                    (list :git git) 'registration))))
+      (error "%s" (string-join problems "; ")))
     (unless (rat-kingdom-git-ok-p top "rev-parse" "--verify" "--quiet" "HEAD")
       (error "%s has no commits yet" top))
-    (unless (rat-kingdom-git-ok-p top "rev-parse" "--verify" "--quiet"
-                                  (concat "refs/heads/" target))
-      (rat-kingdom-git top "branch" target "HEAD"))
-    (rat-kingdom-space-put space 'repo :scope name :identity name
-                           :payload (list :path top :target target
-                                          :check check :setup setup
-                                          :workflow (and workflow
-                                                         (format "%s" workflow)))
-                           :actor "user")
-    (rat-kingdom-repo-get space name)))
+    (let* ((record (list :name name :path top :task-prefix task-prefix))
+           (initialized (rat-kingdom-task-br-ensure record space))
+           (warnings (plist-get (rat-kingdom-config-track-apply space record)
+                                :warnings)))
+      (unless (rat-kingdom-git-ok-p top "rev-parse" "--verify" "--quiet"
+                                    (concat "refs/heads/" target))
+        (rat-kingdom-git top "branch" target "HEAD"))
+      (rat-kingdom-space-put space 'repo :scope name :identity name
+                             :payload (append
+                                       (list :path top :target target
+                                             :check check :setup setup
+                                             :workflow (and workflow
+                                                            (format "%s"
+                                                                    workflow))
+                                             :task-prefix task-prefix
+                                             :mixins (mapcar #'symbol-name
+                                                             mixins))
+                                       (and git (list :git git)))
+                             :actor "user")
+      (append (rat-kingdom-repo-get space name)
+              (and initialized (list :task-initialized t))
+              (and warnings (list :track-warnings warnings))))))
 
 (defun rat-kingdom-repo-get (space name)
   "Return the record of the repository NAME in SPACE, or nil.
 The record is a property list: `:name', `:path', `:target', `:check',
-`:setup' and `:workflow'."
+`:setup', `:workflow', `:git' and `:task-prefix', the issue prefix its br
+workspace was created with, or nil for its name."
   (when-let* ((tuple (rat-kingdom-space-rd
                       space (list 'repo :scope name :identity name))))
     (append (list :name (plist-get tuple :identity))

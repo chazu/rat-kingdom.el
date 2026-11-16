@@ -12,6 +12,9 @@
 (require 'url)
 (require 'rat-kingdom-story)
 (require 'rat-kingdom-king)
+(require 'rat-kingdom-task)
+(require 'rat-kingdom-fact)
+(require 'rat-kingdom-message)
 
 (defvar rat-kingdom-story-test--started nil
   "The runs the fake backend started, newest first, as (RUN PROMPT TOKEN).")
@@ -31,6 +34,9 @@
 (defvar rat-kingdom-story-test--now nil
   "If non-nil, the time the space is told it is.")
 
+(defvar rat-kingdom-story-test--br nil
+  "The directory of the fake br the repository fixture uses.")
+
 (defun rat-kingdom-story-test--git (directory &rest args)
   "Run Git with ARGS in DIRECTORY."
   (apply #'rat-kingdom-git directory args))
@@ -42,11 +48,69 @@
   (rat-kingdom-story-test--git directory "add" "-A")
   (rat-kingdom-story-test--git directory "commit" "-m" message))
 
+(defun rat-kingdom-story-test-fake-br (directory)
+  "Write a fake br into DIRECTORY, which must exist, and return its file.
+Each call appends its arguments, one line, to calls in DIRECTORY.
+`init --prefix P' makes .beads, with a .gitignore, a database, an
+issue file and a config naming P, or naming the text of the file
+force-prefix in DIRECTORY if there is one; it fails if DIRECTORY has a
+file init-fails.  `config get issue_prefix' prints the config's prefix
+as JSON.  `create' prints a new issue whose id is the prefix and the
+number of creates so far, as demo-1, demo-2; the create whose number is
+in the file create-fails-at fails, and so does every `dep' after there
+is a file dep-fails.  Anything else prints an empty JSON list."
+  (let ((program (expand-file-name "br" directory)))
+    (with-temp-file program
+      (insert "#!/bin/sh\n"
+              "dir=" (shell-quote-argument (expand-file-name directory)) "\n"
+              "echo \"$*\" >> \"$dir/calls\"\n"
+              "case \"$1\" in\n"
+              "init)\n"
+              "  if [ -e \"$dir/init-fails\" ]; then\n"
+              "    echo 'Error: invalid prefix' >&2; exit 2; fi\n"
+              "  prefix=\"$3\"\n"
+              "  [ -e \"$dir/force-prefix\" ] && prefix=$(cat \"$dir/force-prefix\")\n"
+              "  mkdir .beads || exit 1\n"
+              "  printf '*.db\\n*.db-wal\\n' > .beads/.gitignore\n"
+              "  : > .beads/beads.db\n"
+              "  : > .beads/issues.jsonl\n"
+              "  printf '%s\\n' \"$prefix\" > .beads/prefix\n"
+              "  echo \"Prefix set to: $prefix\" ;;\n"
+              "config)\n"
+              "  printf '{\"key\":\"issue_prefix\",\"value\":\"%s\"}\\n' "
+              "\"$(cat .beads/prefix)\" ;;\n"
+              "create)\n"
+              "  echo x >> \"$dir/created\"\n"
+              "  n=$(grep -c '' \"$dir/created\")\n"
+              "  if [ \"$n\" = \"$(cat \"$dir/create-fails-at\" 2>/dev/null)\" ]; then\n"
+              "    echo 'Error: database is locked' >&2; exit 4; fi\n"
+              "  printf '{\"id\":\"%s-%s\",\"status\":\"open\"}\\n' "
+              "\"$(cat .beads/prefix)\" \"$n\" ;;\n"
+              "dep)\n"
+              "  if [ -e \"$dir/dep-fails\" ]; then\n"
+              "    echo 'Error: cycle detected' >&2; exit 5; fi\n"
+              "  printf '{\"status\":\"ok\",\"issue_id\":\"%s\",\"depends_on_id\":\"%s\"}\\n' "
+              "\"$3\" \"$4\" ;;\n"
+              "*) echo '[]' ;;\n"
+              "esac\n"))
+    (set-file-modes program #o755)
+    program))
+
+(defun rat-kingdom-story-test-br-calls (directory)
+  "Return the calls the fake br in DIRECTORY was given, oldest first."
+  (let ((file (expand-file-name "calls" directory)))
+    (and (file-exists-p file)
+         (with-temp-buffer
+           (insert-file-contents file)
+           (split-string (buffer-string) "\n" t)))))
+
 (defmacro rat-kingdom-story-test-with-repo (vars &rest body)
   "Run BODY with a fresh space and repository.
 VARS is (SPACE PATH): the space and the repository's directory.  The
 repository is registered as \"demo\" with no check.  Stories follow
-the workflow story-lite unless they say otherwise."
+the workflow story-lite unless they say otherwise.  br is a fake, made
+by `rat-kingdom-story-test-fake-br' in the directory
+`rat-kingdom-story-test--br'."
   (declare (indent 1) (debug t))
   (let ((root (make-symbol "root")))
     `(let* ((,root (file-name-as-directory
@@ -65,6 +129,14 @@ the workflow story-lite unless they say otherwise."
             (rat-kingdom-story-test--busy nil)
             (rat-kingdom-story-test--events nil)
             (rat-kingdom-story-test--now nil)
+            (rat-kingdom-story-test--br (expand-file-name "fake-br/" ,root))
+            (rat-kingdom-task-br-program
+             (progn (make-directory rat-kingdom-story-test--br)
+                    (rat-kingdom-story-test-fake-br rat-kingdom-story-test--br)))
+            (rat-kingdom-task-br-untracked t)
+            (rat-kingdom-task--workspace-errors nil)
+            (rat-kingdom-config--files (make-hash-table :test #'equal))
+            (rat-kingdom-config--track-warnings (make-hash-table :test #'equal))
             (rat-kingdom-space-now-function
              (lambda () (or rat-kingdom-story-test--now (float-time))))
             (rat-kingdom-story-event-functions
@@ -358,6 +430,64 @@ Return what finish answered."
                                  :payload)
                       :value)
                      "pass")))))
+
+(defun rat-kingdom-story-test--agent (run-id)
+  "Return the agent the run RUN-ID was started with."
+  (plist-get (car (cl-find run-id rat-kingdom-story-test--started
+                           :key (lambda (entry) (plist-get (car entry) :id))
+                           :test #'equal))
+             :agent))
+
+(ert-deftest rat-kingdom-story-test-workers-run-the-story-s-agent ()
+  (rat-kingdom-story-test-with-repo (space path)
+    (rat-kingdom-repo-add space path
+                          :check '("sh" "-c" "test -f wanted.txt"))
+    ;; Named, the agent is recorded on the story and given to its worker.
+    (rat-kingdom-story-start space "demo" "Add the wanted file" nil "S-1"
+                             nil nil "codex")
+    (should (equal (rat-kingdom-story-test--get space "S-1" :agent) "codex"))
+    (rat-kingdom-reaction-run space)
+    (should (equal (rat-kingdom-story-test--agent "S-1.1") "codex"))
+    (should (equal (plist-get (rat-kingdom-run-get space "S-1.1") :agent)
+                   "codex"))
+    ;; A failed check gives the story a new worker with the same agent.
+    (rat-kingdom-story-test--work space "S-1" "other.txt")
+    (rat-kingdom-story-test--settle space "S-1")
+    (should (equal (rat-kingdom-story-test--get space "S-1" :run) "S-1.2"))
+    (should (equal (rat-kingdom-story-test--agent "S-1.2") "codex"))
+    ;; So does a worker cut off by a restart, even if the default has
+    ;; changed meanwhile.
+    (let ((file (expand-file-name "space.db" rat-kingdom-directory))
+          (rat-kingdom-default-agent 'claude))
+      (rat-kingdom-space-close space)
+      (setq space (rat-kingdom-space-open file)
+            rat-kingdom-space--default space)
+      (clrhash rat-kingdom-run--handles)
+      (clrhash rat-kingdom-mcp--grants)
+      (should (equal (plist-get (rat-kingdom-story-reconcile space) :runs)
+                     '("S-1.2")))
+      (rat-kingdom-reaction-run space)
+      (should (equal (rat-kingdom-story-test--get space "S-1" :run) "S-1.3"))
+      (should (equal (rat-kingdom-story-test--agent "S-1.3") "codex")))
+    ;; Unnamed, it is `rat-kingdom-default-agent', Claude out of the box.
+    (rat-kingdom-story-start space "demo" "Another" nil "S-2")
+    (should (equal (rat-kingdom-story-test--get space "S-2" :agent) "claude"))
+    (let ((rat-kingdom-default-agent 'codex))
+      (rat-kingdom-story-start space "demo" "A third" nil "S-3")
+      (should (equal (rat-kingdom-story-test--get space "S-3" :agent) "codex"))
+      (rat-kingdom-story-start space "demo" "A fourth" nil "S-4"
+                               nil nil 'claude)
+      (should (equal (rat-kingdom-story-test--get space "S-4" :agent)
+                     "claude")))
+    ;; An unknown agent is refused, naming the known ones, and nothing
+    ;; is started.
+    (let ((err (should-error (rat-kingdom-story-start space "demo" "No" nil
+                                                      "S-5" nil nil "gpt"))))
+      (should (string-search "no agent called gpt"
+                             (error-message-string err)))
+      (should (string-search "claude, codex" (error-message-string err))))
+    (should-not (rat-kingdom-story-get space "S-5"))
+    (should-not (rat-kingdom-reaction-failures space))))
 
 (ert-deftest rat-kingdom-story-test-gives-up-after-enough-workers ()
   (rat-kingdom-story-test-with-repo (space path)
@@ -683,7 +813,7 @@ Return what finish answered."
                            '((jsonrpc . "2.0") (id . 7) (method . "tools/list")))
                           :result)
                          :tools))))
-      (should (equal (names 'rat) '("finish" "block")))
+      (should (equal (names 'rat) '("finish" "block" "note_fact" "inbox" "read_doc")))
       (should (member "story_start" (names 'king)))
       (should-not (member "finish" (names 'king)))
       (should-not (names 'nobody)))
@@ -730,7 +860,7 @@ Return what finish answered."
                                        (json-parse-string
                                         (cdr answer) :object-type 'alist
                                         :array-type 'list))))
-                             '("finish" "block"))))
+                             '("finish" "block" "note_fact" "inbox" "read_doc"))))
             (should (string-search
                      "404" (car (post (concat url "x") "{\"id\":1}"))))
             (should (string-search "400" (car (post url "not json"))))
@@ -745,20 +875,24 @@ Return what finish answered."
 
 (ert-deftest rat-kingdom-story-test-failed-start-stops-the-story ()
   (rat-kingdom-story-test-with-repo (space path)
-    ;; The branch the story would use already exists.
-    (rat-kingdom-story-test--git path "branch" "rats/S-1" "main")
-    (rat-kingdom-story-start space "demo" "Add a file" nil "S-1")
-    (rat-kingdom-reaction-run space)
-    (should (equal (rat-kingdom-story-test--place space "S-1") "blocked"))
-    (should (string-search "Step implement could not be begun"
-                           (rat-kingdom-story-test--get space "S-1" :reason)))
-    (should-not (rat-kingdom-run-list space))
-    (should-not rat-kingdom-story-test--started)
-    (should-not (rat-kingdom-reaction-failures space))
-    (should-not (file-exists-p
-                 (expand-file-name "worktrees/demo/S-1" rat-kingdom-directory)))
-    ;; With the branch out of the way, moving it back starts the worker.
-    (rat-kingdom-story-test--git path "branch" "-D" "rats/S-1")
+    ;; A file is where the story's worktree would go.
+    (let ((worktree (expand-file-name "worktrees/demo/S-1"
+                                      rat-kingdom-directory)))
+      (make-directory (file-name-directory worktree) t)
+      (with-temp-file worktree (insert "in the way\n"))
+      (rat-kingdom-story-start space "demo" "Add a file" nil "S-1")
+      (rat-kingdom-reaction-run space)
+      (should (equal (rat-kingdom-story-test--place space "S-1") "blocked"))
+      (should (string-search "Step implement could not be begun"
+                             (rat-kingdom-story-test--get space "S-1" :reason)))
+      (should-not (rat-kingdom-run-list space))
+      (should-not rat-kingdom-story-test--started)
+      (should-not (rat-kingdom-reaction-failures space))
+      (should-not (file-directory-p worktree))
+      (should-not (rat-kingdom-git-ok-p path "rev-parse" "--verify" "--quiet"
+                                        "refs/heads/rats/S-1"))
+      ;; With the file out of the way, moving it back starts the worker.
+      (delete-file worktree))
     (rat-kingdom-story-move space "S-1" "ready")
     (rat-kingdom-reaction-run space)
     (should (equal (rat-kingdom-story-test--get space "S-1" :awaiting) "worker"))

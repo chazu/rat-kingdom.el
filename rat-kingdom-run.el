@@ -33,7 +33,11 @@
 ;; `rat-kingdom-run-backend'.  The default is agent-shell.  Tests use a
 ;; backend that starts nothing.
 ;;
-;; Two tools are offered to a worker: `finish' and `block'.
+;; Two tools are offered to a worker here: `finish' and `block'.
+;; rat-kingdom-fact.el adds `note_fact', and rat-kingdom-message.el
+;; `inbox'.  A worker is a rat, which commits code, or a researcher,
+;; which writes docs; rat-kingdom-doc.el gives the researcher its own
+;; `finish' and its doc tools.
 ;;
 ;; A run need not belong to a story.  The king is a run too; see
 ;; rat-kingdom-king.el.
@@ -65,7 +69,9 @@ Nil means `rat-kingdom-run-default-backend'.
 `:start' is called with the run's record and its prompt.  It starts an
 agent in the run's worktree, sends it the prompt, and returns a handle.
 If the record has `:resume', a session id, it should take that session
-up again instead of starting a new one.  It should arrange for
+up again instead of starting a new one.  `:agent' in the record names
+the kind of agent to run, such as \"claude\" or \"codex\"; nil means the
+backend's default.  It should arrange for
 `rat-kingdom-run-exited' to be called if the agent's session ends, and
 for `rat-kingdom-run-idle-functions' to run when the agent ends a turn.
 `:stop' is called with the handle.  `:send' is called with the handle
@@ -106,10 +112,52 @@ work around that.
 rat-kingdom server with a summary and the checks you ran. Your worktree \
 must be clean.
 - If you cannot finish, call the `block' tool and say what you need.
+- When you learn something a later worker in this repository would want to \
+know, such as a convention, a pitfall, how to build or test something, or \
+where something lives, record it with the `note_fact' tool. Do not use it \
+for progress reports on this task.
+- Messages from the king arrive between your turns; during a long turn, \
+check `inbox` now and then, and always before you call `finish`.
 - After `finish' or `block', stop. Do not start other work."
   "What every worker is told before its task."
   :type 'string
   :group 'rat-kingdom)
+
+(defcustom rat-kingdom-run-researcher-instructions
+  "You are a researcher in a rat-kingdom swarm. You have one task: find \
+things out and write them down. Do it and nothing else.
+
+Rules:
+- Investigate the task in your worktree, and elsewhere as you need to: \
+read code, run read-only commands, look things up.
+- Write what you find with the `write_doc' tool of the rat-kingdom server: \
+a title and a Markdown body, and a topic if one fits. It answers with the \
+doc's id. To revise a doc, call `write_doc' again with its id. A doc is \
+read by the king, who reviews it, and once approved by every later worker \
+in this repository, so make each one stand on its own.
+- Read a doc you are told of with `read_doc'.
+- When you learn something a later worker in this repository would want to \
+know, such as a convention, a pitfall, how to build or test something, or \
+where something lives, record it with the `note_fact' tool.
+- Do not commit code. Your docs are your work; your worktree is for looking.
+- When your docs are written, call the `finish' tool with a summary and the \
+checks you ran, if any. It fails, and says why, if you have written no doc.
+- If you cannot finish, call the `block' tool and say what you need.
+- Messages from the king arrive between your turns; during a long turn, \
+check `inbox` now and then, and always before you call `finish`.
+- After `finish' or `block', stop. Do not start other work."
+  "What every researcher is told before its task.
+A researcher is the worker of a `research' story (rat-kingdom-doc.el)."
+  :type 'string
+  :group 'rat-kingdom)
+
+(defun rat-kingdom-run-instructions (role)
+  "Return what a worker in ROLE, a symbol or string, is told before its task.
+A researcher gets `rat-kingdom-run-researcher-instructions'; any other
+worker `rat-kingdom-run-rat-instructions'."
+  (if (equal (format "%s" role) "researcher")
+      rat-kingdom-run-researcher-instructions
+    rat-kingdom-run-rat-instructions))
 
 (defcustom rat-kingdom-run-ignored-paths '(".agent-shell/")
   "Paths in a worktree that the harness writes for itself.
@@ -144,21 +192,26 @@ A record is the tuple's payload with `:id', `:repo' and `:story'."
            space (if story (list 'run :owner story) '(run)))))
 
 (cl-defun rat-kingdom-run-create (space &key id (repo "system") story role
-                                        worktree branch target prompt resume)
+                                        agent worktree branch target prompt
+                                        resume)
   "Record a new run in SPACE, to be started by `rat-kingdom-run-launch'.
-ID names the run.  It belongs to STORY in REPO, plays ROLE, and works
-in WORKTREE on BRANCH, which was cut from TARGET.  PROMPT is what its
-agent is told.  RESUME is the id of an agent session to take up again.
-A run of that name that is over is replaced.  Return the record."
+ID names the run.  It belongs to STORY in REPO, plays ROLE, runs the
+agent AGENT, and works in WORKTREE on BRANCH, which was cut from
+TARGET.  AGENT names an agent kind, such as \"claude\" or \"codex\"; nil
+leaves it to the backend, which for agent-shell means Claude Code.
+PROMPT is what its agent is told.  RESUME is the id of an agent
+session to take up again, which must be one AGENT started.  A run of
+that name that is over is replaced.  Return the record."
   (when-let* ((old (rat-kingdom-run-get space id)))
     (when (or (rat-kingdom-run-live-p id)
               (equal (plist-get old :state) "starting"))
       (error "There is already a run called %s" id)))
   (rat-kingdom-space-put
    space 'run :scope repo :identity id :owner story
-   :payload (list :state "starting" :role (format "%s" role)
-                  :worktree worktree :branch branch :target target
-                  :prompt prompt :resume resume)
+   :payload (append (list :state "starting" :role (format "%s" role))
+                    (and agent (list :agent (format "%s" agent)))
+                    (list :worktree worktree :branch branch :target target
+                          :prompt prompt :resume resume))
    :actor "engine")
   (rat-kingdom-run-get space id))
 
@@ -402,7 +455,7 @@ example \"go test ./... passed\". Say so if you ran none."))
  "block"
  :description "Report that you cannot finish your task. Your work so far is \
 kept. After it succeeds, stop."
- :roles '(rat)
+ :roles '(rat researcher)
  :args '((:name "summary" :type string
           :description "What stopped you and what you need to go on."))
  :function #'rat-kingdom-run--block)

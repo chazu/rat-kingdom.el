@@ -7,14 +7,24 @@ through. See [DESIGN.md](DESIGN.md).
 **Status:** early, and usable for one story at a time or a few in
 parallel. You talk to a king; it starts stories; each story follows a
 workflow from a worker through a check and a review to a merge into an
-integration branch; work cut off by an Emacs restart is recovered. There
-are no epics, task tracker or research workflow yet. The path through real
-agents has been run once for a worker and not yet for the king.
+integration branch; work cut off by an Emacs restart is recovered. Tasks
+come from a br (Rust Beads) workspace in each repository, and the king can
+plan an epic there as tasks with dependencies and, once you agree, run it:
+the engine starts each task's story as the task becomes ready. With
+a2ui installed you review, edit and approve the king's epic plan in a
+surface in Emacs. Workflows can be composed from mixins and aspects,
+and a research workflow writes docs that later workers are told of. The
+path through real agents has been run once for a worker and not yet for
+the king.
 
 ## Using it
 
 You need [agent-shell](https://github.com/xenodium/agent-shell) set up for
-Claude Code.
+Claude Code, and `br`, the Rust Beads issue tracker, on `exec-path` (or
+named by `rat-kingdom-task-br-program`). For Codex workers you also need
+agent-shell's Codex support set up:
+[codex-acp](https://github.com/agentclientprotocol/codex-acp) installed
+and `agent-shell-openai-authentication` set.
 
 ```elisp
 (add-to-list 'load-path "/path/to/rat-kingdom.el")
@@ -30,8 +40,8 @@ never while you have something half typed.
 
 What happens to a story:
 
-1. A worker, another Claude Code session, starts in the background in a
-   worktree under `~/.emacs.d/rat-kingdom/worktrees/`, on a branch
+1. A worker, another Claude Code session or a Codex one, starts in the
+   background in a worktree under `~/.emacs.d/rat-kingdom/worktrees/`, on a branch
    `rats/S-xxxx` cut from the repository's target branch, `rk/integration`.
 2. When the worker reports that it is done, its commit is merged in a
    scratch worktree and the repository's check, if it has one, runs there.
@@ -61,18 +71,295 @@ output.
 Finished work lands on the target branch only. Your checkout is not
 touched and nothing is pushed. Merge or discard that branch yourself.
 
+A story may be given a target of its own instead (`story_start` with
+`target`): an existing local branch that is not checked out anywhere. Its
+worktree is cut from that branch and its work merged into it. This is
+rarely needed by hand; the stories of an epic with a feature branch get
+it (below).
+
+### Tasks
+
+br is required: every registered repository has a br workspace, the
+`.beads` directory of your own checkout, and that is where rat-kingdom
+reads its ready tasks, claims them for stories and closes them when the
+work is merged. br is never run in a worker's worktree.
+
+Registering a repository whose checkout has no `.beads` runs
+`br init --prefix PREFIX` there and checks that br kept the prefix. The
+prefix is the repository's name unless you give another: `task_prefix` to
+the king's `repo_add`, or the prefix prompt of `M-x rat-kingdom-add-repo`.
+The new workspace is kept out of Git: `/.beads/` is added, once, to
+`info/exclude` in the repository's common Git directory (shared by its
+linked worktrees), never to `.gitignore`, so `git status` does not change.
+Set `rat-kingdom-task-br-untracked` to nil if you would sooner track
+`.beads` yourself. A `.beads` that is already there, tracked or not, is
+left exactly as it is.
+
+If br is not installed, refuses the prefix or keeps a different one,
+registration fails with br's message and nothing is registered; whatever
+br had made is removed. Turning on `rat-kingdom-mode` and `M-x
+rat-kingdom-tasks-refresh` make the workspace of every registered
+repository that lacks one. One that fails is reported as a warning and in
+the king's `status`, and the others carry on.
+
+### Planning an epic
+
+Ask the king to plan a piece of work as an epic. It proposes the stories
+and the dependencies between them, and waits for you to agree: in the
+plan surface if you have a2ui (next section), otherwise in conversation.
+Once you agree in conversation it calls `epic_create`, which takes the
+repository, the epic's title, a description of its goal and how it will
+be judged as a whole, and the stories as a JSON array. Each story has a `key` of its own in the plan
+(`a`, `parser`), a `title` and a `description`, and may have `depends_on`
+(keys of other stories), `agent`, `workflow` and `priority`.
+
+The whole plan is checked before anything is written: every key unique,
+every title and description given, every `depends_on` naming a key in
+the plan, no cycle, every agent and workflow known, priorities from 0 to
+4. Any problem creates nothing, and every problem is named. Then br gets
+the epic (`--type epic`), each story as a task of it (`--parent`),
+created after the tasks it depends on, and the dependencies
+(`br dep add TASK DEPENDS-ON`). The king is shown the epic's id, a table
+of each story's key, task, title, dependencies, agent and workflow, and
+which tasks are ready now. If br fails partway, the answer says exactly
+which ids were created and which dependencies recorded. br has no clean
+delete, only tombstones, so nothing is removed; delete them with
+`br delete` if you do not want them.
+
+`task_create` adds one task the same way: a title and description,
+and optionally a priority, a type (task, bug, feature or chore), an epic
+as `parent`, the ids it `depends_on`, an `agent` and a `workflow`. The
+parent and the tasks depended on must already exist.
+
+Neither tool starts anything. A task becomes available when the tasks it
+depends on are closed, as their stories are merged, and `status` lists it
+under Available tasks with its epic and agent. Work starts when the epic
+is run (next section), or when the king starts a story for one task with
+`story_start` and its `task`. The task's agent and workflow are kept as
+the br labels `rk-agent:NAME` and `rk-workflow:NAME`, and a story started
+for the task uses them unless it is given others. An epic itself is never
+available.
+
+### Reviewing an epic plan
+
+If [a2ui](https://github.com/chazu/a2ui.el) is installed, the king
+proposes an epic with `epic_propose` instead, which takes the same
+arguments as `epic_create` and checks the plan the same way. The plan
+opens in an a2ui surface titled "Epic plan: TITLE", shown in your main
+window area as a2ui shows surfaces (`a2ui-vui-display-action`), never in
+the window you are in and without moving the cursor. The king's turn
+ends at once; it is told what you decide.
+
+The surface shows the repository, the epic's title and description, and
+its stories in waves: wave 1 the stories that depend on nothing, each
+later wave those whose dependencies are all in earlier ones. For each
+story there is an include box, ticked; its key; its title and
+description, which you can edit (`RET` on the description edits it in a
+buffer of its own, `C-c C-c` to keep it); what it depends on; and
+pickers for its agent and its workflow, which sets its review mode
+(`story` is reviewed by the king, `story-lite` is not), with the king's
+choices selected. Below them:
+
+- **Start right away**, off unless you tick it, and **Max parallel**,
+  empty for no limit.
+- **Feature branch: land the epic as one unit**, off unless you tick
+  it. It applies when the epic is started: its stories merge into a
+  branch of its own, `rk/epic/ID`, which lands on the target after one
+  check and the king's `epic_verdict` (see **Feature branch** in
+  [Epics](#epics)). With Start right away also ticked, the epic is started
+  with its branch; without it, the king is told you want one, so that it
+  passes `feature_branch` to `epic_start` when it starts the epic.
+- **Approve and create** keeps the stories ticked, with your edits,
+  checks the plan again and creates the epic and its tasks, as
+  `epic_create` does. If a story you kept depends on one you left out,
+  or anything else is wrong, nothing is created and the surface says
+  why. With Start right away ticked the epic is then run, as
+  `epic_start` does, with a feature branch if you ticked that too; that
+  counts as your approval, so the king does not ask again. The surface
+  shows the epic's id and its tasks, and the king is told the same,
+  including whether the epic has a feature branch.
+- **Send back with notes** sends the plan back to the king with what you
+  wrote, and nothing is created. The king revises it and proposes it
+  again in a fresh surface.
+- **Cancel** closes the surface, as does deleting it with `C-c C-k`, and
+  the king is told you dismissed it.
+
+Nothing is created or started until you press Approve. a2ui is optional:
+rat-kingdom loads it only when a plan is shown. Without it,
+`epic_propose` answers the king that the surface is unavailable, and the
+plan is agreed in conversation and made with `epic_create`. A plan whose
+surface is open when Emacs stops is lost, and the king is not told; ask
+it to propose the plan again.
+
+### Epics
+
+**Plan.** The king proposes the epic's stories and their dependencies,
+in the plan surface or in conversation, and the epic is created once you
+agree (above). Nothing runs yet, unless you ticked Start right away in
+the plan surface.
+
+**Start.** Unless you started it from the plan surface, the king asks
+you before it calls `epic_start` with the
+repository, the epic's id and, if you want, `max_parallel`, the most
+stories of the epic in progress at once. From then on the engine starts a
+story for each task of the epic as soon as the task is available: at
+first those that depend on nothing, then each task once every task it
+depends on is merged. A diamond a → (b, c) → d runs a, then b and c side
+by side, then d. The worker cap still applies: a story beyond it waits
+for a free worker as any other does. `epic_start` answers with the
+stories it started, the ready tasks that wait for a place, and every task
+still waiting with what it waits on. The epic's state is kept in the
+space as one `epic` tuple, so a restart of Emacs keeps it; when
+`rat-kingdom-mode` starts again, after recovering the stories that were
+cut off, the running epics carry on, and no task is ever given a second
+story.
+
+**Review.** The king reviews each story as it always does. It does not
+start the epic's stories; the engine does. When every task of the epic is
+closed, the epic is done: the br epic is closed ("All 4 tasks merged")
+and the king is told. An epic with a feature branch lands first, after one
+more check and review of the whole (below).
+
+**Holdups.** When a story of the epic stops (its worker blocked, its
+setup failed, or it ran out of workers), the king is told once: which
+story and task, why, and which other tasks of the epic now wait on it,
+directly or through others. They stay waiting until it is merged; the
+king can give it a new worker with `story_move`.
+
+**Retry.** A story of the epic that ends without being merged, because it
+was cancelled or moved to its end by hand, releases its task, but the
+epic holds the task, so that the engine does not just start it again. So
+does a task whose story could not be started, say because its
+`rk-workflow:` label names no workflow. The king is told, and
+`epic_retry` with the epic and the task lets the engine start it again.
+
+**Pause, resume, cancel.** `epic_pause` starts nothing more while the
+stories in progress carry on; `epic_resume` starts what is ready.
+`epic_cancel` cancels every story of the epic in progress, as
+`story_cancel` does, and starts nothing more. The br epic and its tasks
+stay open in the tracker, for you to close, or to run again with
+`epic_start`.
+
+**Watching.** `status` has an Epics section for each epic that is running,
+paused or landing: its state, how many of its tasks are merged, its
+feature branch and what its landing waits for if it has one, its stories
+in progress and where each is, the tasks held up behind a stopped story,
+the held tasks, and how many tasks still wait on others. Each story's line
+names its epic. `epic_show` gives one epic in full: a table of its tasks
+with each one's status, story, agent and what it waits on.
+
+**Feature branch.** Without one, each story of the epic merges into the
+target as it passes, so a half-built epic sits on `rk/integration`. Ask
+for the epic to land as one unit and the king calls `epic_start` with
+`feature_branch`. The epic then gets a branch of its own, `rk/epic/ID`,
+cut from the target's head (an existing branch of that name is used if it
+continues from the target, and refused if it has diverged). Every story
+of the epic, including one the king starts with `story_start` for a task
+of it, is cut from that branch and merges into it, after its own check
+and review as usual. The target does not move.
+
+When every task is closed the epic is `landing` rather than done. Its
+branch is merged into the target in a scratch worktree, and the setup and
+check run there, as for a story. If that passes, the king is asked to
+review the whole: `epic_diff` shows the branch's commits and its combined
+diff against the target, and `epic_verdict` takes `pass` or `fix` with
+notes.
+
+- **pass** moves the target to the checked merge, only if the target has
+  not moved since; if it has, the epic is checked again and lands without
+  another review. The epic is done, the br epic closed ("Landed on
+  rk/integration at abc1234"), and the branch kept for you to delete.
+- **fix** adds a task to the epic whose description is the notes. The
+  epic runs again, the engine starts the task on the epic's branch, and
+  once it is merged the epic lands again.
+- **A failed check, or a merge that conflicts** because the target moved,
+  adds a task "Merge rk/integration into the epic branch and fix what
+  breaks", with the check's output or the files in conflict. Its worker
+  works on the epic's branch, merges the target in, and fixes it; then the
+  epic lands again.
+
+`epic_cancel` keeps the branch, with what its stories merged.
+
+### Foremen
+
+A big epic can have a foreman, so that its reviews do not flood the king.
+A foreman is an agent of its own, `F-` and the epic's id, that runs one
+epic for the king. The king starts one with `foreman_start` (the epic, and
+optionally `codex` as its agent; Claude Code otherwise), or with
+`foreman` on `epic_start`, when you ask or when the epic is big. Nothing
+starts one by itself.
+
+While it runs, news of the epic's stories goes to the foreman instead of
+the king: review requests, stories that stop or look stuck, held tasks,
+merges. It reviews with `story_diff`, `story_show` and `verdict`, steers
+a worker with `tell` (the worker sees "Message from foreman F-…"), and
+when a story is stuck it retries a held task with `epic_retry`, adds a
+task to the epic with `task_create`, or tells the king with `report`. It
+can also `query` the space, see its epic with `status`, and start a story
+at once for a task of its epic with `story_start`. Every one of its tools
+refuses a story or task outside its epic, and it has no `publish` and
+none of the king's other tools. It works in the repository's checkout, but
+is told never to edit files, and like every agent it cannot push.
+
+The king still hears of the epic as a whole: that it is done, that it is
+ready to land (the landing review stays with the king), and what the
+foreman reports, as "[rat-kingdom] Report from the foreman of epic …".
+`foreman_stop` hands reviews back to the king, with any news the foreman
+had not read. A foreman stops by itself when its epic is done or
+cancelled, and the king is told. If a foreman dies, news goes back to the
+king, saying so. `status` and `epic_show` show "foreman F-… (claude,
+working)", idle or stopped. After a restart a foreman takes up its session
+again.
+
+### Choosing the agent
+
+Each story's workers run Claude Code or OpenAI Codex. Tell the king which
+("start a story in app, with codex, to …"): `story_start` takes `agent`,
+`claude` or `codex`. Left out, it is the task's `rk-agent:` label if the
+story is for a task that has one, and otherwise `rat-kingdom-default-agent`,
+which is `claude` unless you change it. `M-x rat-kingdom-start-story` asks, with
+that as the default. The king itself is always Claude Code.
+
+The story keeps its agent. A worker that replaces another, after a failed
+check, a merge conflict, a review that asks for changes or an Emacs restart,
+runs the same agent, even if the default has changed since. `status` and
+`story_show` say which agent each story has.
+
+Codex runs in full access, the equivalent of `codex --yolo`: the codex-acp
+session mode `agent-full-access`, which never asks for approval and has no
+sandbox. rat-kingdom sets this on the sessions it starts. Your own
+`agent-shell-openai-default-session-mode-id` is not changed. Codex reaches
+rat-kingdom's tools (`finish`, `block`) through the same HTTP MCP endpoint
+as Claude. codex-acp supports HTTP MCP servers.
+
+`rat-kingdom-agent-shell-define-agent` adds another agent kind, or replaces
+a built-in one. It takes a name and a function that returns an agent-shell
+config.
+
 ### Pushing
 
-No agent rat-kingdom starts, worker or king, can push, whatever Claude
-Code's permission mode. Each agent's process is started with Git
+No agent rat-kingdom starts, worker or king, Claude or Codex, can push,
+whatever its permission mode. Each agent's process is started with Git
 configuration in its environment (`GIT_CONFIG_COUNT`) that rewrites every
 push URL to a remote helper that does not exist, so `git push` fails with
-`rat-kingdom-refuses-to-push`, `--no-verify` or not. Its session is also
-started with Claude tool rules denying `git push` and `gh`, and Emacs
+`rat-kingdom-refuses-to-push`, `--no-verify` or not. A Claude session is
+also started with Claude tool rules denying `git push` and `gh`, and Emacs
 refuses any permission request to run them. Nothing is written to your
 Git configuration or hooks, so your own pushes are unaffected. A remote
-with an explicit `pushurl` is not rewritten by Git; the other two layers
-cover it.
+with an explicit `pushurl` is not rewritten by Git. For Claude the other
+two layers cover that case.
+
+For Codex, the environment is the only layer. Codex ignores Claude's tool
+rules, and in full-access mode it never asks permission, so Emacs has
+nothing to refuse. Codex's `gh` is not blocked either, beyond
+`GH_PROMPT_DISABLED`, and neither is a push to a remote with a `pushurl`.
+Codex passes its environment to the commands it runs unless your
+`~/.codex/config.toml` filters it. Do not set
+`shell_environment_policy.inherit` to `core` or `none` for Codex workers:
+that drops `GIT_CONFIG_*` and with it the block. Setting
+`ignore_default_excludes = false` drops the `GIT_CONFIG_KEY_n` variables,
+so every Git command in Codex then fails, pushes included. See DESIGN.md,
+section 12.
 
 The one way to push is the king's `publish` tool, which pushes one local
 branch to the branch of the same name on one remote. The king is told to
@@ -95,8 +382,55 @@ fetches its tools afresh.
 Turning on `rat-kingdom-mode`, which `rat-kingdom-king` does, recovers
 what the last Emacs left in flight. A worker that was cut off is replaced
 by a new one in the same worktree, told to look at what is there. A check
-or setup that was running runs again. The king takes up its earlier
-session; `C-u M-x rat-kingdom-king` starts a new one instead.
+or setup that was running runs again, and so does the check of an epic
+that was landing. Running epics carry on: the stories their ready tasks
+have room for are started, and none twice. An epic's foreman that was cut
+off takes up its session again. The king
+takes up its earlier session; `C-u M-x rat-kingdom-king` starts a new one
+instead.
+
+### Telling a worker something
+
+Ask the king to tell a story's worker something, a correction or a detail
+it left out, and it calls `tell` with the story and the text. The message
+waits in the space as a `message` tuple owned by the story, and the
+answer says what became of it:
+
+- a worker between turns is given it at once, as its next prompt;
+- a worker in the middle of a turn is given it when the turn ends, and can
+  read it sooner with its `inbox` tool, which workers are told to check
+  during long turns and before they call `finish`;
+- a story with no worker right now, because it is queued for a free
+  worker, being checked or reviewed, or stopped, keeps it for its next
+  worker, which finds it in its prompt.
+
+A worker that has already reported with `finish` or `block` is never
+given one. So a message sent while a story is at its check or review is
+only read if the story goes back to a worker; if it passes and is merged,
+the message is archived unread. `status` says how many messages wait on
+each story, and `story_show` lists them. A message is removed only once
+it has been handed over, so a restart keeps it, and a worker that
+replaces one cut off by a restart finds it in its prompt.
+
+### Facts
+
+A worker that learns something a later worker in the same repository
+would want to know, such as a convention, a pitfall, how to run the tests
+or where something lives, records it with its `note_fact` tool: the fact,
+and optionally a topic and the files it concerns. A fact is a `fact`
+tuple scoped to the repository with no owner, so it outlives the story
+that wrote it. Every worker started later in that repository is told the
+repository's facts in its prompt, newest first, at most 40 of them and
+8000 characters (`rat-kingdom-fact-brief-max-count`,
+`rat-kingdom-fact-brief-max-chars`). A fact may be at most 1500
+characters (`rat-kingdom-fact-max-length`).
+
+The king can look into the space with `query`, which only reads: one
+category, optionally narrowed by scope, identity, owner and a text the
+payload contains, newest first, archived tuples too if asked. Ask it
+"what facts do we have for myrepo?". It removes a fact that turned out
+wrong with `fact_forget`. Other code can add its own section to a
+worker's prompt through `rat-kingdom-story-brief-functions`.
 
 ### Workflows
 
@@ -117,10 +451,101 @@ steps from one place, a place with no way on, no way to a final place. A
 repository names the workflow its stories follow, and a story can name
 its own.
 
+Workflows can also be files, one per file, read and never evaluated:
+`workflows/*.eld` in `rat-kingdom-directory` for every repository, and
+`.rk/workflows/*.eld` in a repository's checkout for that repository
+only. A file holds the same property list with `:name` added:
+
+```elisp
+(:name quick
+ :doc "As story-lite, with a shorter worker limit."
+ :places (ready checking integrating done blocked)
+ :start ready
+ :final (done)
+ :steps ((implement :from ready :spawn rat :to checking :timeout 1800)
+         (check :from checking :check t :pass integrating :fail ready)
+         (integrate :from integrating :merge t :to done :stale checking)))
+```
+
+A repository's file shadows a global or built-in workflow of the same
+name there, and a global file replaces a built-in one. A file that does
+not hold together is ignored, and the king's `status` says why. Files
+are read again when they change, and a changed workflow applies from a
+story's next move. `workflow_list` shows where each workflow comes from.
+
+A workflow step may also run named commands from `:commands` in the
+story's worktree and commit what they change (`:run (format)`), check with
+named commands in place of the configured check (`:check (lint test)`),
+wait for a time (`:gate (:after 3600)`) or for a signal the king sends
+with `story_signal` (`:gate (:signal deploy-ok)`), give its worker extra
+instructions (`:spawn rat :brief "..."`), or run another workflow as a
+child story in the same worktree and wait for it to end (`:workflow
+lint`).
+
+Mixins and aspects change a workflow without copying it. The mixin
+`no-review` removes the review step, and `tdd` starts a worker that
+writes failing tests before the first `implement`. An aspect adds a
+step before, after or around steps the workflow has. A workflow file
+names its own:
+
+```elisp
+(:name careful
+ :doc "As story, test first, with the code formatted before the check."
+ :places (ready checking review integrating done blocked)
+ :start ready
+ :final (done)
+ :steps ((implement :from ready :spawn rat :to checking)
+         (check :from checking :check (lint test) :pass review :fail ready)
+         (review :from review :review king :pass integrating :fix ready)
+         (integrate :from integrating :merge t :to done :stale checking))
+ :mixins (tdd)
+ :aspects ((:after implement :run (format))))
+```
+
+Mixins can be files too, `mixins/*.eld` in `rat-kingdom-directory` and
+`.rk/mixins/*.eld` in a checkout, found as workflow files are. The
+`:mixins` configuration key applies mixins to whatever workflow a
+story runs, for a repository, an epic or a task: `(:mixins (no-review))`
+in `.rk/config.eld`, say, or `repo_add` with `mixins`. `workflow_list`
+shows each workflow expanded, with what it was built from, and
+`story_show` names the mixins a story's workflow was expanded with.
+
+The `research` workflow writes docs, not code. Its worker, a
+researcher, writes them with `write_doc`; the king reviews them, a pass
+approves them, and nothing is merged. Every later worker in the
+repository is told the approved docs' titles and reads one with
+`read_doc`. Ask the king to research something, or have it call
+`story_start` with the workflow:
+
+```json
+{"repo": "app", "workflow": "research",
+ "title": "How app expires sessions",
+ "description": "Find where sessions are made, stored and expired, and write it up."}
+```
+
+The king reads docs with `doc_list` and `doc_show`, and removes a wrong
+one with `doc_forget`.
+
+The `:git` configuration key says how stories' branches are named and
+how their work lands. `:branch` is the format of a new story's branch
+name, `"rats/%i"` by default, with `%i` the story id, `%s` a slug of its
+title, `%r` the repository, `%e` the epic or `none` and `%%` a `%`; a
+name already taken gets `-2`, `-3` and so on. `:integrate` is how a
+story's work goes into its target, and how an epic's feature branch
+lands: `merge` (the default, a `--no-ff` merge), `rebase` (the story's
+commits replayed onto the target) or `squash` (one commit, `ID: TITLE`
+and the worker's summary). `repo_add` takes `git` too. For example, in
+`.rk/config.eld`:
+
+```elisp
+(:git (:branch "rats/%s-%i" :integrate squash))
+```
+
 ## Requirements
 
-Emacs 29.1 or later, built with SQLite support, and Git. Starting an
-agent needs agent-shell.
+Emacs 29.1 or later, built with SQLite support, Git, and br (Rust Beads)
+for tasks. Starting an agent needs agent-shell. The epic plan surface
+needs [a2ui](https://github.com/chazu/a2ui.el), which is optional.
 
 ## The tuplespace
 
@@ -185,6 +610,14 @@ eldev compile -W
 eldev lint
 ```
 
+The tests of the epic plan surface that draw it with the real a2ui are
+skipped unless a2ui and vui can be loaded. Name the directories that hold
+them, separated by colons:
+
+```sh
+RAT_KINGDOM_TEST_A2UI=~/.emacs.d/straight/build/a2ui:~/.emacs.d/straight/build/vui eldev test
+```
+
 After pulling or merging changes to rat-kingdom, run `M-x rat-kingdom-reload`
 to load them into the running Emacs. Running agents, the open space, the tool
 endpoint and the king are kept, and no agent is started or stopped, with one
@@ -209,6 +642,11 @@ Reloading only works if no default lives in a `defvar`'s initial value, since
   timers, the open space, and registries filled by `-define` calls, which
   replace an entry of the same name.
 - Add a new file to `rat-kingdom--files` in rat-kingdom.el.
+
+The king's instructions list its tools from the tools defined for the role
+`king`, through `{tools}` in `rat-kingdom-king-instructions`. So a new king
+tool is listed without editing them, and the reload that adds it restarts
+the king to give it the new tool.
 
 ## License
 

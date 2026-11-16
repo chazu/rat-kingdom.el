@@ -102,6 +102,123 @@
     (should (equal (getenv-internal "ANTHROPIC_API_KEY" variables) "k"))
     (should (getenv-internal "GIT_CONFIG_COUNT" variables))))
 
+;;;; Codex
+
+(defvar agent-shell-openai-default-session-mode-id)
+
+(defmacro rat-kingdom-push-test-with-codex (&rest body)
+  "Run BODY with agent-shell-openai stubbed.
+Its codex config is made as agent-shell-openai makes it, with a client
+whose own environment has OPENAI_API_KEY, and its default session mode
+is the user's `agent-shell-openai-default-session-mode-id', bound to
+\"read-only\"."
+  (declare (indent 0) (debug t))
+  `(let ((saved features)
+         (agent-shell-openai-default-session-mode-id "read-only"))
+     (unwind-protect
+         (cl-letf (((symbol-function 'agent-shell-openai-make-codex-config)
+                    (lambda ()
+                      (list (cons :identifier 'codex)
+                            (cons :buffer-name "Codex")
+                            (cons :default-session-mode-id
+                                  (lambda ()
+                                    agent-shell-openai-default-session-mode-id))
+                            (cons :client-maker
+                                  (lambda (_buffer)
+                                    (list (cons :command "codex-acp")
+                                          (cons :environment-variables
+                                                '("OPENAI_API_KEY=k")))))))))
+           (provide 'agent-shell-openai)
+           ,@body)
+       (setq features saved))))
+
+(defun rat-kingdom-push-test--codex-client (run-id)
+  "Return the client of a guarded codex config for the worker RUN-ID."
+  (let ((config (rat-kingdom-agent-shell-run-config
+                 (list :id run-id :role "rat" :agent "codex")
+                 "token")))
+    (funcall (map-elt config :client-maker) nil)))
+
+(defun rat-kingdom-push-test--without-git-config (environment)
+  "Return ENVIRONMENT without its GIT_CONFIG_ variables.
+So that a test of an agent's environment holds when the tests
+themselves run in one."
+  (seq-remove (lambda (entry) (string-prefix-p "GIT_CONFIG_" entry))
+              environment))
+
+(ert-deftest rat-kingdom-push-test-codex-config ()
+  (rat-kingdom-push-test-with-codex
+    (let* ((config (rat-kingdom-agent-shell-run-config
+                    (list :id "S-3.1" :role "rat" :agent "codex") "token"))
+           (process-environment (rat-kingdom-push-test--without-git-config
+                                 process-environment))
+           (client (funcall (map-elt config :client-maker) nil))
+           (variables (map-elt client :environment-variables))
+           (pairs (rat-kingdom-push-test--pairs variables)))
+      (should (eq (map-elt config :identifier) 'codex))
+      (should (equal (map-elt config :buffer-name) "rat S-3.1"))
+      ;; Full access, as `codex --yolo': the session mode is set, and
+      ;; codex-acp is told it in its environment too.
+      (should (equal (funcall (map-elt config :default-session-mode-id))
+                     "agent-full-access"))
+      (should (equal (getenv-internal "INITIAL_AGENT_MODE" variables)
+                     "agent-full-access"))
+      ;; The user's own default is left alone.
+      (should (equal agent-shell-openai-default-session-mode-id "read-only"))
+      ;; The push guard is the one Claude gets.
+      (should (equal (getenv-internal "RAT_KINGDOM_RUN" variables) "S-3.1"))
+      (should (equal (getenv-internal "GH_PROMPT_DISABLED" variables) "1"))
+      (should (equal (getenv-internal "GIT_CONFIG_COUNT" variables)
+                     (number-to-string
+                      (length rat-kingdom-agent-shell-push-prefixes))))
+      (should (= (length pairs) (length rat-kingdom-agent-shell-push-prefixes)))
+      (dolist (prefix rat-kingdom-agent-shell-push-prefixes)
+        (should (member (cons (format "url.%s%s.pushInsteadOf"
+                                      rat-kingdom-agent-shell-push-block prefix)
+                              prefix)
+                        pairs)))
+      (should (equal (getenv-internal "OPENAI_API_KEY" variables) "k"))
+      ;; Its tools come from the run's own endpoint, over HTTP.
+      (let ((server (car (map-elt config :mcp-servers))))
+        (should (equal (alist-get 'name server) rat-kingdom-mcp-server-name))
+        (should (equal (alist-get 'type server) "http"))
+        (should (string-search "token" (alist-get 'url server))))
+      ;; Each config is made afresh: a second run gets its own guard.
+      (should (equal (getenv-internal
+                      "RAT_KINGDOM_RUN"
+                      (map-elt (rat-kingdom-push-test--codex-client "S-4.1")
+                               :environment-variables))
+                     "S-4.1")))))
+
+(ert-deftest rat-kingdom-push-test-agent-config-follows-the-run ()
+  (rat-kingdom-push-test-with-codex
+    (let ((rat-kingdom-agent-shell--defined-agents nil)
+          (rat-kingdom-default-agent 'codex))
+      (cl-letf (((symbol-function 'rat-kingdom-agent-shell-claude-config)
+                 (lambda ()
+                   (list (cons :identifier 'claude-code)
+                         (cons :client-maker (lambda (_buffer) nil))))))
+        (cl-flet ((identifier (agent)
+                    (map-elt (rat-kingdom-agent-shell-run-config
+                              (list :id "S-1.1" :role "rat" :agent agent)
+                              "token")
+                             :identifier)))
+          (should (eq (identifier "codex") 'codex))
+          (should (eq (identifier "claude") 'claude-code))
+          ;; A run that names no agent, such as the king's, is Claude
+          ;; Code, whatever the default for stories.
+          (should (eq (identifier nil) 'claude-code))
+          (should-error (identifier "gemini"))
+          ;; Another kind can be defined, and replaces one of its name.
+          (rat-kingdom-agent-shell-define-agent
+           'claude (lambda () (list (cons :identifier 'my-claude))))
+          (rat-kingdom-agent-shell-define-agent
+           'other (lambda () (list (cons :identifier 'other))))
+          (should (eq (identifier "claude") 'my-claude))
+          (should (eq (identifier "other") 'other))
+          (should (equal (rat-kingdom-agent-names)
+                         '("other" "claude" "codex"))))))))
+
 ;;;; A real push, with and without the environment
 
 (defmacro rat-kingdom-push-test-with-remote (vars &rest body)
@@ -147,6 +264,37 @@ repository's remote origin."
       ;; The repository's configuration was not touched.
       (should-not (rat-kingdom-git-ok-p path "config" "--get-regexp"
                                         "pushinsteadof")))))
+
+(ert-deftest rat-kingdom-push-test-codex-environment-blocks-push ()
+  ;; Codex in full-access mode never asks permission, so the environment
+  ;; its client is started with is all that stops it pushing.  Built
+  ;; from an environment with no Git configuration of its own, so that
+  ;; only the codex client's entries can be what refuses the push.
+  (rat-kingdom-push-test-with-codex
+    (rat-kingdom-push-test-with-remote (_space path remote)
+      (let* ((process-environment (rat-kingdom-push-test--without-git-config
+                                   process-environment))
+             (variables (map-elt (rat-kingdom-push-test--codex-client "S-3.1")
+                                 :environment-variables))
+             (relative (file-relative-name remote path)))
+        ;; The client's process is started with its variables ahead of
+        ;; Emacs's environment, as agent-shell's client does.
+        (let ((process-environment (append variables process-environment)))
+          (dolist (args `(("push" "origin" "main")
+                          ("push" "--no-verify" "origin" "main")
+                          ("push" ,remote "main")
+                          ("push" ,relative "main")
+                          ("push" ,(concat "file://" remote) "main")
+                          ("-C" ,path "push" "origin" "main")))
+            (pcase-let ((`(,exit ,_ ,errors) (rat-kingdom-git--run path args)))
+              (should-not (eql exit 0))
+              (should (string-search "rat-kingdom-refuses-to-push" errors))))
+          (should-not (rat-kingdom-push-test--remote-commit remote "main"))
+          ;; Fetching still works.
+          (should (rat-kingdom-git-ok-p path "fetch" "origin")))
+        ;; The repository's configuration was not touched.
+        (should-not (rat-kingdom-git-ok-p path "config" "--get-regexp"
+                                          "pushinsteadof"))))))
 
 ;;;; Refusing permission
 

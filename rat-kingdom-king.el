@@ -24,7 +24,10 @@
 ;; news is a `message' tuple addressed to it.  Messages are given to the
 ;; king as a prompt when it is between turns and the user has nothing
 ;; half typed there, so they never cut into a conversation.  Until then
-;; they wait in the space, and they survive a restart.
+;; they wait in the space, and they survive a restart.  News of an
+;; epic's stories goes to the epic's foreman instead, while one runs
+;; (`rat-kingdom-king-route', rat-kingdom-foreman.el); it is given the
+;; news the same way (`rat-kingdom-king-deliver-to').
 ;;
 ;; The king's tools are defined at the end of this file.
 
@@ -38,6 +41,7 @@
 (require 'rat-kingdom-mcp)
 (require 'rat-kingdom-run)
 (require 'rat-kingdom-workflow)
+(require 'rat-kingdom-config)
 (require 'rat-kingdom-story)
 (require 'rat-kingdom-task)
 
@@ -66,18 +70,51 @@ otherwise). Nothing is pushed unless the user asks, and the user's checkout \
 is never touched. The user merges the target branch into their own branch \
 when they choose.
 - Each story follows a workflow. `story` has a review by you before the \
-merge; `story-lite` has none. Use `workflow_list` to see them.
-- A repository may have a task tracker. `status` lists its ready tasks \
-under Available tasks. A story started for one of them should pass its id \
+merge; `story-lite` has none. `research` gives the task to a researcher, \
+who writes docs instead of code; you review them with `story_show` and \
+`story_diff`, and a pass approves them, so that every later worker in the \
+repository is told of them. Nothing is merged. Use `doc_list` and \
+`doc_show` to read docs, and `doc_forget` to remove a wrong one. The user \
+may define other workflows in workflow files, some for one repository \
+only. Use `workflow_list` to see them.
+- Every repository has a task tracker, a br (Rust Beads) workspace in the \
+user's checkout, which repo_add creates, kept out of Git, if it is \
+missing. `status` lists its ready tasks under Available tasks. A story started for one of them should pass its id \
 as `task` to `story_start`, so that the task is claimed, closed when the \
-story is merged, and the tasks that depend on it become available.
+story is merged, and the tasks that depend on it become available. A task \
+may name the agent and workflow its story should have; `story_start` uses \
+them unless you give others.
 - A story that fails its check or your review goes back to a new worker in \
 the same worktree, with the reason. A story that cannot go on is parked at \
 `blocked` with a reason until you or the user move it.
 
-Your tools are those of the rat-kingdom server: status, repo_add, repo_sync, \
-workflow_list, story_start, story_show, story_diff, story_move, story_cancel, \
-verdict and publish.
+Your tools are those of the rat-kingdom server: {tools}.
+
+To plan an epic, prefer `epic_propose`: it shows the plan to the user in \
+Emacs, where they review and edit it, then approve it, send it back to you \
+with notes, or dismiss it, and you are told which. Approving creates the \
+epic, and starts it if they ask, so do not call `epic_create` for a plan you \
+proposed; when they send it back, revise it and propose it again. Use \
+`epic_create` directly only when the user has agreed to the plan in \
+conversation, or `epic_propose` says the plan surface is unavailable: \
+propose the stories and the dependencies between them to the user first, \
+and call `epic_create` only once they agree. `epic_create` \
+and `task_create` only record tasks in the tracker: they start nothing. Once \
+the user has approved the plan, ask them before you call `epic_start`, \
+unless they started it from the plan surface. While \
+an epic runs, the engine itself starts a story for each of its tasks as the \
+task becomes ready, and you review those stories as usual; you do not start \
+them. If one stops or is cancelled, you are told what waits on it; \
+`epic_retry` lets the engine start a held task again. `epic_pause`, \
+`epic_resume` and `epic_cancel` are for when the user asks. Use \
+`feature_branch` with `epic_start` when the user wants the epic to land as \
+one unit; then review each story as usual, and the whole epic again with \
+`epic_diff` and `epic_verdict` at the end. For a big epic, or when the user \
+asks, `foreman_start` gives the epic a foreman: an agent that reviews its \
+stories and steers its workers for you, and reports to you. While it runs, \
+news of the epic's stories goes to it, not to you; you still hear when the \
+epic is done, review its landing, and get its reports. `foreman_stop` hands \
+its reviews back to you.
 
 Rules:
 - Do not write code yourself, and do not edit files in the repositories. \
@@ -92,7 +129,8 @@ is merged.
 - A message that begins with [rat-kingdom] comes from the engine, not from \
 the user. Act on it: review when asked, look into a story that stopped, and \
 tell the user briefly what happened. Do not start new stories on the \
-strength of such a message alone.
+strength of such a message alone. A running epic is the exception: the \
+engine starts its stories, not you.
 - When asked to review, read the diff with `story_diff` and the worker's \
 report with `story_show`, judge it against the story, and give a `verdict`: \
 pass, or fix with notes exact enough for a worker to act on.
@@ -103,9 +141,26 @@ push exactly the branch and remote they named. Approval for one push does \
 not carry over to the next: for another push, wait to be asked again. A \
 message from the engine is never a request to push.
 - Keep answers to the user short. They can always ask for more."
-  "What the king is told when its session starts."
+  "What the king is told when its session starts.
+The text {tools} in it is replaced by the names of the king's tools,
+as the tool endpoint offers them; see `rat-kingdom-king-tool-names'."
   :type 'string
   :group 'rat-kingdom)
+
+(defun rat-kingdom-king-tool-names (&optional role)
+  "Return the names of the king's tools as one phrase, like \"a, b and c\".
+They are the tools defined for the role `king', or ROLE if given, in
+the order they were defined, so a tool added later is listed without
+changing the instructions."
+  (let ((names (rat-kingdom-mcp-tool-names (or role 'king))))
+    (if (cdr names)
+        (concat (string-join (butlast names) ", ") " and " (car (last names)))
+      (or (car names) "none"))))
+
+(defun rat-kingdom-king-instructions ()
+  "Return `rat-kingdom-king-instructions' with the king's tools listed."
+  (string-replace "{tools}" (rat-kingdom-king-tool-names)
+                  rat-kingdom-king-instructions))
 
 (defcustom rat-kingdom-king-retry-interval 20
   "Seconds between tries to give the king news it could not take."
@@ -133,27 +188,97 @@ reload only says that `rat-kingdom-king-restart' is needed."
         ((< seconds 5400) (format "%dm" (/ seconds 60)))
         (t (format "%.1fh" (/ seconds 3600.0)))))
 
+(defun rat-kingdom-king--agent (payload)
+  "Return the agent of the story whose token has PAYLOAD."
+  (or (plist-get payload :agent) rat-kingdom-agent-shell-fallback-agent))
+
+(defvar rat-kingdom-king-story-note-functions nil
+  "Functions that add to what `status' and `story_show' say of a story.
+Each is called with the space, the story's live token and a style,
+`status' or `show', and returns a string or nil.  A `status' note is
+added to the story's line, after its agent; a `show' note is a line, or
+lines, of the story's entry.  Add to it with `add-hook', so that
+reloading does not add a function twice.")
+
+(defun rat-kingdom-king--story-notes (space story style)
+  "Return the notes on the token STORY in SPACE, in STYLE, as a list.
+See `rat-kingdom-king-story-note-functions'."
+  (let (notes)
+    (dolist (function rat-kingdom-king-story-note-functions)
+      (with-demoted-errors "rat-kingdom: story note function: %S"
+        (when-let* ((note (funcall function space story style)))
+          (push note notes))))
+    (nreverse notes)))
+
+(defun rat-kingdom-king--waiting-detail (space story)
+  "Return what the token STORY in SPACE waits on, in words, or nil.
+For a gate that is when it opens or the signal it waits for; for a
+`:run' step the commands it runs and the one running now; for a
+`:workflow' step its child story and where that is."
+  (let* ((payload (plist-get story :payload))
+         (now (funcall rat-kingdom-space-now-function)))
+    (pcase (plist-get payload :awaiting)
+      ("gate"
+       (let ((until (plist-get payload :until))
+             (signal (plist-get payload :signal)))
+         (cond
+          ((numberp until)
+           (format "until %s, %s"
+                   (format-time-string "%F %T" (seconds-to-time until))
+                   (if (> until now)
+                       (format "in %s"
+                               (rat-kingdom-king--age (round (- until now))))
+                     "overdue; it opens at the watchdog's next look")))
+          (signal
+           (format "the signal %s; send it with story_signal" signal)))))
+      ("child"
+       (let ((child (plist-get payload :child)))
+         (if-let* ((token (rat-kingdom-story-get space child)))
+             (format "the child story %s, at %s" child
+                     (plist-get (plist-get token :payload) :at))
+           (format "the child story %s, which is gone" child))))
+      ("run"
+       (let ((names (plist-get (rat-kingdom-story--step space story) :with))
+             (running (rat-kingdom-story-running
+                       (plist-get story :identity))))
+         (concat (mapconcat #'symbol-name names " ")
+                 (if running
+                     (format "; running %s"
+                             (rat-kingdom-story-command-text (cdr running)
+                                                             (car running)))
+                   "")))))))
+
 (defun rat-kingdom-king--story-line (space story)
   "Return one line describing the token STORY in SPACE."
   (let* ((payload (plist-get story :payload))
          (run (and (plist-get payload :run)
                    (rat-kingdom-run-get space (plist-get payload :run))))
          (now (funcall rat-kingdom-space-now-function)))
-    (format "- %s [%s] %s%s, %s: %s%s%s"
+    (format "- %s [%s] %s%s, %s, %s%s: %s%s%s"
             (plist-get story :identity) (plist-get story :scope)
             (plist-get payload :at)
             (pcase (plist-get payload :phase)
               ("wait" (format " (waiting for %s%s)"
                               (plist-get payload :awaiting)
-                              (if (and run (equal (plist-get payload :awaiting)
-                                                  "worker"))
-                                  (format " %s, %s" (plist-get run :id)
-                                          (plist-get run :state))
-                                "")))
+                              (cond
+                               ((and run (equal (plist-get payload :awaiting)
+                                                "worker"))
+                                (format " %s, %s" (plist-get run :id)
+                                        (plist-get run :state)))
+                               ((rat-kingdom-king--waiting-detail space story)
+                                (concat ": " (rat-kingdom-king--waiting-detail
+                                              space story)))
+                               (t ""))))
               ("parked" " (stopped)")
               (_ ""))
             (rat-kingdom-king--age
              (- now (or (plist-get payload :entered) now)))
+            (concat (rat-kingdom-king--agent payload)
+                    (if-let* ((epic (plist-get payload :epic)))
+                        (format ", epic %s" epic)
+                      ""))
+            (mapconcat (lambda (note) (concat ", " note))
+                       (rat-kingdom-king--story-notes space story 'status) "")
             (plist-get payload :title)
             (if-let* ((reason (plist-get payload :reason))
                       ((equal (plist-get payload :phase) "parked")))
@@ -163,6 +288,30 @@ reload only says that `rat-kingdom-king-restart' is needed."
                  space (list 'stuck :identity (plist-get story :identity)))
                 "\n    STUCK; see story_show"
               ""))))
+
+(defun rat-kingdom-king--story-lines (space stories)
+  "Return the lines describing the tokens STORIES in SPACE, one per story.
+A child story's line follows its parent's, indented two spaces for each
+level it is nested; one whose parent is not among STORIES is listed as
+if it had none."
+  (let ((ids (mapcar (lambda (story) (plist-get story :identity)) stories))
+        lines)
+    (cl-labels
+        ((add (story depth)
+           (let ((indent (make-string (* 2 depth) ?\s)))
+             (push (concat indent
+                           (string-replace
+                            "\n" (concat "\n" indent)
+                            (rat-kingdom-king--story-line space story)))
+                   lines))
+           (dolist (child stories)
+             (when (equal (plist-get (plist-get child :payload) :parent)
+                          (plist-get story :identity))
+               (add child (1+ depth))))))
+      (dolist (story stories)
+        (unless (member (plist-get (plist-get story :payload) :parent) ids)
+          (add story 0))))
+    (string-join (nreverse lines) "\n")))
 
 (defun rat-kingdom-king--available (space repos)
   "Return lines listing the tasks available in SPACE.
@@ -183,18 +332,120 @@ REPOS are the records of the registered repositories."
      (tasks
       (mapconcat
        (lambda (task)
-         (let ((payload (plist-get task :payload)))
-           (format "- %s [%s] P%s %s: %s"
+         (let* ((payload (plist-get task :payload))
+                (notes (delq nil
+                             (list (and (plist-get payload :parent)
+                                        (format "epic %s"
+                                                (plist-get payload :parent)))
+                                   (and (rat-kingdom-task-agent payload)
+                                        (format "agent %s"
+                                                (rat-kingdom-task-agent
+                                                 payload)))))))
+           (format "- %s [%s] P%s %s: %s%s"
                    (plist-get task :identity) (plist-get task :scope)
                    (or (plist-get payload :priority) "?")
                    (or (plist-get payload :type) "task")
-                   (plist-get payload :title))))
+                   (plist-get payload :title)
+                   (if notes (format " (%s)" (string-join notes ", ")) ""))))
        tasks "\n"))
      ((cl-some (lambda (repo)
                  (rat-kingdom-task-adapter space (plist-get repo :name)))
                repos)
       "- none")
      (t "- none (no repository has a task tracker)"))))
+
+(defvar rat-kingdom-king-status-functions nil
+  "Functions that add sections to what `status' says.
+Each is called with the space and returns a section, a heading line and
+its lines, or nil.  The sections follow the stories in progress, in the
+order of this list.  Add to it with `add-hook', so that reloading does
+not add a function twice.")
+
+(defun rat-kingdom-king--status-sections (space)
+  "Return the sections `rat-kingdom-king-status-functions' give for SPACE."
+  (let (sections)
+    (dolist (function rat-kingdom-king-status-functions)
+      (with-demoted-errors "rat-kingdom: status function: %S"
+        (when-let* ((section (funcall function space)))
+          (push section sections))))
+    (nreverse sections)))
+
+(defun rat-kingdom-king--run-text (value)
+  "Return the setup or check VALUE, from the configuration, as text.
+VALUE is an argument list or a list of command names."
+  (if (stringp (car value))
+      (combine-and-quote-strings value)
+    (mapconcat #'symbol-name value " ")))
+
+(defun rat-kingdom-king--repo-line (space repo)
+  "Return the line of status that describes REPO, a repository record, in SPACE.
+Its target, check, setup and workflow are the configured ones
+\(rat-kingdom-config.el); the agent its workers run is named if it is
+not the one configured for every repository.  What is wrong with its
+configuration as a whole is said briefly."
+  (let* ((name (plist-get repo :name))
+         (config (rat-kingdom-config-merged space :repo name))
+         (worker (plist-get (plist-get config :agents) :worker))
+         (problems (rat-kingdom-config-validate-merged space name)))
+    (format "- %s at %s; target %s; check %s%s; workflow %s%s%s%s%s"
+            name (plist-get repo :path)
+            (plist-get config :target)
+            (if (plist-get config :check)
+                (rat-kingdom-king--run-text (plist-get config :check))
+              "none")
+            (if (plist-get config :setup)
+                (concat "; setup "
+                        (rat-kingdom-king--run-text (plist-get config :setup)))
+              "")
+            (plist-get config :workflow)
+            (if (equal worker (plist-get (rat-kingdom-config-get space :agents)
+                                         :worker))
+                ""
+              (format "; workers run %s" worker))
+            (if problems
+                (format "; its configuration is wrong (tell the user): %s"
+                        (string-join problems "; "))
+              "")
+            (if-let* ((problem (rat-kingdom-task-workspace-error name)))
+                (format "; it has no br workspace, so no tasks (tell \
+the user): %s" problem)
+              "")
+            (mapconcat (lambda (warning)
+                         (concat "; warning (tell the user): " warning))
+                       (rat-kingdom-config-track-warnings name)
+                       ""))))
+
+(defun rat-kingdom-king--config-errors (space repos)
+  "Return the configuration being ignored, as a section of status, or \"\".
+That is what `rat-kingdom-config-errors' knows of the global file, the
+global workflow files and the repositories REPOS, records in SPACE, with
+their workflow files, epics and tasks.  Every workflow file of REPOS is
+read first, so that one that is wrong is known."
+  (rat-kingdom-config-workflows space)
+  (dolist (repo repos)
+    (with-demoted-errors "rat-kingdom: reading workflow files: %S"
+      (rat-kingdom-config-workflows space repo)))
+  (if-let* ((global (rat-kingdom-config-global-file))
+            (errors
+             (append
+              (cl-remove-if-not (lambda (error) (equal (car error) global))
+                                (rat-kingdom-config-errors))
+              (cl-remove-if-not
+               (lambda (error)
+                 (or (string-suffix-p "/.rk/config.eld" (car error))
+                     (string-prefix-p "the policy of " (car error))))
+               (cl-remove-duplicates
+                (mapcan (lambda (repo)
+                          (rat-kingdom-config-errors (plist-get repo :name)))
+                        repos)
+                :test #'equal))
+              (rat-kingdom-king--workflow-errors repos))))
+      (concat "\n\nConfiguration ignored (tell the user; fixing the file \
+is enough):\n"
+              (mapconcat (lambda (error)
+                           (format "- %s: %s" (car error) (cadr error)))
+                         errors "\n"))
+    ""))
 
 (defun rat-kingdom-king-status (space)
   "Return a text describing the repositories, stories and tasks in SPACE.
@@ -208,27 +459,21 @@ that fails is reported and otherwise ignored."
     (concat
      "Repositories:\n"
      (if repos
-         (mapconcat
-          (lambda (repo)
-            (format "- %s at %s; target %s; check %s%s; workflow %s"
-                    (plist-get repo :name) (plist-get repo :path)
-                    (plist-get repo :target)
-                    (if (plist-get repo :check)
-                        (combine-and-quote-strings (plist-get repo :check))
-                      "none")
-                    (if (plist-get repo :setup)
-                        (concat "; setup " (combine-and-quote-strings
-                                            (plist-get repo :setup)))
-                      "")
-                    (or (plist-get repo :workflow)
-                        rat-kingdom-story-default-workflow)))
-          repos "\n")
+         (mapconcat (lambda (repo) (rat-kingdom-king--repo-line space repo))
+                    repos "\n")
        "- none registered; use repo_add")
+     (format "\n\nAgents: %s. New stories' workers run %s \
+(rat-kingdom-default-agent, unless configured) unless story_start names \
+another."
+             (string-join (rat-kingdom-agent-names) ", ")
+             (plist-get (rat-kingdom-config-get space :agents) :worker))
+     (rat-kingdom-king--config-errors space repos)
      "\n\nStories in progress:\n"
      (if stories
-         (mapconcat (lambda (story) (rat-kingdom-king--story-line space story))
-                    stories "\n")
+         (rat-kingdom-king--story-lines space stories)
        "- none")
+     (mapconcat (lambda (section) (concat "\n\n" (string-trim-right section)))
+                (rat-kingdom-king--status-sections space) "")
      "\n\nAvailable tasks:\n"
      (rat-kingdom-king--available space repos)
      (if failures
@@ -238,6 +483,26 @@ that fails is reported and otherwise ignored."
                                       (plist-get failure :error)))
                             failures "\n"))
        ""))))
+
+(defvar rat-kingdom-king-show-functions nil
+  "Functions that add to what `story_show' and `story_diff' show of a story.
+Each is called with the space, the story's token, live or archived, and
+the tool, `show' or `diff', and returns text or nil.  For `show' the
+text is a line, or lines, of the story's entry, after the worker's
+report.  For `diff' it is shown before the Git diff, which is then left
+out if the story has no commits of its own.  rat-kingdom-doc.el puts
+one here, which shows a story's docs.  Add to it with `add-hook', so
+that reloading does not add a function twice.")
+
+(defun rat-kingdom-king--show-texts (space story tool)
+  "Return the texts `rat-kingdom-king-show-functions' give for TOOL.
+Each is called with SPACE, the token STORY and TOOL."
+  (let (texts)
+    (dolist (function rat-kingdom-king-show-functions)
+      (with-demoted-errors "rat-kingdom: show function: %S"
+        (when-let* ((text (funcall function space story tool)))
+          (push text texts))))
+    (nreverse texts)))
 
 (defun rat-kingdom-king--find-story (space id)
   "Return the token of the story ID in SPACE, live or archived.
@@ -251,9 +516,12 @@ The second value, in a cons, is non-nil if it is archived."
         (cons story t)
       (error "There is no story called %s" id))))
 
-(defun rat-kingdom-king--show (space id)
-  "Return a text with everything recorded about the story ID in SPACE."
+(defun rat-kingdom-king--show (space id &optional check)
+  "Return a text with everything recorded about the story ID in SPACE.
+CHECK, if given, is a scope check called with the story's token first;
+see `rat-kingdom-king-story-start'."
   (pcase-let* ((`(,story . ,archived) (rat-kingdom-king--find-story space id))
+               (_ (when check (funcall check 'story story)))
                (payload (plist-get story :payload))
                (others (if archived
                            (rat-kingdom-space-archived space id)
@@ -264,6 +532,7 @@ The second value, in a cons, is non-nil if it is archived."
                                            (plist-get tuple :category)))
                            :payload)))
       (let ((checked (of 'checked))
+            (ran (of 'ran))
             (stuck (of 'stuck)))
         (string-join
          (delq nil
@@ -272,6 +541,41 @@ The second value, in a cons, is non-nil if it is archived."
                         (plist-get payload :title))
                 (and (plist-get payload :description)
                      (format "Description: %s" (plist-get payload :description)))
+                (and (plist-get payload :task)
+                     (format "Task: %s%s" (plist-get payload :task)
+                             (if-let* ((epic (plist-get payload :epic)))
+                                 (format ", of the epic %s%s" epic
+                                         (if-let* ((record
+                                                    (rat-kingdom-space-rd
+                                                     space
+                                                     (list 'epic
+                                                           :scope
+                                                           (plist-get story :scope)
+                                                           :identity epic))))
+                                             (format " (%s)"
+                                                     (plist-get
+                                                      (plist-get record :payload)
+                                                      :title))
+                                           ""))
+                               "")))
+                (and (plist-get payload :parent)
+                     (format "Child story of %s, in its worktree and on \
+its branch"
+                             (plist-get payload :parent)))
+                (when-let* ((children (plist-get payload :children)))
+                  (format "Child stories: %s"
+                          (mapconcat
+                           (lambda (child)
+                             (format "%s (%s)" child
+                                     (if-let* ((token (rat-kingdom-story-get
+                                                       space child)))
+                                         (format "at %s"
+                                                 (plist-get
+                                                  (plist-get token :payload)
+                                                  :at))
+                                       "over")))
+                           children ", ")))
+                (format "Agent: %s" (rat-kingdom-king--agent payload))
                 (format "Workflow %s; at %s%s%s"
                         (plist-get payload :workflow) (plist-get payload :at)
                         (pcase (plist-get payload :phase)
@@ -282,6 +586,19 @@ The second value, in a cons, is non-nil if it is archived."
                           ("cancelled" ", cancelled")
                           (_ ""))
                         (if archived " (archived)" ""))
+                (and (not archived)
+                     (equal (plist-get payload :phase) "wait")
+                     (when-let* ((detail (rat-kingdom-king--waiting-detail
+                                          space story)))
+                       (format "%s: %s"
+                               (capitalize (plist-get payload :awaiting))
+                               detail)))
+                (unless archived
+                  (if-let* ((workflow (rat-kingdom-story--workflow space story)))
+                      (when-let* ((composition (rat-kingdom-workflow-composition
+                                                workflow)))
+                        (format "Its workflow is built from %s." composition))
+                    (rat-kingdom-story--workflow-problem space story)))
                 (and (plist-get payload :reason)
                      (format "Reason: %s" (plist-get payload :reason)))
                 (and stuck (format "Stuck: %s" (plist-get stuck :reason)))
@@ -299,6 +616,10 @@ The second value, in a cons, is non-nil if it is archived."
                                          :test #'equal)))
                        (format "Worker %s: %s" (plist-get payload :run)
                                (or (plist-get run :state) "unknown"))))
+                (and (not archived)
+                     (when-let* ((notes (rat-kingdom-king--story-notes
+                                         space story 'show)))
+                       (string-join notes "\n")))
                 (and (plist-get payload :worktree)
                      (not (plist-get payload :integrated))
                      (format "Worktree %s on branch %s"
@@ -311,28 +632,78 @@ The second value, in a cons, is non-nil if it is archived."
                 (and (plist-get payload :checks)
                      (format "Checks the worker ran: %s"
                              (plist-get payload :checks)))
+                (when-let* ((texts (rat-kingdom-king--show-texts
+                                    space story 'show)))
+                  (string-join texts "\n"))
                 (and checked
                      (format "Check: %s%s%s"
                              (plist-get checked :value)
                              (if (plist-get checked :check)
-                                 (format " (%s)" (combine-and-quote-strings
-                                                  (plist-get checked :check)))
+                                 (format
+                                  " (%s)"
+                                  (if (and (equal (plist-get checked :value)
+                                                  "pass")
+                                           (plist-get checked :names))
+                                      (string-join (plist-get checked :names)
+                                                   ", ")
+                                    (rat-kingdom-story-command-text
+                                     (plist-get checked :check)
+                                     (plist-get checked :command))))
                                " (the repository has no check; the merge was \
 clean)")
                              (if (and (equal (plist-get checked :value) "fail")
                                       (plist-get checked :output))
                                  (format "\n%s" (plist-get checked :output))
                                "")))
+                (and ran
+                     (format "Last run: %s (%s)%s"
+                             (plist-get ran :value)
+                             (if (equal (plist-get ran :value) "pass")
+                                 (string-join (plist-get ran :names) " ")
+                               (rat-kingdom-story-command-text
+                                (plist-get ran :argv)
+                                (plist-get ran :command)))
+                             (if (and (equal (plist-get ran :value) "fail")
+                                      (plist-get ran :output))
+                                 (format "\n%s" (plist-get ran :output))
+                               "")))
                 (and (plist-get payload :integrated)
                      (format "Merged into %s at %s"
-                             (or (plist-get payload :target) "the target")
+                             (or (rat-kingdom-story-target space story)
+                                 "the target")
                              (plist-get payload :integrated)))))
          "\n")))))
 
-(defun rat-kingdom-king--diff (space id)
-  "Return the changes the story ID in SPACE makes, as a diff with a summary."
+(defun rat-kingdom-king-diff-text (path from tip)
+  "Return the commits and the diff TIP makes against FROM, or nil if none.
+PATH is the repository.  The commits are those in TIP that FROM lacks;
+the diff is from where the two meet, with a summary first.  A diff
+longer than `rat-kingdom-king-diff-limit' is cut short, saying how to
+read the rest."
+  (let* ((range (format "%s...%s" from tip))
+         (log (rat-kingdom-git path "log" "--format=%h %s"
+                               (format "%s..%s" from tip))))
+    (unless (string-empty-p log)
+      (let ((diff (rat-kingdom-git path "diff" range)))
+        (concat log "\n\n"
+                (rat-kingdom-git path "diff" "--stat" range)
+                "\n\n"
+                (if (> (length diff) rat-kingdom-king-diff-limit)
+                    (format "%s\n[The diff is %d characters; this is the first \
+%d. Read the rest with git in %s: git diff %s]"
+                            (substring diff 0 rat-kingdom-king-diff-limit)
+                            (length diff) rat-kingdom-king-diff-limit path range)
+                  diff))))))
+
+(defun rat-kingdom-king--diff (space id &optional check)
+  "Return the changes the story ID in SPACE makes, as a diff with a summary.
+They are taken against the base of its last check, or else its target.
+CHECK, if given, is a scope check called with the story's token first;
+see `rat-kingdom-king-story-start'."
   (pcase-let* ((`(,story . ,_) (rat-kingdom-king--find-story space id))
+               (_ (when check (funcall check 'story story)))
                (payload (plist-get story :payload))
+               (texts (rat-kingdom-king--show-texts space story 'diff))
                (repo (or (rat-kingdom-repo-get space (plist-get story :scope))
                          (error "Repository %s is no longer registered"
                                 (plist-get story :scope))))
@@ -343,81 +714,176 @@ clean)")
                               path "rev-parse" "--verify" "--quiet"
                               (concat "refs/heads/" (plist-get payload :branch)))
                              (plist-get payload :branch))
-                        (error "%s has no commits yet" id)))
-               (from (or (plist-get payload :base) (plist-get repo :target)))
-               (range (format "%s...%s" from tip))
-               (diff (rat-kingdom-git path "diff" range))
-               (log (rat-kingdom-git path "log" "--format=%h %s"
-                                     (format "%s..%s" from tip))))
-    (if (string-empty-p log)
-        (format "%s has no commits of its own yet." id)
-      (concat log "\n\n"
-              (rat-kingdom-git path "diff" "--stat" range)
-              "\n\n"
-              (if (> (length diff) rat-kingdom-king-diff-limit)
-                  (format "%s\n[The diff is %d characters; this is the first \
-%d. Read the rest with git in %s: git diff %s]"
-                          (substring diff 0 rat-kingdom-king-diff-limit)
-                          (length diff) rat-kingdom-king-diff-limit path range)
-                diff)))))
+                        (and (not texts)
+                             (error "%s has no commits yet" id))))
+               (from (or (plist-get payload :base)
+                         (rat-kingdom-story-target space story)))
+               (diff (and tip (rat-kingdom-king-diff-text path from tip))))
+    (cond
+     ((null texts)
+      (or diff (format "%s has no commits of its own yet." id)))
+     (diff (concat (string-join texts "\n\n") "\n\n" diff))
+     (t (string-join texts "\n\n")))))
 
 ;;;; News for the king
 
+(defvar rat-kingdom-king-news-functions nil
+  "Functions that add to the king's news of what happened to a story.
+Each is called with the space, the event and the story's token, as
+`rat-kingdom-story-event-functions' are, inside the same transaction,
+and returns a paragraph to add to the news, or nil.  For an event the
+king is not otherwise told of, such as `cancelled', a paragraph makes
+news of it.  Add to it with `add-hook', so that reloading does not add
+a function twice.")
+
+(defun rat-kingdom-king--news-notes (space event story)
+  "Return the paragraphs `rat-kingdom-king-news-functions' add.
+Each is called with SPACE, EVENT and STORY."
+  (let (notes)
+    (dolist (function rat-kingdom-king-news-functions)
+      (with-demoted-errors "rat-kingdom: news function: %S"
+        (when-let* ((note (funcall function space event story)))
+          (push note notes))))
+    (nreverse notes)))
+
+(defconst rat-kingdom-foreman-id-prefix "F-"
+  "The start of the id of a foreman's run; its epic's id follows.
+A foreman is an agent that runs one epic for the king; see
+rat-kingdom-foreman.el.")
+
+(defvar rat-kingdom-king-route-functions nil
+  "Functions that send news of an epic's work to another run than the king.
+Each is called with the space, the repository and the epic's id, and
+returns nil to leave the choice to the next, or (TO . NOTE): TO is the
+id of the run to tell, nil meaning the king, and NOTE is nil or a
+paragraph to add to the news, such as why it is not going where it
+usually would.  rat-kingdom-foreman.el puts one here, which sends news
+of an epic's stories to its foreman while one is running.  Add to it
+with `add-hook', so that reloading does not add a function twice.")
+
+(defun rat-kingdom-king-route (space repo epic)
+  "Return who is told in SPACE of the work of the epic EPIC of REPO.
+The value is (TO . NOTE): TO is the id of a run, the king's unless a
+function of `rat-kingdom-king-route-functions' chooses another, and
+NOTE is nil or a paragraph to add to the news.  With EPIC nil, the news
+is the king's."
+  (or (and epic
+           (cl-loop for function in rat-kingdom-king-route-functions
+                    thereis (when-let* ((route
+                                         (with-demoted-errors
+                                             "rat-kingdom: route function: %S"
+                                           (funcall function space repo epic))))
+                              (cons (or (car route) rat-kingdom-king-id)
+                                    (cdr route)))))
+      (cons rat-kingdom-king-id nil)))
+
 (defun rat-kingdom-king--news (space event story)
-  "Leave the king a message in SPACE that EVENT happened to the token STORY."
+  "Leave the king a message in SPACE that EVENT happened to the token STORY.
+The paragraphs of `rat-kingdom-king-news-functions' are added to it.
+News of a story of an epic goes where `rat-kingdom-king-route' says:
+to the epic's foreman while it has one running."
   (let* ((payload (plist-get story :payload))
          (id (plist-get story :identity))
          (name (rat-kingdom-story--title story))
+         ;; A child story's news goes where its parent's does.
+         (route (rat-kingdom-king-route space (plist-get story :scope)
+                                        (rat-kingdom-story--config-epic
+                                         payload)))
+         (to (car route))
+         (notes (rat-kingdom-king--news-notes space event story))
          (text
           (pcase event
             ('done
              (if (plist-get payload :integrated)
                  (format "%s is merged into %s of %s at %s."
-                         name (or (plist-get payload :target) "the target")
+                         name (or (rat-kingdom-story-target space story)
+                                  "the target")
                          (plist-get story :scope)
                          (substring (plist-get payload :integrated) 0 10))
                (format "%s is over." name)))
             ('parked
-             (format "%s has stopped at %s. Reason: %s\nLook with story_show. \
+             (if (equal to rat-kingdom-king-id)
+                 (format "%s has stopped at %s. Reason: %s\nLook with story_show. \
 Then move it with story_move (to its first place for a new worker, with a \
 note saying what to do differently), or end it with story_cancel."
-                     name (plist-get payload :at)
-                     (or (plist-get payload :reason) "none given")))
+                         name (plist-get payload :at)
+                         (or (plist-get payload :reason) "none given"))
+               (format "%s has stopped at %s. Reason: %s\nLook with story_show. \
+Only the king can move or end it: if a new worker should try again, or it \
+should be ended, say so with report; or add a task with task_create to do \
+the work another way."
+                       name (plist-get payload :at)
+                       (or (plist-get payload :reason) "none given"))))
             ('review
-             (when (equal (plist-get (rat-kingdom-story--step story) :with)
+             (when (equal (plist-get (rat-kingdom-story--step space story) :with)
                           'king)
-               (format "%s passed its check and waits for your review. Read \
-story_diff and story_show for %s, then give a verdict."
-                       name id)))
+               (format "%s %s waits for your review. Read story_diff and \
+story_show for %s, then give a verdict."
+                       name
+                       (if (plist-get payload :commit)
+                           "passed its check and"
+                         "is done and")
+                       id)))
             ('stuck
-             (format "%s looks stuck. %s" name (plist-get payload :reason))))))
+             (format "%s looks stuck. %s" name (plist-get payload :reason)))
+            ('cancelled
+             (and notes (format "%s was cancelled." name)))))
+         (text (if (and text notes)
+                   (string-join (cons text notes) "\n")
+                 text))
+         (text (if (and text (cdr route))
+                   (concat text "\n" (cdr route))
+                 text)))
     (when text
       (rat-kingdom-space-out space 'message :scope (plist-get story :scope)
-                             :payload (list :to rat-kingdom-king-id
-                                            :story id :text text)
+                             :payload (list :to to :story id :text text)
                              :actor "engine"))))
 
 (add-hook 'rat-kingdom-story-event-functions #'rat-kingdom-king--news)
 
-(defvar rat-kingdom-king--retry nil
-  "The timer for another try at delivering news, or nil.")
+;;;; Giving news to the king, and to foremen
 
-(defun rat-kingdom-king-deliver (&optional space)
-  "Give the king the messages waiting for it in SPACE, if it can take them.
-Return how many were given.  If the king is running and could not take
-them, try again in `rat-kingdom-king-retry-interval' seconds."
-  (let* ((space (or space (rat-kingdom-space-default)))
-         (messages (and (rat-kingdom-space-db space)
-                        (rat-kingdom-run-live-p rat-kingdom-king-id)
-                        (rat-kingdom-space-scan
-                         space (list 'message :to rat-kingdom-king-id)))))
-    (when (timerp rat-kingdom-king--retry)
-      (cancel-timer rat-kingdom-king--retry)
-      (setq rat-kingdom-king--retry nil))
+;; Messages are given the same way to the king and to the foreman of an
+;; epic: every `message' tuple addressed with `:to' to the run, as one
+;; prompt, when the run is between turns.  Each is retracted only after
+;; the agent took the prompt, so a crash repeats news and never loses it.
+
+(defvar rat-kingdom-king--retry nil
+  "The timer for another try at delivering news to the king, or nil.")
+
+(defvar rat-kingdom-king--retries (make-hash-table :test #'equal)
+  "Hash table from the id of a run other than the king to its retry timer.")
+
+(defun rat-kingdom-king--retry-timer (to)
+  "Return the timer for another try at giving the run TO its news, or nil."
+  (if (equal to rat-kingdom-king-id)
+      rat-kingdom-king--retry
+    (gethash to rat-kingdom-king--retries)))
+
+(defun rat-kingdom-king--set-retry-timer (to timer)
+  "Make TIMER, or nil, the one for another try at giving the run TO its news."
+  (cond ((equal to rat-kingdom-king-id) (setq rat-kingdom-king--retry timer))
+        (timer (puthash to timer rat-kingdom-king--retries))
+        (t (remhash to rat-kingdom-king--retries))))
+
+(defun rat-kingdom-king-deliver-to (space to)
+  "Give the run TO the messages addressed to it in SPACE, if it can take them.
+They are the `message' tuples with `:to' TO, given as one prompt headed
+as news from the engine.  Return how many were given.  If the run is
+running and could not take them, try again in
+`rat-kingdom-king-retry-interval' seconds.  A run that is not running
+in this Emacs keeps its messages in the space."
+  (let ((messages (and (rat-kingdom-space-db space)
+                       (rat-kingdom-run-live-p to)
+                       (rat-kingdom-space-scan space (list 'message :to to)))))
+    (when-let* ((timer (rat-kingdom-king--retry-timer to)))
+      (when (timerp timer)
+        (cancel-timer timer))
+      (rat-kingdom-king--set-retry-timer to nil))
     (cond
      ((null messages) 0)
      ((rat-kingdom-run-send
-       rat-kingdom-king-id
+       to
        (concat "[rat-kingdom] News from the engine:\n\n"
                (mapconcat (lambda (message)
                             (plist-get (plist-get message :payload) :text))
@@ -426,27 +892,33 @@ them, try again in `rat-kingdom-king-retry-interval' seconds."
         (dolist (message messages)
           (rat-kingdom-space-retract space (list 'message
                                                  :id (plist-get message :id))
-                                     :actor rat-kingdom-king-id)))
+                                     :actor to)))
       (length messages))
      (t
-      (setq rat-kingdom-king--retry
-            (run-at-time rat-kingdom-king-retry-interval nil
-                         #'rat-kingdom-king-deliver space))
+      (rat-kingdom-king--set-retry-timer
+       to (run-at-time rat-kingdom-king-retry-interval nil
+                       #'rat-kingdom-king-deliver-to space to))
       0))))
 
+(defun rat-kingdom-king-deliver (&optional space)
+  "Give the king the messages waiting for it in SPACE, if it can take them.
+Return how many were given.  If the king is running and could not take
+them, try again in `rat-kingdom-king-retry-interval' seconds."
+  (rat-kingdom-king-deliver-to (or space (rat-kingdom-space-default))
+                               rat-kingdom-king-id))
+
 (defun rat-kingdom-king--on-change (space op subject)
-  "Deliver news soon after a message for the king is written to SPACE.
-OP and SUBJECT are as for `rat-kingdom-space-change-functions'."
-  (when (and (eq op 'out)
-             (eq (plist-get subject :category) 'message)
-             (equal (plist-get (plist-get subject :payload) :to)
-                    rat-kingdom-king-id))
-    (run-at-time 0 nil #'rat-kingdom-king-deliver space)))
+  "Deliver news soon after a message for the king, or a foreman, is written.
+SPACE is where; OP and SUBJECT are as for
+`rat-kingdom-space-change-functions'."
+  (when-let* (((eq op 'out))
+              ((eq (plist-get subject :category) 'message))
+              (to (plist-get (plist-get subject :payload) :to)))
+    (run-at-time 0 nil #'rat-kingdom-king-deliver-to space to)))
 
 (defun rat-kingdom-king--on-idle (run)
-  "Deliver news when RUN is the king and has ended a turn."
-  (when (equal run rat-kingdom-king-id)
-    (rat-kingdom-king-deliver)))
+  "Deliver news when RUN, the king or a foreman, has ended a turn."
+  (rat-kingdom-king-deliver-to (rat-kingdom-space-default) run))
 
 (add-hook 'rat-kingdom-space-change-functions #'rat-kingdom-king--on-change)
 (add-hook 'rat-kingdom-run-idle-functions #'rat-kingdom-king--on-idle)
@@ -455,9 +927,10 @@ OP and SUBJECT are as for `rat-kingdom-space-change-functions'."
 
 (defun rat-kingdom-king-fingerprint ()
   "Return a hash of what the king is given when its session starts.
-That is its tools, as `tools/list' serves them, and
-`rat-kingdom-king-instructions'.  If the hash a running king was
-started with differs, its tools or instructions are out of date."
+That is its tools, as `tools/list' serves them, and its
+instructions, from the function `rat-kingdom-king-instructions'.  If
+the hash a running king was started with differs, its tools or
+instructions are out of date."
   (secure-hash
    'sha256
    (json-serialize
@@ -465,7 +938,7 @@ started with differs, its tools or instructions are out of date."
                            (lambda (a b)
                              (string< (plist-get a :name)
                                       (plist-get b :name)))))
-            rat-kingdom-king-instructions))))
+            (rat-kingdom-king-instructions)))))
 
 (defun rat-kingdom-king--prompt (space resumed &optional changed)
   "Return the first prompt for the king in SPACE.
@@ -480,12 +953,12 @@ Tools you called before the restart may need calling again."
         (if changed
             (concat "\n\nThese instructions replace the ones you were given \
 earlier:\n\n"
-                    rat-kingdom-king-instructions
+                    (rat-kingdom-king-instructions)
                     "\n\nYour tools may have changed too. Rely on the tool \
 list you have now, not on what you remember of the earlier one.\n\n")
           " ")
         "This is how things stand now:\n\n")
-     (concat rat-kingdom-king-instructions
+     (concat (rat-kingdom-king-instructions)
              "\n\nThis is how things stand now:\n\n"))
    (rat-kingdom-king-status space)
    "\n\nSay in a line or two that you are ready and what, if anything, needs \
@@ -512,6 +985,8 @@ none.  Signal an error if the king is already running."
                                  :actor "user")
       (rat-kingdom-run-create
        space :id rat-kingdom-king-id :role 'king :worktree directory
+       ;; A session is taken up by the agent that started it.
+       :agent (and session (plist-get old :agent))
        :resume session :prompt prompt)
       (rat-kingdom-run-update space rat-kingdom-king-id
                               :fingerprint fingerprint))))
@@ -600,17 +1075,118 @@ to give it its new tools and instructions"))))))
 
 (defmacro rat-kingdom-king--deftool (name description args &rest body)
   "Define the king's tool NAME with DESCRIPTION and ARGS.
-BODY is run with `space' bound to the default space and `arg' to a
-function that returns an argument by name."
+BODY is run with `space' bound to the default space, `context' to the
+caller's context and `arg' to a function that returns an argument by
+name.  BODY may begin with `:roles ROLES', the roles offered the tool,
+evaluated; the default is the king's alone."
   (declare (indent 3))
-  `(rat-kingdom-mcp-define-tool
-    ,name :description ,description :roles '(king) :args ,args
-    :function
-    (lambda (_context arguments)
-      (let ((space (rat-kingdom-space-default)))
-        (cl-flet ((arg (name) (rat-kingdom-king--arg arguments name)))
-          (ignore space #'arg)
-          ,@body)))))
+  (let ((roles ''(king)))
+    (when (eq (car body) :roles)
+      (setq roles (cadr body)
+            body (cddr body)))
+    `(rat-kingdom-mcp-define-tool
+      ,name :description ,description :roles ,roles :args ,args
+      :function
+      (lambda (context arguments)
+        (let ((space (rat-kingdom-space-default)))
+          (cl-flet ((arg (name) (rat-kingdom-king--arg arguments name)))
+            (ignore space context #'arg)
+            ,@body))))))
+
+;; Some of the king's tools are a foreman's too, limited to its epic
+;; (rat-kingdom-foreman.el).  Their work is done by functions that take
+;; an optional scope check: a function called with what is about to be
+;; acted on, which signals an error if the caller may not act on it.
+;; It is called as (CHECK \='story TOKEN) with a story's token, live or
+;; archived, and as (CHECK \='task REPO TASK FOUND) with a task's id, the
+;; repository and the task as `rat-kingdom-story-task' finds it, or nil.
+;; The king's tools pass none.
+
+(defun rat-kingdom-king-story-start (space options &optional check)
+  "Start a story in SPACE as `story_start' does, and return its answer.
+OPTIONS is a property list of the tool's arguments: `:repo',
+`:title', `:description', `:task', `:workflow', `:agent' and
+`:target'.  CHECK, if given, is a scope check, called with the task
+before anything is started; see above."
+  (let* ((repo (plist-get options :repo))
+         (task (plist-get options :task))
+         (found (and task (rat-kingdom-story-task space repo task)))
+         (_ (when check (funcall check 'task repo task found)))
+         (labelled (and found (list :agent (and (not (plist-get options :agent))
+                                                (rat-kingdom-task-agent found))
+                                    :workflow (and (not (plist-get options
+                                                                   :workflow))
+                                                   (rat-kingdom-task-workflow
+                                                    found)))))
+         ;; A task of an epic that has been run is counted with it, and
+         ;; while the epic has not ended its stories merge into its
+         ;; feature branch, if it has one.
+         (record (when-let* ((parent (plist-get found :parent)))
+                   (rat-kingdom-space-rd space (list 'epic :scope repo
+                                                     :identity parent))))
+         (epic (and record (plist-get record :identity)))
+         (target (or (plist-get options :target)
+                     (let ((payload (plist-get record :payload)))
+                       (and (not (member (plist-get payload :state)
+                                         '("done" "cancelled")))
+                            (plist-get payload :branch)))))
+         (warnings (progn
+                     (when target
+                       (rat-kingdom-story-check-target space repo target))
+                     (rat-kingdom-story-warnings space repo target)))
+         (id (if task
+                 (rat-kingdom-story-start-for-task
+                  space repo task :found found
+                  :title (plist-get options :title)
+                  :description (plist-get options :description)
+                  :agent (plist-get options :agent)
+                  :workflow (plist-get options :workflow) :epic epic
+                  :target target)
+               (rat-kingdom-story-start
+                space repo
+                (or (plist-get options :title)
+                    (error "Give a title, or a task to take it from"))
+                (or (plist-get options :description)
+                    (error "Give a description, or a task to take it from"))
+                nil (plist-get options :workflow) nil
+                (plist-get options :agent) nil target)))
+         (payload (plist-get (rat-kingdom-story-get space id) :payload))
+         (from-labels (delq nil (list (and (plist-get labelled :workflow)
+                                           "workflow")
+                                      (and (plist-get labelled :agent)
+                                           "agent")))))
+    (string-join
+     (cons (format "Started %s%s with the workflow %s and the agent %s%s. You \
+will be told when it needs you or is merged."
+                   id (if task (format " for the task %s" task) "")
+                   (plist-get payload :workflow)
+                   (plist-get payload :agent)
+                   (concat
+                    (if from-labels
+                        (format " (the %s from the task's labels)"
+                                (string-join from-labels " and "))
+                      "")
+                    (if epic (format ", as a story of the epic %s" epic) "")
+                    (if target
+                        (format "; it is cut from and merges into %s" target)
+                      "")))
+           warnings)
+     "\nWarning: ")))
+
+(defun rat-kingdom-king-verdict (space story value notes actor &optional check)
+  "Record the verdict VALUE on STORY in SPACE with NOTES, as ACTOR.
+Return what `verdict' answers.  CHECK, if given, is a scope check,
+called with the story's token first; see above."
+  (when check
+    (funcall check 'story (car (rat-kingdom-king--find-story space story))))
+  (pcase (rat-kingdom-story-verdict space story value notes actor)
+    ("pass"
+     (if (when-let* ((token (rat-kingdom-story-get space story))
+                     (workflow (rat-kingdom-story--workflow space token)))
+           (not (rat-kingdom-story-merges-p workflow)))
+         (format "Recorded. %s has passed; its workflow merges nothing." story)
+       (format "Recorded. %s will be merged now." story)))
+    (_ (format "Recorded. %s goes back to a worker with your notes." story))))
 
 (rat-kingdom-king--deftool "status"
     "Show the registered repositories, every story in progress (where \
@@ -619,16 +1195,194 @@ available to start stories from."
     nil
   (rat-kingdom-king-status space))
 
+(defun rat-kingdom-king--workflow-origin (entry &optional shadowed)
+  "Return text saying where the workflow of ENTRY comes from.
+ENTRY is (WORKFLOW ORIGIN FILE), as `rat-kingdom-config-workflows'
+returns.  SHADOWED, if given, is the entry it takes the place of."
+  (pcase-let ((`(,_ ,origin ,file) entry))
+    (concat
+     (pcase origin
+       ('built-in "built-in")
+       ('global (format "global, from %s" file))
+       (_ (format "this repository's own, from %s" file)))
+     (if shadowed
+         (format "; it shadows the %s one" (nth 1 shadowed))
+       ""))))
+
+(defun rat-kingdom-king--describe-workflow (space entry view &optional shadowed)
+  "Return text describing the workflow of ENTRY, expanded for VIEW in SPACE.
+ENTRY is (WORKFLOW ORIGIN FILE), as `rat-kingdom-config-workflows'
+returns.  VIEW is a repository record, or nil for every repository:
+the workflow is expanded with the `:mixins' its configuration gives.
+SHADOWED, if given, is the entry it takes the place of.  A workflow
+that cannot be built is described as written, with the reason."
+  (let* ((base (car entry))
+         (layer (nth 2 (assq :mixins (rat-kingdom-config-explain
+                                      space :repo view))))
+         (problem nil)
+         (workflow (condition-case err
+                       (rat-kingdom-config-build-workflow
+                        space (plist-get base :name) :repo view)
+                     (rat-kingdom-config-error
+                      (setq problem (cadr err))
+                      nil))))
+    (concat
+     (rat-kingdom-workflow-describe
+      (or workflow base)
+      (rat-kingdom-king--workflow-origin entry shadowed)
+      layer)
+     (if problem
+         (format "\n  %s, so no story can follow it here (tell the user)."
+                 problem)
+       ""))))
+
+(defun rat-kingdom-king--mixin-origin (entry)
+  "Return text saying where the mixin of ENTRY, (MIXIN ORIGIN FILE), is from."
+  (pcase-let ((`(,_ ,origin ,file) entry))
+    (pcase origin
+      ('built-in "built-in")
+      ('global (format "global, from %s" file))
+      (_ (format "this repository's own, from %s" file)))))
+
+(defun rat-kingdom-king--describe-mixins (entries)
+  "Return lines describing the mixins of ENTRIES, each with its origin.
+ENTRIES is as `rat-kingdom-config-mixins' returns."
+  (mapconcat (lambda (entry)
+               (concat "- " (rat-kingdom-workflow-describe-mixin
+                             (car entry)
+                             (rat-kingdom-king--mixin-origin entry))))
+             entries "\n"))
+
+(defun rat-kingdom-king-workflow-list (space &optional repo)
+  "Return the text of `workflow_list' in SPACE, for REPO or for all.
+REPO is a repository's name.  With REPO, it describes each workflow a
+story there can follow, expanded with its mixins and aspects and the
+repository's `:mixins', and where it comes from, then the mixins the
+repository can use.  Without, it describes those every repository has,
+expanded with the global `:mixins', and the mixins every repository
+can use, and then, for each registered repository, names the
+workflows it has and describes those its own files define, and its own
+mixin files.  Workflow and mixin files being ignored follow, with the
+reason."
+  (when (and repo (not (rat-kingdom-repo-get space repo)))
+    (error "No repository called %s is registered" repo))
+  (let* ((every (rat-kingdom-config-workflows space))
+         (repos (if repo
+                    (list (rat-kingdom-repo-get space repo))
+                  (rat-kingdom-repo-list space)))
+         (sections nil))
+    (cl-flet ((describe (entry view)
+                (rat-kingdom-king--describe-workflow
+                 space entry view
+                 (and (eq (nth 1 entry) 'repo)
+                      (cl-find (plist-get (car entry) :name) every
+                               :key (lambda (other)
+                                      (plist-get (car other) :name))
+                               :test #'equal)))))
+      (unless repo
+        (push (concat "Workflows of every repository:\n\n"
+                      (mapconcat (lambda (entry) (describe entry nil))
+                                 every "\n\n")
+                      "\n\nMixins of every repository:\n"
+                      (rat-kingdom-king--describe-mixins
+                       (rat-kingdom-config-mixins space)))
+              sections))
+      (dolist (record repos)
+        (let* ((name (plist-get record :name))
+               (entries (rat-kingdom-config-workflows space record))
+               (mixins (rat-kingdom-config-mixins space record))
+               (own (cl-remove-if-not (lambda (entry)
+                                        (eq (nth 1 entry) 'repo))
+                                      entries))
+               (own-mixins (cl-remove-if-not (lambda (entry)
+                                               (eq (nth 1 entry) 'repo))
+                                             mixins))
+               (configured (rat-kingdom-config-get space :mixins
+                                                   :repo record)))
+          (push (if repo
+                    (concat (format "Workflows of %s:\n\n" name)
+                            (mapconcat (lambda (entry) (describe entry record))
+                                       entries "\n\n")
+                            (format "\n\nMixins %s can use:\n" name)
+                            (rat-kingdom-king--describe-mixins mixins))
+                  (concat
+                   (format "Repository %s has: %s." name
+                           (mapconcat
+                            (lambda (entry)
+                              (format "%s (%s)" (plist-get (car entry) :name)
+                                      (if (eq (nth 1 entry) 'repo)
+                                          "its own"
+                                        (nth 1 entry))))
+                            entries ", "))
+                   (if configured
+                       (format " Its :mixins is %s, applied to every workflow \
+there; see workflow_list with repo for the result."
+                               (mapconcat #'symbol-name configured " "))
+                     "")
+                   (if own
+                       (concat "\n\n"
+                               (mapconcat (lambda (entry) (describe entry record))
+                                          own "\n\n"))
+                     "")
+                   (if own-mixins
+                       (concat (format "\n\nMixins of %s's own:\n" name)
+                               (rat-kingdom-king--describe-mixins own-mixins))
+                     "")))
+                sections))))
+    (when-let* ((errors (rat-kingdom-king--workflow-errors repos)))
+      (push (concat "Workflow and mixin files ignored (tell the user; fixing \
+the file is enough):\n"
+                    (mapconcat (lambda (error)
+                                 (format "- %s: %s" (car error) (cadr error)))
+                               errors "\n"))
+            sections))
+    (string-join (nreverse sections) "\n\n")))
+
+(defun rat-kingdom-king--workflow-errors (repos)
+  "Return the workflow and mixin files being ignored that affect REPOS.
+REPOS are records.  They are the global workflow and mixin files and
+those of REPOS, as (SOURCE MESSAGE) from `rat-kingdom-config-errors'."
+  (let ((global (rat-kingdom-config-workflow-directory))
+        (mixins (rat-kingdom-config-mixin-directory)))
+    (cl-remove-duplicates
+     (append
+      (cl-remove-if-not (lambda (error)
+                          (or (string-prefix-p global (car error))
+                              (string-prefix-p mixins (car error))))
+                        (rat-kingdom-config-errors))
+      (cl-remove-if-not
+       (lambda (error)
+         (string-match-p "/\\.rk/\\(?:workflows\\|mixins\\)/[^/]*\\'"
+                         (car error)))
+       (mapcan (lambda (repo)
+                 (rat-kingdom-config-errors (plist-get repo :name)))
+               repos)))
+     :test #'equal)))
+
 (rat-kingdom-king--deftool "workflow_list"
-    "List the workflows a story can follow, with their steps."
-    nil
-  (mapconcat #'rat-kingdom-workflow-describe (rat-kingdom-workflow-list)
-             "\n\n"))
+    "List the workflows a story can follow, with their steps, and where \
+each comes from: built in, a global workflow file, or a repository's own \
+file in .rk/workflows, which counts for that repository only. Each is shown \
+expanded with its mixins and aspects and the configuration's :mixins, with \
+a line saying what it was built from; the mixins that can be used follow, \
+each with where it comes from. Without repo, the workflows of every \
+repository and then what each registered repository has; with repo, that \
+repository's."
+    '((:name "repo" :type string :optional t
+       :description "A registered repository, to list only the workflows \
+its stories can follow."))
+  (rat-kingdom-king-workflow-list space (arg 'repo)))
 
 (rat-kingdom-king--deftool "repo_add"
     "Register a Git repository so that stories can be started in it, or \
 change the settings of one already registered. Creates the target branch \
-from HEAD if it does not exist."
+from HEAD if it does not exist. Every repository needs a br (Rust Beads) \
+workspace for its tasks: if the checkout has no .beads directory one is \
+initialized, and the answer says so. An existing .beads is left alone. \
+.rk and .beads are kept out of Git through info/exclude, or not, as the \
+configuration's :track says; the answer warns if Git already tracks files \
+in one kept out (tell the user). If br is missing or fails, nothing is \
+registered."
     '((:name "path" :type string
        :description "Absolute path of the repository's checkout.")
       (:name "check" :type string :optional t
@@ -643,19 +1397,61 @@ for none.")
        :description "The branch finished work is merged into. Default \
 rk/integration. It must not be a branch that is checked out.")
       (:name "workflow" :type string :optional t
-       :description "The workflow stories here follow by default."))
-  (when (and (arg 'workflow) (not (rat-kingdom-workflow-get (arg 'workflow))))
-    (error "There is no workflow called %s" (arg 'workflow)))
+       :description "The workflow stories here follow by default.")
+      (:name "task_prefix" :type string :optional t
+       :description "The issue prefix of the br workspace, if one has to \
+be created. Default the repository's name.")
+      (:name "git" :type string :optional t
+       :description "The :git configuration of the registration layer, as \
+Emacs Lisp text read as config_set reads a value, e.g. (:branch \"rats/%s-%i\" \
+:integrate squash). :branch is the format of story branch names (%i story \
+id, %s title slug, %r repo, %e epic or none, %% a %); :integrate is merge, \
+rebase or squash. Leave out for the defaults.")
+      (:name "mixins" :type string :optional t
+       :description "Mixins applied to every workflow its stories follow, \
+as Emacs Lisp text: a list of names such as (no-review). See workflow_list \
+for the mixins there are."))
+  (when-let* ((workflow (arg 'workflow))
+              (where (list :path (expand-file-name (arg 'path))
+                           :name (or (plist-get (cl-find
+                                                 (expand-file-name (arg 'path))
+                                                 (rat-kingdom-repo-list space)
+                                                 :key (lambda (repo)
+                                                        (plist-get repo :path))
+                                                 :test #'equal)
+                                                :name)
+                                     (file-name-nondirectory
+                                      (directory-file-name
+                                       (expand-file-name (arg 'path))))))))
+    (unless (rat-kingdom-config-workflow space workflow where)
+      (error "There is no workflow called %s; there are: %s" workflow
+             (rat-kingdom-config-workflow-names space where))))
   (let ((repo (rat-kingdom-repo-add
                space (expand-file-name (arg 'path))
                :check (and (arg 'check) (split-string-and-unquote (arg 'check)))
                :setup (and (arg 'setup) (split-string-and-unquote (arg 'setup)))
-               :target (arg 'target) :workflow (arg 'workflow))))
+               :target (arg 'target) :workflow (arg 'workflow)
+               :task-prefix (arg 'task_prefix)
+               :git (and (arg 'git) (rat-kingdom-config-read-value
+                                     (arg 'git)))
+               :mixins (and (arg 'mixins)
+                            (rat-kingdom-config-read-value (arg 'mixins))))))
     (string-join
-     (cons (format "Registered %s at %s. Finished work is merged into %s."
+     (cons (format "Registered %s at %s. Finished work is merged into %s.%s"
                    (plist-get repo :name) (plist-get repo :path)
-                   (plist-get repo :target))
-           (rat-kingdom-story-warnings space (plist-get repo :name)))
+                   (rat-kingdom-story-repo-target space (plist-get repo :name))
+                   (if (plist-get repo :task-initialized)
+                       (format " Initialized a br workspace there with the \
+prefix %s, %s." (rat-kingdom-task-br-prefix repo)
+                               (if (plist-get (rat-kingdom-config-get
+                                               space :track
+                                               :repo (plist-get repo :name))
+                                              :beads)
+                                   "to be tracked in Git"
+                                 "kept out of Git"))
+                     ""))
+           (append (plist-get repo :track-warnings)
+                   (rat-kingdom-story-warnings space (plist-get repo :name))))
      "\nWarning: ")))
 
 (rat-kingdom-king--deftool "repo_sync"
@@ -664,28 +1460,6 @@ checkout, so that new workers see what the user has committed since. Only \
 ever moves the target forward."
     '((:name "repo" :type string :description "The repository's name."))
   (rat-kingdom-story-sync space (arg 'repo)))
-
-(defun rat-kingdom-king--task (space repo id)
-  "Return the task ID of the repository REPO in SPACE, for a new story.
-The task is a property list with at least `:title' and `:description',
-taken from its `available' tuple or else from the tracker.  Signal an
-error if REPO has no tracker, the tracker has no such task, or a story
-already works on it."
-  (let ((adapter (or (rat-kingdom-task-adapter space repo)
-                     (error "The repository %s has no task tracker, so it \
-has no task %s; leave out task and give a title and description" repo id))))
-    (when-let* ((story (rat-kingdom-space-rd
-                        space (list 'story :scope repo :task id))))
-      (error "The story %s already works on the task %s; see story_show"
-             (plist-get story :identity) id))
-    (or (plist-get (rat-kingdom-space-rd
-                    space (list 'available :scope repo :identity id))
-                   :payload)
-        (condition-case err
-            (or (rat-kingdom-task-show adapter id)
-                (error "No such task"))
-          (error (error "The tracker of %s has no task %s (%s); see \
-Available tasks in status" repo id (error-message-string err)))))))
 
 (rat-kingdom-king--deftool "story_start"
     "Start a story: one task for one worker in one repository. The worker \
@@ -703,43 +1477,38 @@ else. Required unless task is given.")
        :description "The id of a tracker task, as listed under Available \
 tasks in status. Title and description default to the task's.")
       (:name "workflow" :type string :optional t
-       :description "The workflow to follow, if not the repository's own."))
-  (let* ((repo (arg 'repo))
-         (warnings (rat-kingdom-story-warnings space repo))
-         (task (arg 'task))
-         (found (and task (rat-kingdom-king--task space repo task)))
-         (title (or (arg 'title) (plist-get found :title)
-                    (error "Give a title, or a task to take it from")))
-         (description
-          (cond ((not task)
-                 (or (arg 'description)
-                     (error "Give a description, or a task to take it from")))
-                ((and (not (arg 'description)) (plist-get found :description)))
-                (t (concat (and (arg 'description)
-                                (concat (arg 'description) "\n\n"))
-                           (format "This story works on the tracker task \
-%s: %s" task (plist-get found :title))))))
-         (id (rat-kingdom-story-start space repo title description nil
-                                      (arg 'workflow) task)))
-    (string-join
-     (cons (format "Started %s%s with the workflow %s. You will be told when \
-it needs you or is merged."
-                   id (if task (format " for the task %s" task) "")
-                   (plist-get (plist-get (rat-kingdom-story-get space id)
-                                         :payload)
-                              :workflow))
-           warnings)
-     "\nWarning: ")))
+       :description "The workflow to follow, such as story, story-lite or \
+research (a researcher writes docs; nothing is merged). Default the task's \
+rk-workflow: label if it has one, else the repository's own.")
+      (:name "agent" :type string :optional t
+       :description "Chooses the agent the story's workers run: claude \
+for Claude Code, or codex for OpenAI Codex in full-access mode. Every \
+worker the story is given, after a failed check or a review too, runs it. \
+Default the task's rk-agent: label if it has one, else \
+rat-kingdom-default-agent, the user's setting, which status shows.")
+      (:name "target" :type string :optional t
+       :description "Rarely needed; leave it out. The branch the worker's \
+worktree is cut from and the work is merged into, instead of the \
+repository's target. It must be an existing local branch that is not \
+checked out. A task of an epic run with a feature branch gets the epic's \
+branch without this."))
+  (rat-kingdom-king-story-start
+   space (list :repo (arg 'repo) :title (arg 'title)
+               :description (arg 'description) :task (arg 'task)
+               :workflow (arg 'workflow) :agent (arg 'agent)
+               :target (arg 'target))))
 
 (rat-kingdom-king--deftool "story_show"
     "Show everything recorded about one story, in progress or finished: \
-where it is, why it stopped, the worker's report and the check's outcome."
+where it is, why it stopped, the worker's report, its docs and the check's \
+outcome."
     '((:name "story" :type string :description "The story's id, like S-1a2b."))
   (rat-kingdom-king--show space (arg 'story)))
 
 (rat-kingdom-king--deftool "story_diff"
     "Show the commits and the diff a story's work makes against its \
-repository's target branch."
+target branch. For a story with docs, such as a research story, each doc's \
+text comes first, and the diff only if the branch has commits."
     '((:name "story" :type string :description "The story's id."))
   (rat-kingdom-king--diff space (arg 'story)))
 
@@ -757,6 +1526,33 @@ worker (move it to the workflow's first place) or to skip or repeat a step."
           (rat-kingdom-story-move space (arg 'story) (arg 'place) (arg 'note)
                                   rat-kingdom-king-id)))
 
+(defun rat-kingdom-king-story-signal (space id name actor)
+  "Send the signal NAME to the story ID in SPACE, as ACTOR, and say what it did."
+  (let* ((open (rat-kingdom-story-signal space id name actor))
+         (payload (plist-get (rat-kingdom-story-get space id) :payload)))
+    (if open
+        (format "Sent %s to %s, which waits at its gate %s for it, so the \
+gate opens." name id (plist-get payload :step))
+      (format "Sent %s to %s, which is not waiting at a gate for %s now \
+(it is at %s%s). The signal is kept until a gate of the story waits for it, \
+or the story ends."
+              name id name (plist-get payload :at)
+              (if (equal (plist-get payload :phase) "wait")
+                  (format ", waiting for %s%s" (plist-get payload :awaiting)
+                          (if-let* ((signal (plist-get payload :signal)))
+                              (format " the signal %s" signal)
+                            ""))
+                "")))))
+
+(rat-kingdom-king--deftool "story_signal"
+    "Send a signal to a story, to open its gate step that waits for a \
+signal of that name. A signal sent before the story reaches the gate is \
+kept, and opens the gate when it gets there."
+    '((:name "story" :type string :description "The story's id.")
+      (:name "name" :type string :description "The signal's name."))
+  (rat-kingdom-king-story-signal space (arg 'story) (arg 'name)
+                                 rat-kingdom-king-id))
+
 (rat-kingdom-king--deftool "story_cancel"
     "End a story for good. Its worker is stopped and the story is archived. \
 Its worktree and branch are kept for the user to look at or delete."
@@ -770,11 +1566,8 @@ be merged. fix sends it back to a worker with your notes."
       (:name "value" :type string :description "pass or fix.")
       (:name "notes" :type string :optional t
        :description "With fix: what to change, exact enough to act on."))
-  (pcase (rat-kingdom-story-verdict space (arg 'story) (arg 'value)
-                                    (arg 'notes) rat-kingdom-king-id)
-    ("pass" (format "Recorded. %s will be merged now." (arg 'story)))
-    (_ (format "Recorded. %s goes back to a worker with your notes."
-               (arg 'story)))))
+  (rat-kingdom-king-verdict space (arg 'story) (arg 'value) (arg 'notes)
+                           rat-kingdom-king-id))
 
 (rat-kingdom-king--deftool "publish"
     "Push one local branch of a registered repository to one of its \
@@ -793,6 +1586,68 @@ rk/integration. It is pushed to the branch of the same name.")
   (rat-kingdom-git-publish-describe
    (rat-kingdom-git-publish space (arg 'repo) (arg 'branch)
                             :remote (arg 'remote) :actor rat-kingdom-king-id)))
+
+(rat-kingdom-king--deftool "config_show"
+    "Show the effective configuration of a repository, or of an epic or \
+task in it: every key (workflow, target, commands, setup, check, agents, \
+timeouts, attempts, max-workers, track) with its value and the layer it \
+came from (defaults, global, registration, repo, epic or task), the files \
+the layers are read from, any configuration being ignored and why, and \
+anything the merged result cannot resolve, such as an unknown workflow or \
+an undefined command. It never writes."
+    '((:name "repo" :type string :description "The repository's name.")
+      (:name "epic" :type string :optional t
+       :description "An epic's id, to include its policy.")
+      (:name "task" :type string :optional t
+       :description "A task's id, to include its policy."))
+  (rat-kingdom-config-show space (arg 'repo) :epic (arg 'epic)
+                           :task (arg 'task)))
+
+(rat-kingdom-king--deftool "config_set"
+    "Set or remove one configuration key at one layer. Change it only when \
+the user asks. Layers: global (every repository; the file config.eld in \
+the rat-kingdom directory), repo (one repository; <repo>/.rk/config.eld \
+in the user's checkout), epic or task (a policy kept by rat-kingdom). A \
+more specific layer wins, and for commands, agents, timeouts and track, \
+sub-key by sub-key. Keys and the layers that may set them: workflow (all), \
+target (global, repo), commands (global, repo), setup (global, repo), check \
+(all), agents (all), timeouts (all), attempts (all), max-workers (global), \
+track (global, repo). Before writing, the change is checked for every \
+repository it affects: an unknown workflow, an undefined command name, a \
+key not allowed at the layer, a value of the wrong shape or a target that \
+is not a local branch refuses it, and nothing is written. A file is \
+rewritten whole, so comments in it are not kept. A change to track is \
+applied to info/exclude at once. Returns what changed and the value now in \
+effect."
+    '((:name "layer" :type string
+       :description "global, repo, epic or task.")
+      (:name "key" :type string
+       :description "The key, e.g. check or :check.")
+      (:name "value" :type string
+       :description "The new value, as Emacs Lisp text, read and never \
+evaluated; nil removes the key from the layer, so a less specific layer's \
+value applies. workflow: a name, story. target: a branch, \
+\"rk/integration\". commands: a property list from command name to \
+argument list, (:lint (\"npx\" \"eslint\" \".\") :test (\"npm\" \"test\")). \
+setup and check: an argument list run without a shell, (\"make\" \"test\"), \
+or command names defined in commands, run in order, (lint test). agents: \
+(:worker codex :foreman claude). timeouts: seconds, (:worker 7200 :check \
+1800). attempts and max-workers: a positive integer, 5. track: (:rk nil \
+:beads t), t to keep the directory in Git, nil to keep it out. A value for \
+commands, agents, timeouts or track replaces that key's whole value at \
+this layer; sub-keys it leaves out come from the layers below.")
+      (:name "repo" :type string :optional t
+       :description "The repository's name. Required for the repo, epic \
+and task layers.")
+      (:name "epic" :type string :optional t
+       :description "The epic's id, for the epic layer.")
+      (:name "task" :type string :optional t
+       :description "The task's id, for the task layer."))
+  (rat-kingdom-config-set
+   space (arg 'layer) (arg 'key)
+   (rat-kingdom-config-read-value (alist-get 'value arguments))
+   :repo (arg 'repo) :epic (arg 'epic) :task (arg 'task)
+   :actor rat-kingdom-king-id))
 
 (provide 'rat-kingdom-king)
 ;;; rat-kingdom-king.el ends here

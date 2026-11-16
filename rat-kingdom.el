@@ -53,8 +53,9 @@
 ;;   M-x rat-kingdom-king-restart restart the king's session in place,
 ;;                                so it has its current tools
 ;;
-;; A worker is a Claude Code session in an agent-shell buffer, in its own
-;; worktree.  When it reports that it is done, its commit is merged in a
+;; A worker is a Claude Code or Codex session in an agent-shell buffer,
+;; in its own worktree; the story chooses which, by default
+;; `rat-kingdom-default-agent'.  When it reports that it is done, its commit is merged in a
 ;; candidate worktree, the repository's check runs, the king reviews it
 ;; if the workflow says so, and the repository's target branch
 ;; (rk/integration unless you say otherwise) is moved.  Your checkout is
@@ -70,8 +71,15 @@
 (require 'rat-kingdom-run)
 (require 'rat-kingdom-workflow)
 (require 'rat-kingdom-task)
+(require 'rat-kingdom-config)
 (require 'rat-kingdom-story)
 (require 'rat-kingdom-king)
+(require 'rat-kingdom-fact)
+(require 'rat-kingdom-message)
+(require 'rat-kingdom-doc)
+(require 'rat-kingdom-epic)
+(require 'rat-kingdom-plan)
+(require 'rat-kingdom-foreman)
 
 (defgroup rat-kingdom nil
   "Swarm orchestration for coding agents."
@@ -89,13 +97,21 @@
 (defun rat-kingdom-reconcile ()
   "Recover the work that was in flight when Emacs last stopped.
 A worker that was cut off is replaced by a new one in the same
-worktree, and a check or setup that was running is run again.  Turning on
-`rat-kingdom-mode' does this, so it is seldom needed by hand."
+worktree, and a check or setup that was running is run again, as is
+the check of an epic that was landing.  An epic's foreman that was cut
+off takes up its session again.  Turning on `rat-kingdom-mode' does
+this, so it is seldom needed by hand.  Return what
+`rat-kingdom-story-reconcile' does, with `:landings', the ids of the
+epics whose landing check is run again, and `:foremen', the ids of the
+foremen started again."
   (interactive)
   (let* ((space (rat-kingdom-space-default))
-         (found (rat-kingdom-story-reconcile space))
+         (found (append (rat-kingdom-story-reconcile space)
+                        (list :landings (rat-kingdom-epic-reconcile space)
+                              :foremen (rat-kingdom-foreman-reconcile space))))
          (runs (plist-get found :runs))
-         (checks (plist-get found :checks))
+         (checks (append (plist-get found :checks)
+                         (plist-get found :landings)))
          (setups (plist-get found :setups)))
     (when (and rat-kingdom-mode (or runs checks setups))
       (rat-kingdom-reaction-run space))
@@ -129,8 +145,12 @@ again (%s), %d to set up again (%s)"
   "React to what is written to the rat-kingdom space.
 While this is on, stories move: workers are started, their results
 checked, reviewed and merged.  Turning it on first recovers whatever
-an earlier Emacs left in flight, then shows each repository's ready
-tasks as `available' in the space."
+an earlier Emacs left in flight, makes sure every registered repository
+has a br workspace and that its info/exclude says what the
+configuration's :track says, then shows each repository's ready tasks as
+`available' in the space, and starts the stories running epics have
+room for.  A repository whose workspace cannot be made is reported and
+skipped."
   :global t
   :group 'rat-kingdom
   (when (timerp rat-kingdom--watch-timer)
@@ -140,8 +160,14 @@ tasks as `available' in the space."
       (let ((space (rat-kingdom-space-default)))
         (rat-kingdom-reaction--ensure-table space)
         (rat-kingdom-reconcile)
+        (with-demoted-errors "rat-kingdom: making br workspaces: %S"
+          (rat-kingdom-task-ensure-all space))
+        (with-demoted-errors "rat-kingdom: applying :track: %S"
+          (rat-kingdom-config-track-apply-all space))
         (with-demoted-errors "rat-kingdom: projecting tasks: %S"
           (rat-kingdom-task-project-all space))
+        (with-demoted-errors "rat-kingdom: running epics: %S"
+          (rat-kingdom-epic-recover space))
         (rat-kingdom-reaction-attach space)
         (rat-kingdom--start-watch))
     (rat-kingdom-reaction-detach (rat-kingdom-space-default))
@@ -210,34 +236,75 @@ PATTERN, if given, is a story pattern the story must match."
            nil t)))))
 
 ;;;###autoload
-(defun rat-kingdom-add-repo (path &optional check setup)
+(defun rat-kingdom-add-repo (path &optional check setup task-prefix git
+                                  mixins)
   "Register the repository at PATH, with CHECK as its merge check.
 CHECK is a command as a list of strings, run without a shell in a
 candidate worktree; work is merged only if it succeeds.  SETUP is a
 command of the same kind run in each new worktree before a worker
-starts and before the check, such as one that installs dependencies."
+starts and before the check, such as one that installs dependencies.
+If the checkout has no br workspace, one is created with TASK-PREFIX,
+by default the repository's name, as its issue prefix; see
+`rat-kingdom-task-br-ensure'.  GIT, from Lisp only, is the :git
+configuration of the registration layer, such as (:branch
+\"rats/%s-%i\" :integrate squash).  MIXINS, from Lisp only, a list of
+mixin names such as (no-review), is applied to every workflow its
+stories follow.  .rk and .beads are then kept out of
+Git, or not, as the configuration's :track says; see
+`rat-kingdom-config-track-apply'."
   (interactive
-   (list (read-directory-name "Repository: " nil nil t)
-         (rat-kingdom--read-command
-          "Check before merging (empty for none), e.g. make check: ")
-         (rat-kingdom--read-command
-          "Setup in each new worktree (empty for none), e.g. npm ci: ")))
+   (let ((path (read-directory-name "Repository: " nil nil t)))
+     (list path
+           (rat-kingdom--read-command
+            "Check before merging (empty for none), e.g. make check: ")
+           (rat-kingdom--read-command
+            "Setup in each new worktree (empty for none), e.g. npm ci: ")
+           (unless (file-directory-p
+                    (expand-file-name
+                     ".beads" (rat-kingdom-git path "rev-parse"
+                                               "--show-toplevel")))
+             (let ((prefix (read-string
+                            "Prefix of the new br workspace (empty for the \
+repository's name): ")))
+               (and (not (string-blank-p prefix)) prefix))))))
   (let ((repo (rat-kingdom-repo-add (rat-kingdom-space-default) path
-                                    :check check :setup setup)))
-    (message "Registered %s; finished work is merged into %s"
-             (plist-get repo :name) (plist-get repo :target))))
+                                    :check check :setup setup
+                                    :task-prefix task-prefix :git git
+                                    :mixins mixins)))
+    (message "Registered %s; finished work is merged into %s%s%s"
+             (plist-get repo :name)
+             (rat-kingdom-story-repo-target (rat-kingdom-space-default)
+                                            (plist-get repo :name))
+             (if (plist-get repo :task-initialized)
+                 (format "; created its br workspace, prefix %s, %s"
+                         (rat-kingdom-task-br-prefix repo)
+                         (if (plist-get (rat-kingdom-config-get
+                                         (rat-kingdom-space-default) :track
+                                         :repo (plist-get repo :name))
+                                        :beads)
+                             "to be tracked in Git"
+                           "kept out of Git"))
+               "")
+             (mapconcat (lambda (warning) (concat "\nWarning: " warning))
+                        (plist-get repo :track-warnings) ""))))
 
 ;;;###autoload
-(defun rat-kingdom-start-story (repo title description)
-  "Give a worker in REPO one task: TITLE, with DESCRIPTION as its criteria."
+(defun rat-kingdom-start-story (repo title description &optional agent)
+  "Give a worker in REPO one task: TITLE, with DESCRIPTION as its criteria.
+AGENT names the agent the story's workers run, \"claude\" or \"codex\";
+nil means `rat-kingdom-default-agent'."
   (interactive
    (let ((names (mapcar (lambda (repo) (plist-get repo :name))
-                        (rat-kingdom-repo-list (rat-kingdom-space-default)))))
+                        (rat-kingdom-repo-list (rat-kingdom-space-default))))
+         (default (rat-kingdom-agent-name nil)))
      (unless names
        (user-error "Register a repository first: M-x rat-kingdom-add-repo"))
      (list (completing-read "Repository: " names nil t)
            (read-string "Task: ")
-           (read-string "Acceptance criteria: "))))
+           (read-string "Acceptance criteria: ")
+           (completing-read (format-prompt "Agent" default)
+                            (rat-kingdom-agent-names) nil t nil nil
+                            default))))
   (unless rat-kingdom-mode
     (rat-kingdom-mode 1))
   (let* ((space (rat-kingdom-space-default))
@@ -249,16 +316,17 @@ starts and before the check, such as one that installs dependencies."
     (message "Started %s"
              (rat-kingdom-story-start space repo title
                                       (and (not (string-blank-p description))
-                                           description)))))
+                                           description)
+                                      nil nil nil agent))))
 
 ;;;###autoload
 (defun rat-kingdom-move-story (story place &optional note)
   "Put STORY at PLACE of its workflow, with NOTE saying why."
   (interactive
    (let* ((story (rat-kingdom--read-story "Move story: "))
+          (space (rat-kingdom-space-default))
           (workflow (rat-kingdom-story--workflow
-                     (rat-kingdom-story-get (rat-kingdom-space-default)
-                                            story))))
+                     space (rat-kingdom-story-get space story))))
      (list story
            (completing-read "To: " (plist-get workflow :places) nil t)
            (read-string "Note for the next worker (may be empty): "))))
@@ -304,7 +372,8 @@ See `rat-kingdom-git-publish'."
                                                     "--format=%(refname:short)"
                                                     "refs/heads")
                                    "\n" t)
-                     nil t nil nil (plist-get repo :target)))
+                     nil t nil nil (rat-kingdom-story-repo-target
+                                    space (plist-get repo :name))))
             (remote (completing-read
                      "Remote: " (split-string (rat-kingdom-git path "remote")
                                               "\n" t)
@@ -323,7 +392,10 @@ See `rat-kingdom-git-publish'."
   '("rat-kingdom-space" "rat-kingdom-reaction" "rat-kingdom-git"
     "rat-kingdom-mcp" "rat-kingdom-inspector" "rat-kingdom-agent-shell"
     "rat-kingdom-run" "rat-kingdom-workflow" "rat-kingdom-task"
-    "rat-kingdom-story" "rat-kingdom-king" "rat-kingdom")
+    "rat-kingdom-config" "rat-kingdom-story" "rat-kingdom-king"
+    "rat-kingdom-fact" "rat-kingdom-message" "rat-kingdom-doc"
+    "rat-kingdom-epic"
+    "rat-kingdom-plan" "rat-kingdom-foreman" "rat-kingdom")
   "The package's files, each after the files it requires.")
 
 (defun rat-kingdom--directory ()

@@ -60,16 +60,19 @@
     (blocked . persistent)
     (checked . persistent)
     (setup . persistent)
+    (ran . persistent)
     (review . linear)
     (verdict . linear)
     (message . linear)
+    (signal . linear)
     (doc . persistent)
     (fact . persistent)
     (policy . persistent)
     (event . affine)
     (stuck . persistent)
     (repo . persistent)
-    (published . persistent))
+    (published . persistent)
+    (epic . persistent))
   "Alist of the built-in tuple categories and their default modalities.
 `rat-kingdom-space-categories' holds the categories added to these.")
 
@@ -114,7 +117,9 @@ An affine tuple is consumed at most once and otherwise expires.")
 Each is called with three arguments, once per change and in order: the
 space, the operation and its subject.  For the operations `out', `in'
 and `retract' the subject is the tuple.  For `sweep' and `expire' it
-is a property list with `:count', and `:owner' for a sweep.
+is a property list with `:count', and `:owner' for a sweep.  A tuple
+archived by `rat-kingdom-space-archive' is announced with the reason
+it was given as the operation, and the tuple as the subject.
 
 Changes made by another process are not announced; compare
 `rat-kingdom-space-data-version' over time to notice those.")
@@ -612,6 +617,18 @@ how many tuples moved."
         (when (> count 0)
           (rat-kingdom-space--announce space 'sweep (list :owner owner :count count)))
         count))))
+
+(defun rat-kingdom-space-archive (space id reason)
+  "Move the live tuple ID of SPACE to the archive, recording REASON.
+REASON is a symbol, such as `forget', recorded as the tuple's reason
+and as the operation in the log.  The change is announced as REASON,
+with the tuple as its subject.  Return the tuple, or nil if there is
+no live tuple ID."
+  (rat-kingdom-space-with-transaction space
+    (when-let* ((tuple (rat-kingdom-space-rd space (list '_ :id id))))
+      (rat-kingdom-space--archive space "id = ?" (list id) reason)
+      (rat-kingdom-space--announce space reason tuple)
+      tuple)))
 
 (defun rat-kingdom-space-expire (space)
   "Archive every tuple in SPACE whose time has passed.  Return how many."
