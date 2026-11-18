@@ -56,6 +56,7 @@
 ;;   M-x rat-kingdom-reload       load changed source into this Emacs
 ;;   M-x rat-kingdom-king-restart restart the king's session in place,
 ;;                                so it has its current tools
+;;   M-x rat-kingdom-king-compact compact the king's conversation
 ;;
 ;; A worker is a Claude Code or Codex session in an agent-shell buffer,
 ;; in its own worktree; the story chooses which, by default
@@ -220,6 +221,22 @@ something in its buffer that is not sent."
   (interactive)
   (rat-kingdom-king-restart-session (rat-kingdom-space-default))
   (message "rat-kingdom: restarted the king's session in place"))
+
+;;;###autoload
+(defun rat-kingdom-king-compact (&optional focus)
+  "Compact the king's conversation, as /compact does in its buffer.
+FOCUS, read from the minibuffer, says what the summary should keep;
+leave it blank for none.  If the king is in the middle of a turn, or
+you have typed something in its buffer that is not sent, this is done
+when that turn ends or the input is sent.  Afterwards the king is told
+to call `status', and news that waited meanwhile follows."
+  (interactive (list (read-string "Compact the king, keeping (optional): ")))
+  (let ((space (rat-kingdom-space-default)))
+    (rat-kingdom-king-compact-schedule space focus t)
+    (message (if (eq rat-kingdom-king--compaction 'compacting)
+                 "rat-kingdom: compacting the king's context"
+               "rat-kingdom: the king's context will be compacted when \
+its turn ends"))))
 
 ;;;; By hand
 

@@ -467,7 +467,8 @@ by hand: `rat-kingdom-add-repo`, `rat-kingdom-start-story`,
 `rat-kingdom-cancel-story`, `rat-kingdom-publish`. `M-x
 rat-kingdom-inspect` shows the space. `M-x rat-kingdom-king-restart`
 restarts the king's session in place, keeping the conversation, so that it
-fetches its tools afresh.
+fetches its tools afresh. `M-x rat-kingdom-king-compact` compacts the king's conversation, as
+`/compact` does; the king can do it itself with `compact_self`.
 
 ### After a restart
 

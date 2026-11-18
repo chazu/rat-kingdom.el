@@ -152,6 +152,8 @@ show it with a2ui: call `a2ui_catalog` once for the components, then \
 `render_a2ui` a diagram, a table or a side-by-side. Keep the text answer \
 complete. Skip it for short factual answers, and if the a2ui tools are not \
 available.
+- Call `compact_self` when the user asks, or when the conversation is long \
+and mostly about finished work.
 - Keep answers to the user short. They can always ask for more."
   "What the king is told when its session starts.
 The text {tools} in it is replaced by the names of the king's tools,
@@ -858,6 +860,104 @@ story_show for %s, then give a verdict."
 
 (add-hook 'rat-kingdom-story-event-functions #'rat-kingdom-king--news)
 
+;;;; Compacting the king's context
+
+;; The king, or the user, can have the king's conversation compacted,
+;; as the user can by typing Claude Code's /compact.  The king asks
+;; with `compact_self' in the middle of its own turn, so nothing is
+;; done until that turn ends.  Then the king is given "/compact" as a
+;; prompt, which claude-agent-acp hands to Claude Code to run as its
+;; compact command.  News for the king waits meanwhile.  When the
+;; compaction's own turn ends, the king is told that it was compacted,
+;; with the news that waited.  See DESIGN.md, section 9.
+
+(defconst rat-kingdom-king-compacted-text
+  "[rat-kingdom] Your conversation was compacted. Call `status` to see \
+how things stand now before you go on."
+  "What the king is told after its context was compacted.")
+
+(defvar rat-kingdom-king--compaction nil
+  "Where a compaction of the king's context stands, or nil if none is asked.
+\(scheduled . FOCUS) means /compact is to be sent, with FOCUS or
+nil, when the king's turn ends; `compacting' that it was sent and its
+turn has not ended; `done' that it ended and the king is still to be
+told.")
+
+(defvar rat-kingdom-king--compaction-retry nil
+  "The timer for another try at sending the king /compact, or nil.")
+
+(defun rat-kingdom-king-compacting-p ()
+  "Return non-nil if the king's context is to be compacted or is being so."
+  (or (consp rat-kingdom-king--compaction)
+      (eq rat-kingdom-king--compaction 'compacting)))
+
+(defun rat-kingdom-king-compact-prompt (focus)
+  "Return the prompt that compacts the king's context, keeping FOCUS.
+FOCUS is a line saying what to keep, or nil; it is put on one line."
+  (if focus
+      (concat "/compact "
+              (replace-regexp-in-string "[ \t\n\r]+" " " (string-trim focus)))
+    "/compact"))
+
+(defun rat-kingdom-king--cancel-compaction-retry ()
+  "Cancel the timer for another try at sending the king /compact."
+  (when (timerp rat-kingdom-king--compaction-retry)
+    (cancel-timer rat-kingdom-king--compaction-retry))
+  (setq rat-kingdom-king--compaction-retry nil))
+
+(defun rat-kingdom-king-compact-schedule (space &optional focus now)
+  "Have the king's context in SPACE compacted once its turn ends.
+FOCUS, if not blank, is a line saying what the summary should keep.
+NOW non-nil means try at once, for when the king may be between
+turns.  Return a text saying what will happen.  Signal a `user-error'
+if the king is not running or is being compacted already."
+  (unless (rat-kingdom-run-live-p rat-kingdom-king-id)
+    (user-error "The king is not running"))
+  (when (eq rat-kingdom-king--compaction 'compacting)
+    (user-error "The king's context is being compacted already"))
+  (let ((again (consp rat-kingdom-king--compaction)))
+    (setq rat-kingdom-king--compaction
+          (cons 'scheduled (and focus (not (string-blank-p focus)) focus)))
+    (when now
+      (rat-kingdom-king--compact-step space))
+    (cond ((eq rat-kingdom-king--compaction 'compacting)
+           "The king's context is being compacted now.")
+          (again
+           "A compaction was already asked for; it now keeps this focus. \
+It happens when this turn ends.")
+          (t
+           "Your conversation will be compacted when this turn ends, so end \
+the turn now. News waits until it is done; then you are told, and should \
+call `status`."))))
+
+(defun rat-kingdom-king--compact-step (space)
+  "Take a compaction of the king's context in SPACE a step on.
+Send /compact if it is to be sent, trying again later if the king
+cannot take it now; or, once it was sent, mark it done and give the
+king the news that waited."
+  (pcase rat-kingdom-king--compaction
+    (`(scheduled . ,focus)
+     (rat-kingdom-king--cancel-compaction-retry)
+     (cond ((not (rat-kingdom-run-live-p rat-kingdom-king-id)))
+           ((rat-kingdom-run-send rat-kingdom-king-id
+                                  (rat-kingdom-king-compact-prompt focus))
+            (setq rat-kingdom-king--compaction 'compacting))
+           (t
+            (setq rat-kingdom-king--compaction-retry
+                  (run-at-time rat-kingdom-king-retry-interval nil
+                               #'rat-kingdom-king--compact-step space)))))
+    ('compacting
+     (setq rat-kingdom-king--compaction 'done)
+     (rat-kingdom-king-deliver-to space rat-kingdom-king-id))))
+
+(defun rat-kingdom-king--compact-on-idle (run)
+  "Take a compaction of the king's context on when RUN, the king, ended a turn."
+  (when (and rat-kingdom-king--compaction
+             (equal run rat-kingdom-king-id))
+    (rat-kingdom-king--compact-step (rat-kingdom-space-default))))
+
+(add-hook 'rat-kingdom-run-idle-functions #'rat-kingdom-king--compact-on-idle)
+
 ;;;; Giving news to the king, and to foremen
 
 ;; Messages are given the same way to the king and to the foreman of an
@@ -889,27 +989,43 @@ They are the `message' tuples with `:to' TO, given as one prompt headed
 as news from the engine.  Return how many were given.  If the run is
 running and could not take them, try again in
 `rat-kingdom-king-retry-interval' seconds.  A run that is not running
-in this Emacs keeps its messages in the space."
-  (let ((messages (and (rat-kingdom-space-db space)
-                       (rat-kingdom-run-live-p to)
-                       (rat-kingdom-space-scan space (list 'message :to to)))))
+in this Emacs keeps its messages in the space.
+While the king's context is being compacted its messages wait; once
+that is done, it is told so first (`rat-kingdom-king-compact-schedule')."
+  (let* ((live (and (rat-kingdom-space-db space) (rat-kingdom-run-live-p to)))
+         (king (equal to rat-kingdom-king-id))
+         (held (and king (rat-kingdom-king-compacting-p)))
+         (notice (and live king (eq rat-kingdom-king--compaction 'done)
+                      rat-kingdom-king-compacted-text))
+         (messages (and live (not held)
+                        (rat-kingdom-space-scan space
+                                                (list 'message :to to)))))
     (when-let* ((timer (rat-kingdom-king--retry-timer to)))
       (when (timerp timer)
         (cancel-timer timer))
       (rat-kingdom-king--set-retry-timer to nil))
     (cond
-     ((null messages) 0)
+     ((not (or messages notice)) 0)
      ((rat-kingdom-run-send
        to
-       (concat "[rat-kingdom] News from the engine:\n\n"
-               (mapconcat (lambda (message)
-                            (plist-get (plist-get message :payload) :text))
-                          messages "\n\n")))
+       (string-join
+        (delq nil
+              (list notice
+                    (and messages
+                         (concat "[rat-kingdom] News from the engine:\n\n"
+                                 (mapconcat (lambda (message)
+                                              (plist-get (plist-get message
+                                                                    :payload)
+                                                         :text))
+                                            messages "\n\n")))))
+        "\n\n"))
       (rat-kingdom-space-with-transaction space
         (dolist (message messages)
           (rat-kingdom-space-retract space (list 'message
                                                  :id (plist-get message :id))
                                      :actor to)))
+      (when notice
+        (setq rat-kingdom-king--compaction nil))
       (length messages))
      (t
       (rat-kingdom-king--set-retry-timer
@@ -987,6 +1103,9 @@ Take up its earlier session again unless FRESH is non-nil or there was
 none.  Signal an error if the king is already running."
   (when (rat-kingdom-run-live-p rat-kingdom-king-id)
     (error "The king is already running"))
+  ;; A new session's first prompt says how things stand anyway.
+  (setq rat-kingdom-king--compaction nil)
+  (rat-kingdom-king--cancel-compaction-retry)
   (let* ((old (rat-kingdom-run-get space rat-kingdom-king-id))
          (session (and (not fresh) (plist-get old :session-id)))
          (fingerprint (rat-kingdom-king-fingerprint))
@@ -1677,6 +1796,16 @@ and task layers.")
    (rat-kingdom-config-read-value (alist-get 'value arguments))
    :repo (arg 'repo) :epic (arg 'epic) :task (arg 'task)
    :actor rat-kingdom-king-id))
+
+(rat-kingdom-king--deftool "compact_self"
+    "Compact your own conversation, as the user can with /compact. It \
+happens when this turn ends, not now, so end the turn after calling this. \
+News from the engine waits until it is done. Then you are told, and should \
+call `status`."
+    '((:name "focus" :type string :optional t
+       :description "A line saying what the summary should keep, e.g. \
+\"the open stories and what the user asked last\"."))
+  (rat-kingdom-king-compact-schedule space (arg 'focus)))
 
 (provide 'rat-kingdom-king)
 ;;; rat-kingdom-king.el ends here
