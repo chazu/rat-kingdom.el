@@ -79,7 +79,9 @@
 (declare-function agent-shell-openai-make-codex-config "agent-shell-openai")
 (declare-function rat-kingdom-run-exited "rat-kingdom-run")
 (declare-function rat-kingdom-run-update "rat-kingdom-run")
+(declare-function rat-kingdom-run-label "rat-kingdom-run")
 (defvar rat-kingdom-run-idle-functions)
+(defvar rat-kingdom-run-buffer-id)
 
 (defun rat-kingdom-agent-shell--servers (token)
   "Return the MCP servers for a run holding TOKEN.
@@ -480,9 +482,11 @@ had before, if it is a function.  Return non-nil if it was answered."
 
 (defun rat-kingdom-agent-shell--buffer-name (run)
   "Return the name for the shell buffer of RUN.
-A worker's, a rat's or a researcher's, starts with its role."
-  (if (member (plist-get run :role) '("rat" "researcher"))
-      (format "%s %s" (plist-get run :role) (plist-get run :id))
+A rat's starts with its role and has its name and id, as \"rat
+Pip-3a9c (S-3a9c.1)\"; see `rat-kingdom-run-label'.  The king's is its
+id."
+  (if (member (plist-get run :role) '("rat" "researcher" "foreman" "consul"))
+      (format "%s %s" (plist-get run :role) (rat-kingdom-run-label run))
     (plist-get run :id)))
 
 (defun rat-kingdom-agent-shell--model (run)
@@ -541,6 +545,7 @@ RUN has `:resume', take that session up again, with the same agent."
                                            :session-strategy 'new)))))
          (sent nil))
     (with-current-buffer buffer
+      (setq-local rat-kingdom-run-buffer-id id)
       (let ((previous (bound-and-true-p
                        agent-shell-permission-responder-function)))
         (setq-local agent-shell-permission-responder-function

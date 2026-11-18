@@ -197,7 +197,7 @@
                    '(:agents (:worker codex))))
     (should (equal (rat-kingdom-config-get space :agents :repo "demo"
                                            :epic "E-1")
-                   '(:worker codex :foreman claude)))
+                   '(:worker codex :foreman claude :consul claude)))
     (rat-kingdom-config-set-test--ok
      "config_set" '(layer . "task") '(repo . "demo") '(task . "T-1")
      '(key . "workflow") '(value . "story"))

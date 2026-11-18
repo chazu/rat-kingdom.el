@@ -207,11 +207,13 @@ review, then wait for news from the engine.")))
 
 ;;;; Starting and stopping
 
-(defun rat-kingdom-foreman--launch (space record agent prompt &optional session)
+(defun rat-kingdom-foreman--launch (space record agent prompt &optional session
+                                          name)
   "Record the run of the foreman of the epic RECORD in SPACE, to be started.
 It runs AGENT in the repository's checkout and is given PROMPT.
-SESSION, if given, is the session to take up again.  The epic's record
-keeps the run's id as `:foreman'.  Return the id."
+SESSION, if given, is the session to take up again, and NAME the name
+it had; a new foreman is given a new name.  The epic's record keeps the
+run's id as `:foreman'.  Return the id."
   (let* ((repo (plist-get record :scope))
          (epic (plist-get record :identity))
          (id (rat-kingdom-foreman-id epic))
@@ -224,7 +226,7 @@ registered" repo))
                                  :actor rat-kingdom-king-id)
       (rat-kingdom-run-create space :id id :repo repo :role 'foreman
                               :agent agent :worktree path :prompt prompt
-                              :resume session)
+                              :resume session :name name)
       (rat-kingdom-run-update space id :epic epic)
       (rat-kingdom-epic--update space repo epic
                                 (lambda (payload)
@@ -428,7 +430,7 @@ ids of the foremen started again."
                    (or (plist-get run :agent)
                        rat-kingdom-agent-shell-fallback-agent)
                    (rat-kingdom-foreman--prompt space record session)
-                   session)
+                   session (plist-get run :name))
                   (push id ids))
               (error
                (message "rat-kingdom: could not take up the foreman %s \
@@ -646,10 +648,11 @@ configured."))
          (record (rat-kingdom-epic--get space (arg 'epic)))
          (run (rat-kingdom-run-get space id)))
     (rat-kingdom-epic--run-reactions space)
-    (format "Started the foreman %s (%s) for the epic %s. News of its stories \
-goes to the foreman from now on; it reviews them and reports to you. \
+    (format "Started the foreman %s (%s, %s) for the epic %s. News of its \
+stories goes to the foreman from now on; it reviews them and reports to you. \
 foreman_stop hands its reviews back to you.%s"
-            id (plist-get run :agent) (rat-kingdom-epic--name record)
+            id (rat-kingdom-run-display-name run) (plist-get run :agent)
+            (rat-kingdom-epic--name record)
             (if-let* ((reviews (rat-kingdom-foreman--reviews space record)))
                 (format " Waiting for review now, which the foreman was asked \
 to review: %s." (string-join reviews ", "))

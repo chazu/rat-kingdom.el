@@ -67,7 +67,7 @@ the fake backend says an agent is busy while
     (rat-kingdom-message-test--start space "S-1")
     (let ((answer (rat-kingdom-message-test--tell "S-1" "  Use tabs.  ")))
       (should-not (cdr answer))
-      (should (equal (car answer) "Delivered now to worker S-1.1.")))
+      (should (equal (car answer) "Delivered now to worker Pip-1 (S-1.1).")))
     (should (equal (rat-kingdom-message-test--sent-to "S-1.1")
                    '("[rat-kingdom] Message from the king:\nUse tabs.")))
     (should-not (rat-kingdom-message-waiting space "S-1"))
@@ -92,7 +92,7 @@ the fake backend says an agent is busy while
     (dolist (text '("First." "Second."))
       (let ((answer (rat-kingdom-message-test--tell "S-1" text)))
         (should-not (cdr answer))
-        (should (string-search "Worker S-1.1 is in the middle of a turn"
+        (should (string-search "Worker Pip-1 (S-1.1) is in the middle of a turn"
                                (car answer)))
         (should (string-search "when its current turn ends" (car answer)))
         (should (string-search "inbox" (car answer)))))
@@ -158,7 +158,7 @@ the fake backend says an agent is busy while
     ;; The worker has reported but the story has not moved on yet.
     (let ((answer (car (rat-kingdom-message-test--tell
                         "S-1" "Name it wanted.txt."))))
-      (should (string-search "S-1.1 has already reported that it is done"
+      (should (string-search "Pip-1 (S-1.1) has already reported that it is done"
                              answer))
       (should (string-search "will not be given" answer))
       (should (string-search "next worker, in its brief" answer))
@@ -315,8 +315,8 @@ Second.")))
     (rat-kingdom-message-test--tell "S-2" "Only one.")
     (let ((status (rat-kingdom-king-test--ok "status")))
       (should (string-match-p
-               "^- S-1 \\[demo\\] ready (waiting for worker S-1\\.1, working), \
-[^,]+, claude, 2 messages waiting: Task S-1$"
+               "^- S-1 \\[demo\\] ready (waiting for worker Pip-1 (S-1\\.1), \
+working), [^,]+, claude, 2 messages waiting: Task S-1$"
                status))
       (should (string-search ", claude, 1 message waiting: Task S-2" status)))
     (let ((show (rat-kingdom-king-test--ok "story_show" '(story . "S-1"))))

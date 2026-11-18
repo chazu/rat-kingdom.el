@@ -156,7 +156,7 @@
      :validate rat-kingdom-config--run-problem)
     (:agents
      :layers (defaults global repo epic task)
-     :sub-keys (:worker :foreman)
+     :sub-keys (:worker :foreman :consul)
      :validate rat-kingdom-config--agent-problem)
     (:timeouts
      :layers (defaults global repo epic task)
@@ -1067,7 +1067,8 @@ if the policy was removed."
     (rat-kingdom-config--normalize
      (list :workflow rat-kingdom-story-default-workflow
            :target rat-kingdom-git-default-target
-           :agents (list :worker rat-kingdom-default-agent :foreman 'claude)
+           :agents (list :worker rat-kingdom-default-agent :foreman 'claude
+                         :consul rat-kingdom-default-agent)
            :timeouts (append (and worker (list :worker worker))
                              (and check (list :check check)))
            :attempts rat-kingdom-story-attempts
