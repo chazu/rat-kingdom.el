@@ -79,6 +79,7 @@
 (require 'rat-kingdom-doc)
 (require 'rat-kingdom-epic)
 (require 'rat-kingdom-plan)
+(require 'rat-kingdom-board)
 (require 'rat-kingdom-foreman)
 
 (defgroup rat-kingdom nil
@@ -398,7 +399,8 @@ See `rat-kingdom-git-publish'."
     "rat-kingdom-config" "rat-kingdom-story" "rat-kingdom-king"
     "rat-kingdom-fact" "rat-kingdom-message" "rat-kingdom-doc"
     "rat-kingdom-epic"
-    "rat-kingdom-plan" "rat-kingdom-foreman" "rat-kingdom")
+    "rat-kingdom-plan" "rat-kingdom-board" "rat-kingdom-foreman"
+    "rat-kingdom")
   "The package's files, each after the files it requires.")
 
 (defun rat-kingdom--directory ()
