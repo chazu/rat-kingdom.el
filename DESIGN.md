@@ -998,6 +998,24 @@ Run states, kept distinct as in rk2: `starting`, `working`, `ready`,
 `interrupted` (Emacs stopped while it worked). A run that cannot be
 started is `exited` with the error.
 
+**Built: names.** Every rat, that is every run but the king's (workers,
+researchers, foremen, consuls), has a name, `:name` in its run record,
+taken in turn from `rat-kingdom-rat-names` (Pip, Nibbles, Whiskers and
+some sixty more, each one word). The place in the list is kept in the
+file `rat-names` in `rat-kingdom-directory`, so it carries on after a
+restart, and a name a live rat holds is skipped: one whose run is
+`starting`, `working` or `interrupted`, or whose agent runs in this
+Emacs, or a consul not yet dismissed. If every name is held, the next is
+numbered, as Pip2. A name is shown with the run's suffix, the four hex
+digits of its story or consul, or the epic's id for a foreman: Pip-3a9c
+for S-3a9c's first worker, Nibbles-3a9c for its second, Bean-T-1 for the
+foreman F-T-1. People see it with the id beside it, "Pip-3a9c
+(S-3a9c.1)", in agent-shell buffer names ("rat Pip-3a9c (S-3a9c.1)"),
+status lines, `story_show`'s worker line, `tell`'s answers and the
+engine's news, and a worker is told its own in its prompt. Ids stay the
+references every tool takes. A foreman or consul taken up again after a
+restart keeps its name.
+
 A story's run counts against the worker limit (section 7.2) while it is
 `starting` or `working`. Once it reports, its agent sits idle until its
 story moves on; the king's run never counts. Stories beyond the limit

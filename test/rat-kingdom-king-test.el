@@ -91,7 +91,8 @@ run codex" (rat-kingdom-king-test--ok "status")))
         (rat-kingdom-reaction-run space)
         (should (equal (rat-kingdom-story-test--agent (concat id ".1"))
                        "claude"))
-        (should (string-search (format "%s.1, working), " id)
+        (should (string-search (format "%s, working), "
+                                       (rat-kingdom-run-label (concat id ".1")))
                                (rat-kingdom-king-test--ok "status")))
         (should (string-match-p ", [0-9]+s, claude: Add a file"
                                 (rat-kingdom-king-test--ok "status")))
@@ -200,7 +201,7 @@ codex" (car answer))))
       (rat-kingdom-reaction-run space)
       (let ((status (rat-kingdom-king-test--ok "status")))
         (should (string-search (format "- %s [demo] ready (waiting for worker \
-%s.1, working)" id id)
+%s, working)" id (rat-kingdom-run-label (concat id ".1")))
                                status))
         (should (string-search "Add a file" status)))
       (should (string-search "no commits of its own yet"
@@ -279,7 +280,8 @@ codex" (car answer))))
       (should (string-search "Which file?" news)))
     (let ((status (rat-kingdom-king-test--ok "status")))
       (should (string-search "blocked (stopped)" status))
-      (should (string-search "reason: The worker S-1.1 is blocked: Which file?"
+      (should (string-search "reason: The worker Pip-1 (S-1.1) is blocked: \
+Which file?"
                              status)))
     (should (cdr (rat-kingdom-king-test--call "story_move" '(story . "S-1")
                                               '(place . "nowhere"))))

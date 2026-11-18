@@ -699,9 +699,10 @@ Each is called with SPACE, the token STORY and RUN-ID."
     (nreverse sections)))
 
 (defun rat-kingdom-story--prompt (space story run-id worktree branch target
-                                        earlier &optional role step)
+                                        earlier &optional role step name)
   "Return what the worker RUN-ID is told about the token STORY in SPACE.
-It works in WORKTREE on BRANCH, cut from TARGET.  EARLIER is non-nil
+It works in WORKTREE on BRANCH, cut from TARGET.  NAME, if given, is
+the rat's name, which it is told with its id.  EARLIER is non-nil
 if the story has been worked on before.  ROLE is the worker's role, by
 default a rat; it chooses the instructions the prompt begins with
 \(`rat-kingdom-run-instructions').  STEP is the step that starts the
@@ -713,7 +714,12 @@ under \"For this step (STEP):\".  The sections from
     (concat (rat-kingdom-run-instructions (or role "rat"))
             (format "\n\nYou are %s.\nWorktree: %s\nBranch: %s (cut from %s)\
 \n\nTask %s: %s\n"
-                    run-id worktree branch target (plist-get story :identity)
+                    (if name
+                        (format "%s, called %s" run-id
+                                (rat-kingdom-run-display-name
+                                 (list :id run-id :name name)))
+                      run-id)
+                    worktree branch target (plist-get story :identity)
                     (plist-get payload :title))
             (when-let* ((description (plist-get payload :description)))
               (concat "\n" description "\n"))
@@ -842,16 +848,17 @@ the step's `:attempts', else the configuration's."
                space (list 'result :scope (plist-get story :scope) :identity id))
               (rat-kingdom-space-retract
                space (list 'blocked :scope (plist-get story :scope) :identity id))
-              (rat-kingdom-run-create
-               space :id run-id :repo (plist-get repo :name) :story id
-               :role (plist-get step :with)
-               :agent (plist-get payload :agent)
-               :model (plist-get payload :model)
-               :worktree worktree :branch branch :target target
-               :prompt (rat-kingdom-story--prompt
-                        space story run-id worktree branch target
-                        (or known (> attempt 1)) (plist-get step :with)
-                        step))
+              (let ((name (rat-kingdom-run-new-name space)))
+                (rat-kingdom-run-create
+                 space :id run-id :repo (plist-get repo :name) :story id
+                 :role (plist-get step :with) :name name
+                 :agent (plist-get payload :agent)
+                 :model (plist-get payload :model)
+                 :worktree worktree :branch branch :target target
+                 :prompt (rat-kingdom-story--prompt
+                          space story run-id worktree branch target
+                          (or known (> attempt 1)) (plist-get step :with)
+                          step name)))
               (rat-kingdom-story--wait space story step "worker"
                                        :run run-id :branch branch
                                        :worktree worktree :attempt attempt
@@ -1861,7 +1868,10 @@ CHANGES is merged into its payload."
   (rat-kingdom-story--leave rat-kingdom-reaction-space
                             (car rat-kingdom-reaction-tuples) :blocked
                             :reason (format "The worker %s is blocked: %s"
-                                            $run $why)))
+                                            (rat-kingdom-run-label
+                                             (rat-kingdom-run-get
+                                              rat-kingdom-reaction-space $run))
+                                            $why)))
 
 (rat-kingdom-defreaction rat-kingdom-story-worker-gone
   "Stop a story whose worker's session ended before it reported."
@@ -1873,7 +1883,8 @@ CHANGES is merged into its payload."
      rat-kingdom-reaction-space story
      (format "The session of the worker %s ended before it reported%s. Its \
 work so far is in %s."
-             $run
+             (rat-kingdom-run-label (rat-kingdom-run--record
+                                     (cadr rat-kingdom-reaction-tuples)))
              (if-let* ((why (plist-get run :error))) (concat ": " why) "")
              (plist-get (plist-get story :payload) :worktree)))))
 

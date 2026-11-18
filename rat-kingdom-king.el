@@ -263,7 +263,7 @@ For a gate that is when it opens or the signal it waits for; for a
                               (cond
                                ((and run (equal (plist-get payload :awaiting)
                                                 "worker"))
-                                (format " %s, %s" (plist-get run :id)
+                                (format " %s, %s" (rat-kingdom-run-label run)
                                         (plist-get run :state)))
                                ((rat-kingdom-king--waiting-detail space story)
                                 (concat ": " (rat-kingdom-king--waiting-detail
@@ -616,7 +616,10 @@ its branch"
                                                   others))
                                          :key (lambda (run) (plist-get run :id))
                                          :test #'equal)))
-                       (format "Worker %s: %s" (plist-get payload :run)
+                       (format "Worker %s: %s"
+                               (if run
+                                   (rat-kingdom-run-label run)
+                                 (plist-get payload :run))
                                (or (plist-get run :state) "unknown"))))
                 (and (not archived)
                      (when-let* ((notes (rat-kingdom-king--story-notes
