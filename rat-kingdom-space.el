@@ -666,6 +666,30 @@ time it was archived, and `:reason', `sweep' or `expire'."
             rat-kingdom-space--columns (if owner "WHERE owner = ?" ""))
     (and owner (list (rat-kingdom-space--field owner))))))
 
+(defun rat-kingdom-space-archived-in (space category &optional since identity)
+  "Return the tuples of CATEGORY archived in SPACE, oldest first.
+With SINCE, a time, only those archived then or later; with IDENTITY,
+only those with that identity.  Each tuple has `:archived' and
+`:reason' as for `rat-kingdom-space-archived'."
+  (let ((conditions (list "category = ?"))
+        (arguments (list (rat-kingdom-space--field category))))
+    (when since
+      (push "archived >= ?" conditions)
+      (push since arguments))
+    (when identity
+      (push "identity = ?" conditions)
+      (push (rat-kingdom-space--field identity) arguments))
+    (mapcar
+     (lambda (row)
+       (append (rat-kingdom-space--row-tuple (butlast row 2))
+               (list :archived (nth 9 row) :reason (intern (nth 10 row)))))
+     (sqlite-select
+      (rat-kingdom-space-db space)
+      (format "SELECT %s, archived, reason FROM archive WHERE %s ORDER BY id"
+              rat-kingdom-space--columns
+              (string-join (nreverse conditions) " AND "))
+      (nreverse arguments)))))
+
 (defun rat-kingdom-space-ops (space &optional limit)
   "Return the operations log of SPACE, oldest first.
 With LIMIT, only the newest LIMIT entries.  Each entry is a property
