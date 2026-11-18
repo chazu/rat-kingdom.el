@@ -37,6 +37,10 @@
 ;;   M-x rat-kingdom-king         start the king, or show it; then tell
 ;;                                it what you want done and where
 ;;   M-x rat-kingdom-inspect      watch the space
+;;   M-x rat-kingdom-consul-start start a consul, a rat to talk with
+;;                                about one repository, and show it
+;;   M-x rat-kingdom-consul-dismiss dismiss one; its commits become
+;;                                a story for the king
 ;;
 ;; Everything the king does can also be done by hand:
 ;;
@@ -80,6 +84,7 @@
 (require 'rat-kingdom-epic)
 (require 'rat-kingdom-plan)
 (require 'rat-kingdom-foreman)
+(require 'rat-kingdom-consul)
 
 (defgroup rat-kingdom nil
   "Swarm orchestration for coding agents."
@@ -98,17 +103,18 @@
   "Recover the work that was in flight when Emacs last stopped.
 A worker that was cut off is replaced by a new one in the same
 worktree, and a check or setup that was running is run again, as is
-the check of an epic that was landing.  An epic's foreman that was cut
-off takes up its session again.  Turning on `rat-kingdom-mode' does
-this, so it is seldom needed by hand.  Return what
-`rat-kingdom-story-reconcile' does, with `:landings', the ids of the
-epics whose landing check is run again, and `:foremen', the ids of the
-foremen started again."
+the check of an epic that was landing.  An epic's foreman, and a
+consul, that was cut off takes up its session again.  Turning on
+`rat-kingdom-mode' does this, so it is seldom needed by hand.  Return
+what `rat-kingdom-story-reconcile' does, with `:landings', the ids of
+the epics whose landing check is run again, `:foremen', the ids of the
+foremen started again, and `:consuls', those of the consuls."
   (interactive)
   (let* ((space (rat-kingdom-space-default))
          (found (append (rat-kingdom-story-reconcile space)
                         (list :landings (rat-kingdom-epic-reconcile space)
-                              :foremen (rat-kingdom-foreman-reconcile space))))
+                              :foremen (rat-kingdom-foreman-reconcile space)
+                              :consuls (rat-kingdom-consul-reconcile space))))
          (runs (plist-get found :runs))
          (checks (append (plist-get found :checks)
                          (plist-get found :landings)))
@@ -398,7 +404,8 @@ See `rat-kingdom-git-publish'."
     "rat-kingdom-config" "rat-kingdom-story" "rat-kingdom-king"
     "rat-kingdom-fact" "rat-kingdom-message" "rat-kingdom-doc"
     "rat-kingdom-epic"
-    "rat-kingdom-plan" "rat-kingdom-foreman" "rat-kingdom")
+    "rat-kingdom-plan" "rat-kingdom-foreman" "rat-kingdom-consul"
+    "rat-kingdom")
   "The package's files, each after the files it requires.")
 
 (defun rat-kingdom--directory ()

@@ -625,6 +625,73 @@ story; see `rat-kingdom-story-start'."
      (or agent (rat-kingdom-task-agent found))
      epic target model)))
 
+(defun rat-kingdom-story-work-place (workflow)
+  "Return the place of WORKFLOW where a worker's finished work goes.
+That is where the spawn steps from its start place lead, one after
+another, such as checking in the workflow story: work done without a
+worker, such as a consul's, starts there.  Signal an error if the
+workflow's start place takes no spawn step."
+  (let ((place (plist-get workflow :start))
+        (seen nil)
+        step)
+    (while (and (setq step (rat-kingdom-workflow-step workflow place))
+                (eq (plist-get step :kind) :spawn)
+                (not (member place seen)))
+      (push place seen)
+      (setq place (plist-get step :to)))
+    (unless seen
+      (error "The workflow %s does not start with a worker, so it cannot \
+take work that is already done" (plist-get workflow :name)))
+    place))
+
+(cl-defun rat-kingdom-story-start-from-branch (space repo title
+                                                     &key description branch
+                                                     worktree target summary
+                                                     agent)
+  "Start a story in SPACE for REPO from work already done on BRANCH.
+Return the story's id.  The work is committed on BRANCH, which is
+checked out in WORKTREE and was cut from TARGET, the repository's
+target.  The story follows the configuration's `:workflow' for REPO
+and starts at the place a worker's finished work goes,
+`rat-kingdom-story-work-place', with BRANCH's tip as its commit, so
+that it is checked, reviewed and merged as a worker's work is.  TITLE
+and DESCRIPTION are as for `rat-kingdom-story-start'; SUMMARY stands for
+a worker's summary.  AGENT is the agent of any worker it is given later,
+by default the configured `:agents' `:worker'."
+  (unless (rat-kingdom-repo-get space repo)
+    (error "No repository called %s is registered" repo))
+  (let* ((id (rat-kingdom-story--new-id space))
+         (where (list :scope repo :payload nil))
+         (name (rat-kingdom-workflow--name
+                (rat-kingdom-story-config space where :workflow)))
+         (workflow (or (condition-case err
+                           (rat-kingdom-config-build-workflow space name
+                                                              :repo repo)
+                         (rat-kingdom-config-error (error "%s" (cadr err))))
+                       (error "There is no workflow called %s" name)))
+         (path (plist-get (rat-kingdom-repo-get space repo) :path)))
+    (rat-kingdom-space-out
+     space 'story :scope repo :identity id :owner id
+     :payload (append
+               (list :workflow name
+                     :at (rat-kingdom-story-work-place workflow)
+                     :phase "enter" :title title :description description
+                     :agent (rat-kingdom-agent-name
+                             (or agent
+                                 (plist-get (rat-kingdom-story-config
+                                             space where :agents)
+                                            :worker)))
+                     :attempt 0 :branch branch :worktree worktree
+                     :commit (rat-kingdom-git-rev path branch)
+                     :summary summary
+                     :entered (funcall rat-kingdom-space-now-function))
+               (and target
+                    (not (equal target (rat-kingdom-story-repo-target
+                                        space repo)))
+                    (list :target target)))
+     :actor "user")
+    id))
+
 (defun rat-kingdom-story-warnings (space repo &optional target)
   "Return what a person starting a story in REPO in SPACE should know.
 The result is a list of strings: that the checkout has changes a worker

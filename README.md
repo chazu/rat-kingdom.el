@@ -314,9 +314,36 @@ foreman reports, as "[rat-kingdom] Report from the foreman of epic …".
 `foreman_stop` hands reviews back to the king, with any news the foreman
 had not read. A foreman stops by itself when its epic is done or
 cancelled, and the king is told. If a foreman dies, news goes back to the
-king, saying so. `status` and `epic_show` show "foreman F-… (claude,
-working)", idle or stopped. After a restart a foreman takes up its session
-again.
+king, saying so. `status` and `epic_show` show "foreman F-… (Bean-T-1,
+claude, working)", idle or stopped. After a restart a foreman takes up its
+session again.
+
+### Consuls
+
+When you want to talk a project through while the king is busy, ask the
+king for a consul ("start a consul in app about the cache"), or run `M-x
+rat-kingdom-consul-start`. A consul is a rat of its own in one
+repository, `C-` and four hex digits, whose only job is to discuss that
+project with you, in its own buffer, which is shown when it starts. It
+explores and explains the code, answers questions, proposes designs,
+writes docs (approved at once, so every later worker is told of them),
+and changes code when you ask, committing in its own worktree on its own
+branch, `rats/consul-<name>-<hex>`; it never touches your checkout. The
+king does not drive it and no news goes to it; `status` lists it. When
+you are done, dismiss it, with the king's `consul_dismiss` or `M-x
+rat-kingdom-consul-dismiss` (`C-c ~ d` in its buffer): if it committed
+work, that becomes a story that the king reviews and merges as usual;
+if not, its worktree and branch are removed. Uncommitted changes stop a
+dismissal unless it is forced, which commits them first. A consul lasts
+across restarts until it is dismissed; `M-x rat-kingdom-consul-show`
+reopens its buffer.
+
+### Rats' names
+
+Every rat has a name from `rat-kingdom-rat-names`, given in turn and
+never to two live rats at once, shown with its story's or consul's hex:
+Pip-3a9c is the first worker of S-3a9c, and its buffer is "rat Pip-3a9c
+(S-3a9c.1)". Ids stay what the tools take.
 
 ### Choosing the agent
 
