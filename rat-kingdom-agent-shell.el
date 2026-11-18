@@ -81,6 +81,7 @@
 (declare-function rat-kingdom-run-update "rat-kingdom-run")
 (declare-function rat-kingdom-run-label "rat-kingdom-run")
 (defvar rat-kingdom-run-idle-functions)
+(defvar rat-kingdom-run-buffer-id)
 
 (defun rat-kingdom-agent-shell--servers (token)
   "Return the MCP servers for a run holding TOKEN.
@@ -544,6 +545,7 @@ RUN has `:resume', take that session up again, with the same agent."
                                            :session-strategy 'new)))))
          (sent nil))
     (with-current-buffer buffer
+      (setq-local rat-kingdom-run-buffer-id id)
       (let ((previous (bound-and-true-p
                        agent-shell-permission-responder-function)))
         (setq-local agent-shell-permission-responder-function
