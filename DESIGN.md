@@ -1292,6 +1292,10 @@ The king's instructions list its tools by name, generated from the tools
 defined for the role `king` (`{tools}` in `rat-kingdom-king-instructions`),
 so a tool added later is listed without editing them. A changed list
 changes the king's fingerprint, and a reload restarts it in place.
+The king's and the consul's instructions, not other roles', say to also
+show an explained concept, implementation detail or plan visually with
+a2ui (`a2ui_catalog`, then `render_a2ui`), keeping the text answer
+complete.
 
 A tool is defined per role: a definition replaces only the tools of its
 name that share a role with it, so the foreman's `status` or `tell` is

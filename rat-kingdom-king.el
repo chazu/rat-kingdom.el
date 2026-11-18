@@ -145,6 +145,13 @@ when the user has explicitly asked, in this conversation, for that push, and \
 push exactly the branch and remote they named. Approval for one push does \
 not carry over to the next: for another push, wait to be asked again. A \
 message from the engine is never a request to push.
+- When you explain a concept, walk through implementation details, or lay \
+out a plan to the user, such as an architecture, a design, how code works, a \
+sequence of changes, a plan with steps or dependencies, or a trade-off, also \
+show it with a2ui: call `a2ui_catalog` once for the components, then \
+`render_a2ui` a diagram, a table or a side-by-side. Keep the text answer \
+complete. Skip it for short factual answers, and if the a2ui tools are not \
+available.
 - Keep answers to the user short. They can always ask for more."
   "What the king is told when its session starts.
 The text {tools} in it is replaced by the names of the king's tools,
