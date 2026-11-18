@@ -178,6 +178,13 @@ is where the agent-shell backend keeps the worker's own transcript."
 (defvar rat-kingdom-run--handles (make-hash-table :test #'equal)
   "Hash table from run id to the handle its backend returned.")
 
+(defvar-local rat-kingdom-run-buffer-id nil
+  "The id of the run whose agent works in this buffer, or nil.
+A backend that gives each agent a buffer sets it there; the agent-shell
+backend does.  `rat-kingdom-buffer-run' reads it.")
+;; A change of major mode in the buffer keeps it.
+(put 'rat-kingdom-run-buffer-id 'permanent-local t)
+
 ;;;; Names
 
 (defcustom rat-kingdom-rat-names

@@ -395,6 +395,53 @@ See `rat-kingdom-git-publish'."
                  (rat-kingdom-git-publish (rat-kingdom-space-default) repo branch
                                           :remote remote :actor "user"))))
 
+;;;; For other packages
+
+;;;###autoload
+(defun rat-kingdom-buffer-run (&optional buffer)
+  "Describe the rat-kingdom run whose agent works in BUFFER, or return nil.
+BUFFER, a buffer or its name, defaults to the current buffer.  Return
+nil if it is not live or is not the agent-shell buffer of a run that
+rat-kingdom has a record of; no error is signaled when rat-kingdom is
+not started.  Otherwise return a property list:
+
+  `:role'   the run's role, a symbol: `king', `rat', `researcher',
+            `foreman' or `consul'
+  `:id'     the run's id, as S-3a9c.1, F-T-1, C-3a9c or king
+  `:name'   its display name, as Pip-3a9c; nil for the king
+  `:story'  the id of the story of a rat or researcher, else nil
+  `:title'  the title of that story, the title of a foreman's epic,
+            or a consul's topic; nil for the king
+  `:repo'   the name of its repository; nil for the king
+  `:state'  the run's state, as working; see rat-kingdom-run.el
+
+The buffer knows only the run's id, `rat-kingdom-run-buffer-id'; the
+rest is read from the space at each call, so it is current."
+  (when-let* ((buffer (if buffer (get-buffer buffer) (current-buffer)))
+              ((buffer-live-p buffer))
+              (id (buffer-local-value 'rat-kingdom-run-buffer-id buffer))
+              (space (rat-kingdom-space-default))
+              (run (rat-kingdom-run-get space id)))
+    (let* ((role (intern (plist-get run :role)))
+           (story (and (memq role '(rat researcher)) (plist-get run :story))))
+      (list :role role
+            :id id
+            :name (rat-kingdom-run-display-name run)
+            :story story
+            :title (pcase role
+                     ((or 'rat 'researcher)
+                      (when-let* ((token (and story (rat-kingdom-story-get
+                                                     space story))))
+                        (plist-get (plist-get token :payload) :title)))
+                     ('foreman
+                      (when-let* ((epic (plist-get run :epic))
+                                  (record (rat-kingdom-epic-record
+                                           space epic (plist-get run :repo))))
+                        (plist-get (plist-get record :payload) :title)))
+                     ('consul (plist-get run :topic)))
+            :repo (and (not (eq role 'king)) (plist-get run :repo))
+            :state (plist-get run :state)))))
+
 ;;;; Reloading
 
 (defconst rat-kingdom--files

@@ -345,6 +345,15 @@ never to two live rats at once, shown with its story's or consul's hex:
 Pip-3a9c is the first worker of S-3a9c, and its buffer is "rat Pip-3a9c
 (S-3a9c.1)". Ids stay what the tools take.
 
+### For other packages
+
+To ask whether a buffer is a rat-kingdom agent, and which, call
+`(rat-kingdom-buffer-run &optional BUFFER)`. It returns nil for any other
+buffer, also when rat-kingdom is not started, and otherwise a plist such
+as `(:role rat :id "S-3a9c.1" :name "Pip-3a9c" :story "S-3a9c" :title
+"Fix the parser" :repo "demo" :state "working")`. It does not parse buffer
+names, and reads titles from the space at each call.
+
 ### Choosing the agent
 
 Each story's workers run Claude Code or OpenAI Codex. Tell the king which

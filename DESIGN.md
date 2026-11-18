@@ -1298,6 +1298,15 @@ name that share a role with it, so the foreman's `status` or `tell` is
 its own and the king's is unchanged, and no role is offered two tools of
 one name.
 
+Other Emacs packages can ask which run an agent-shell buffer holds:
+`(rat-kingdom-buffer-run &optional BUFFER)` returns its role, id, name,
+story, title (the story's, the foreman's epic's, or the consul's topic),
+repo and state, or nil. The agent-shell backend sets the buffer-local
+`rat-kingdom-run-buffer-id` when it makes the buffer, for every role, so
+the lookup does not parse buffer names; the rest is read from the space
+at each call. The variable is permanent-local, a reload keeps it, and a
+restart's new buffers are marked as they are made.
+
 **Built: the foreman** (`rat-kingdom-foreman.el`). An optional long-lived
 agent that runs one epic on the king's behalf, so that a big epic does not
 flood the king with reviews. It is a run like the king's, with the id
