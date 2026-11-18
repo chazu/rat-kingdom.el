@@ -1281,7 +1281,7 @@ go, and it lets a role be denied built-in tools as well.
 
 | Role | Lifetime | Tools |
 |---|---|---|
-| king | long-lived, global, no worktree | built: `status` (with the tracker tasks available, each with its epic and agent), `repo_add`, `repo_sync`, `workflow_list`, `story_start` (optionally from a `task`, with an `agent` and a `model`; a task's `rk-agent:` and `rk-workflow:` labels are the defaults), `story_show`, `story_diff`, `story_move`, `story_cancel`, `verdict`, `publish`, `query`, `fact_forget`, `task_create`, `epic_create`, `epic_propose` (the epic plan surface, 14.1), `epic_start` (optionally with a `feature_branch`, and a `foreman`), `epic_pause`, `epic_resume`, `epic_cancel`, `epic_retry`, `epic_show`, `epic_diff`, `epic_verdict` (section 10), `tell`, `foreman_start`, `foreman_stop`, `consul_start`, `consul_dismiss`, `config_show` and `config_set` (7.3), `doc_list`, `doc_show` and `doc_forget` (7.1), `story_signal` (7.1); `story_start` also takes a rarely needed `target`; built (step 8): `mixins` and `git` on `repo_add` |
+| king | long-lived, global, no worktree | built: `status` (with the tracker tasks available, each with its epic and agent), `repo_add`, `repo_sync`, `workflow_list`, `story_start` (optionally from a `task`, with an `agent` and a `model`; a task's `rk-agent:` and `rk-workflow:` labels are the defaults), `story_show`, `story_diff`, `story_move`, `story_cancel`, `verdict`, `publish`, `query`, `fact_forget`, `task_create`, `epic_create`, `epic_propose` (the epic plan surface, 14.1), `epic_start` (optionally with a `feature_branch`, and a `foreman`), `epic_pause`, `epic_resume`, `epic_cancel`, `epic_retry`, `epic_show`, `epic_diff`, `epic_verdict` (section 10), `tell`, `foreman_start`, `foreman_stop`, `consul_start`, `consul_dismiss`, `config_show` and `config_set` (7.3), `doc_list`, `doc_show` and `doc_forget` (7.1), `story_signal` (7.1), `compact_self` (below); `story_start` also takes a rarely needed `target`; built (step 8): `mixins` and `git` on `repo_add` |
 | rat (worker) | one task | built: `finish`, `block`, `note_fact`, `inbox`, `read_doc` |
 | researcher | one task | built: `write_doc`, `read_doc`, `note_fact`, `inbox`, `block`, `finish` |
 | consul | one repository, until the user dismisses it | built: `write_doc` (its docs are approved at once), `read_doc`, `note_fact` |
@@ -1445,6 +1445,34 @@ and `git` arguments (7.3), are in `rat-kingdom-king.el`.
   opens.
 - `repo_add` (king) takes optional `mixins` and `git`, Emacs Lisp text read
   as `config_set` reads a value, for the registration layer (7.3).
+
+**Built: the king compacts its own context** (`rat-kingdom-king.el`).
+**Checked, 2026-11-18:** a `/compact` sent as an ordinary prompt through
+agent-shell runs Claude Code's compact command. claude-agent-acp 0.93.0
+hands the prompt text to the SDK as it is. `compact` is not in its
+`UNSUPPORTED_COMMANDS`, so it is in the `available_commands_update` it
+sends; agent-shell keeps that list in its state and uses it only to
+complete and show commands. The adapter knows `/compact`: it hides the
+command when it replays a session, and it settles the compaction's turn,
+which echoes no user message, so the prompt request ends and agent-shell
+emits `turn-complete`. Text after the command, `/compact <focus>`, is
+Claude Code's instructions for the summary. So no restart with a handoff
+is needed.
+
+The king's tool `compact_self`, with an optional `focus`, only schedules
+the compaction, because the king calls it in the middle of its own turn.
+When the king's turn ends (`turn-complete`, then
+`rat-kingdom-run-idle-functions`), the engine sends `/compact <focus>`, the
+focus put on one line, and tries again after
+`rat-kingdom-king-retry-interval` if the king cannot take a prompt. News
+for the king waits in the space while the compaction is scheduled or runs.
+When the compaction's own turn ends, the king is given one prompt: a line
+saying that it was compacted and that it should call `status`, then the
+news that waited. A new session of the king forgets a compaction under
+way; its first prompt says how things stand anyway. `M-x
+rat-kingdom-king-compact` does the same for the user, at once if the king
+is between turns. The state is kept in Emacs, not in the space: a
+compaction asked just before Emacs exits is not done.
 
 The king's chores from imp and rk2 (run the check, merge, close the task,
 clean the worktree, notice a finished worker, start an epic's next
