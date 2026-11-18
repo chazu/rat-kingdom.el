@@ -1834,9 +1834,43 @@ surface is shown off the selected window, so it never takes the place
 of the buffer the user is typing in. Not yet: keeping an open plan
 across an Emacs restart.
 
+**Built: the story board**, in `rat-kingdom-board.el`, a first form of
+the factory floor (1). `rat-kingdom-board`, or the king's `board_show`,
+shows the surface "Story board" in the main window: the selected window
+of the selected frame takes it in place of its buffer, unless that is a
+side or dedicated window, when a2ui's main window does; `q` buries it.
+Its columns are phases shared by every workflow: Queued, Working,
+Checking, Review, Merging, Done and Stopped. A story's column comes from
+its token and its workflow: waiting for a free worker, or at a spawn
+step whose worker has not started, is Queued; a final place, or a story
+that ended, is Done; parked, at the failure place, or cancelled is
+Stopped; otherwise the place, the step's name or the step's kind is
+looked up in `rat-kingdom-board-phases` (by default spawn and child
+workflow steps Working, check and run Checking, review and gate Review,
+merge Merging). Done and Stopped keep stories that ended in the last
+`rat-kingdom-board-done-hours`, read from the archive, and a child
+story is not shown. A card has the id, the worker's display name (its
+run's `:name` as Name-hex, else the run id), repository, epic, title,
+agent and time at its place, in a tone when it waits for review, is
+stopped, stuck or running long, and buttons that open the worker's
+buffer, show `story_show` and `story_diff` text, and cancel after
+asking; no verdict. A picker limits it to one repository and a check
+box hides Done and Stopped. Cards live at `/cards/COLUMN/ID`.
+`rat-kingdom-space-change-functions` marks the stories a change to a
+`story`, `run` or `stuck` tuple, or a sweep, touches; at most every
+half second the marked cards are made again and only those that
+changed are sent, a removal from the old column, the card in the new
+one and the column's count. A timer refreshes ages each minute; nothing
+reads git. Opening it builds it from the space, so it is right after a
+restart. a2ui lays a Row out in `a2ui-vui-width` characters and has no
+fixed-width columns, so a window with `rat-kingdom-board-column-width`
+characters for every column shown gets a Row of Columns, with that
+width made local to the board's buffer, and a narrower one, the usual
+case, a Section per column titled with its count.
+
 | # | Surface | Shows | Actions | Kind |
 |---|---|---|---|---|
-| 1 | Factory floor | one table per epic: each story's place, worker, time in place (warning tone near its timeout), check result; a progress bar per epic | open the shell, tell, move, show diff | engine |
+| 1 | Factory floor (first form built: the story board) | one table per epic: each story's place, worker, time in place (warning tone near its timeout), check result; a progress bar per epic | open the shell, tell, move, show diff | engine |
 | 2 | Attention queue | everything waiting on a person: review requests, stuck tokens, blocked runs, failed checks, oldest first | verdict, resume, move to a picked place, discard | engine |
 | 3 | Review card | one `review`: the worker's summary, what integration verified beside what the worker reported, the diff | pass, or fix with notes; writes a `verdict` tuple | engine |
 | 4 | Epic plan (built) | the repository, title and description; the king's proposed stories grouped into waves, each with an include checkbox, its key, editable title and description, what it depends on, and pickers for its agent and its workflow (which sets the review mode); options to start right away, to give the epic a feature branch (it lands as one unit, after one check and `epic_verdict`) and to limit stories in parallel | approve (create, and start if asked, with a feature branch if ticked), send back with notes, cancel | engine, opened by the king's `epic_propose` |

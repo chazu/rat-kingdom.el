@@ -198,6 +198,29 @@ plan is agreed in conversation and made with `epic_create`. A plan whose
 surface is open when Emacs stops is lost, and the king is not told; ask
 it to propose the plan again.
 
+### The story board
+
+`M-x rat-kingdom-board` shows the story board, a Kanban board of the
+stories in the pipeline, in the selected window in place of its buffer
+(or ask the king to show it: its tool `board_show` opens it for you).
+Each column is a phase, the same for every workflow: Queued, Working,
+Checking, Review, Merging, Done (ended in the last
+`rat-kingdom-board-done-hours`, 24 by default) and Stopped (parked, or
+cancelled in that time). A card shows the story's id, its worker's name,
+its repository, epic, title and agent, and how long it has been there,
+in a warning or error tone when it waits for review, is stopped, stuck
+or running long. Its buttons open the worker's buffer, show the story
+and its diff as `story_show` and `story_diff` do, and cancel it after
+asking; verdicts stay the king's. A picker keeps the board to one
+repository, and a check box hides Done and Stopped. The board updates
+itself as stories move, at most twice a second, and is built afresh from
+the space each time it is opened. `q` buries it and `g` draws it again.
+A window wide enough for `rat-kingdom-board-column-width` characters a
+column shows the columns side by side; a narrower one shows each column
+as a section with its count. `rat-kingdom-board-phases` says which
+column each kind of step, or a place or step by name, belongs in. The
+board needs a2ui.
+
 ### Epics
 
 **Plan.** The king proposes the epic's stories and their dependencies,
@@ -576,7 +599,8 @@ without `:push-guard`. For example, in `.rk/config.eld`:
 
 Emacs 29.1 or later, built with SQLite support, Git, and br (Rust Beads)
 for tasks. Starting an agent needs agent-shell. The epic plan surface
-needs [a2ui](https://github.com/chazu/a2ui.el), which is optional.
+and the story board need [a2ui](https://github.com/chazu/a2ui.el), which
+is optional.
 
 ## The tuplespace
 
@@ -641,7 +665,8 @@ eldev compile -W
 eldev lint
 ```
 
-The tests of the epic plan surface that draw it with the real a2ui are
+The tests of the epic plan surface and the story board that draw them
+with the real a2ui are
 skipped unless a2ui and vui can be loaded. Name the directories that hold
 them, separated by colons:
 
