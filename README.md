@@ -215,9 +215,13 @@ asking; verdicts stay the king's. A picker keeps the board to one
 repository, and a check box hides Done and Stopped. The board updates
 itself as stories move, at most twice a second, and is built afresh from
 the space each time it is opened. `q` buries it and `g` draws it again.
-A window wide enough for `rat-kingdom-board-column-width` characters a
-column shows the columns side by side; a narrower one shows each column
-as a section with its count. `rat-kingdom-board-phases` says which
+The columns share the width of the window the board is shown in, each
+at most `rat-kingdom-board-column-width` (32) characters wide, and stand
+side by side when each has at least `rat-kingdom-board-min-column-width`
+(18); in a narrower window each column is a section with its count. The
+board is laid out again when its window changes width. Columns with no
+cards are left out, and named on one line with their count of 0, unless
+`rat-kingdom-board-hide-empty-columns` is nil. `rat-kingdom-board-phases` says which
 column each kind of step, or a place or step by name, belongs in. The
 board needs a2ui.
 

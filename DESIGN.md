@@ -1952,11 +1952,18 @@ half second the marked cards are made again and only those that
 changed are sent, a removal from the old column, the card in the new
 one and the column's count. A timer refreshes ages each minute; nothing
 reads git. Opening it builds it from the space, so it is right after a
-restart. a2ui lays a Row out in `a2ui-vui-width` characters and has no
-fixed-width columns, so a window with `rat-kingdom-board-column-width`
-characters for every column shown gets a Row of Columns, with that
-width made local to the board's buffer, and a narrower one, the usual
-case, a Section per column titled with its count.
+restart. The layout is measured in the window that shows the board's
+buffer, not the selected window, and is made again, throttled, when
+that window changes width (`window-size-change-functions`, local to the
+buffer). The columns shown share the width, each at most
+`rat-kingdom-board-column-width` characters; when each has at least
+`rat-kingdom-board-min-column-width` they are a Row of Columns, with
+`a2ui-vui-width` (a2ui has no fixed-width columns) made the window's
+width in the board's buffer and every card line cut to its column, and
+otherwise a Section per column titled with its count. Columns with no
+cards are left out (`rat-kingdom-board-hide-empty-columns`) and named on
+one line with a count of 0; a flush that empties or fills a column draws
+the board again.
 
 | # | Surface | Shows | Actions | Kind |
 |---|---|---|---|---|
