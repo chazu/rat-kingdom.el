@@ -21,6 +21,9 @@
 (defvar rat-kingdom-board-test--sent nil
   "The A2UI messages sent to the stubbed a2ui, newest first.")
 
+(defvar rat-kingdom-board-test--width 80
+  "The width of the window that shows the board, under the stubbed a2ui.")
+
 (defmacro rat-kingdom-board-test-with-stubs (vars &rest body)
   "Run BODY with VARS, (SPACE PATH), a fresh repository and a stubbed a2ui.
 The board's state is fresh, it follows the space, and what it sends to
@@ -35,12 +38,18 @@ from when it is first shown."
            (rat-kingdom-board--session nil)
            (rat-kingdom-board--filter (list :repo nil :ended t))
            (rat-kingdom-board--layout 'stacked)
+           (rat-kingdom-board--column-width rat-kingdom-board-column-width)
+           (rat-kingdom-board--shown nil)
+           (rat-kingdom-board--width nil)
+           (rat-kingdom-board--buffer nil)
+           (rat-kingdom-board--relayout-timer nil)
            (rat-kingdom-board--dirty nil)
            (rat-kingdom-board--timer nil)
            (rat-kingdom-board--tick-timer nil)
            (rat-kingdom-board--last 0)
            (rat-kingdom-board--defer #'funcall)
-           (rat-kingdom-board-test--sent nil))
+           (rat-kingdom-board-test--sent nil)
+           (rat-kingdom-board-test--width 80))
        (cl-letf (((symbol-function 'rat-kingdom-plan-a2ui-p) (lambda () t))
                  ((symbol-function 'rat-kingdom-board--send)
                   (lambda (message)
@@ -49,12 +58,16 @@ from when it is first shown."
                   (lambda () (and rat-kingdom-board--space t)))
                  ((symbol-function 'rat-kingdom-board--display) #'ignore)
                  ((symbol-function 'rat-kingdom-board--window-width)
-                  (lambda () 80))
+                  (lambda () rat-kingdom-board-test--width))
+                 ((symbol-function 'rat-kingdom-board--guess-width)
+                  (lambda () rat-kingdom-board-test--width))
                  ((symbol-function 'rat-kingdom-board--start-ticking) #'ignore))
          (unwind-protect
              (progn ,@body)
-           (when (timerp rat-kingdom-board--timer)
-             (cancel-timer rat-kingdom-board--timer)))))))
+           (dolist (timer (list rat-kingdom-board--timer
+                                rat-kingdom-board--relayout-timer))
+             (when (timerp timer)
+               (cancel-timer timer))))))))
 
 (defun rat-kingdom-board-test--updates ()
   "Return the updateDataModel messages sent, oldest first, as (PATH . VALUE).
@@ -69,6 +82,24 @@ VALUE is `absent' for a message that removes PATH."
   "Return the data model last sent whole."
   (cdr (cl-find "/" (reverse (rat-kingdom-board-test--updates))
                 :key #'car :test #'equal)))
+
+(defun rat-kingdom-board-test--components ()
+  "Return the components last sent, by id."
+  (let ((message (cl-find-if (lambda (message)
+                               (equal (car (rat-kingdom-plan-test--body message))
+                                      "updateComponents"))
+                             rat-kingdom-board-test--sent))
+        (components (make-hash-table :test #'equal)))
+    (seq-doseq (component (gethash "components"
+                                   (cdr (rat-kingdom-plan-test--body message))))
+      (puthash (gethash "id" component) component components))
+    components))
+
+(defun rat-kingdom-board-test--board ()
+  "Return the board's container last sent, as (COMPONENT . CHILDREN)."
+  (let ((board (gethash "board" (rat-kingdom-board-test--components))))
+    (cons (gethash "component" board)
+          (append (gethash "children" board) nil))))
 
 (defun rat-kingdom-board-test--column (data column)
   "Return the ids of the cards DATA holds in COLUMN, sorted."
@@ -179,11 +210,39 @@ VALUE is `absent' for a message that removes PATH."
                   'working)))))
 
 (ert-deftest rat-kingdom-board-test-layout ()
-  (let ((rat-kingdom-board-column-width 30))
-    (should (eq (rat-kingdom-board-layout 80 '(:ended t)) 'stacked))
-    (should (eq (rat-kingdom-board-layout 210 '(:ended t)) 'row))
-    (should (eq (rat-kingdom-board-layout 150 '(:ended t)) 'stacked))
-    (should (eq (rat-kingdom-board-layout 150 '(:ended nil)) 'row))))
+  (let ((rat-kingdom-board-column-width 32)
+        (rat-kingdom-board-min-column-width 18))
+    ;; The columns share the width, each no wider than the most.
+    (should (equal (rat-kingdom-board-layout 185 7) '(row . 26)))
+    (should (equal (rat-kingdom-board-layout 300 7) '(row . 32)))
+    (should (equal (rat-kingdom-board-layout 185 2) '(row . 32)))
+    ;; Side by side down to the fewest characters a column needs.
+    (should (equal (rat-kingdom-board-layout 126 7) '(row . 18)))
+    (should (equal (rat-kingdom-board-layout 125 7) '(stacked . 17)))
+    (should (equal (rat-kingdom-board-layout 124 5) '(row . 24)))
+    (should (eq (car (rat-kingdom-board-layout 80 7)) 'stacked))
+    ;; No column at all is a row of nothing.
+    (should (eq (car (rat-kingdom-board-layout 80 0)) 'row))))
+
+(ert-deftest rat-kingdom-board-test-shown-columns ()
+  (let ((held '(working review)))
+    (let ((rat-kingdom-board-hide-empty-columns nil))
+      (should (equal (rat-kingdom-board-shown-columns '(:ended t) held)
+                     (mapcar #'car rat-kingdom-board-columns)))
+      (should (equal (rat-kingdom-board-shown-columns '(:ended nil) held)
+                     '(queued working checking review merging)))
+      (should (equal (rat-kingdom-board--legend
+                      '(:ended t) (mapcar #'car rat-kingdom-board-columns))
+                     "")))
+    (let ((rat-kingdom-board-hide-empty-columns t))
+      (should (equal (rat-kingdom-board-shown-columns '(:ended t) held)
+                     '(working review)))
+      (should (equal (rat-kingdom-board-shown-columns '(:ended nil)
+                                                      '(working done))
+                     '(working)))
+      ;; Every column left out is named, with its count.
+      (should (equal (rat-kingdom-board--legend '(:ended nil) '(working review))
+                     "Queued 0 · Checking 0 · Merging 0")))))
 
 (ert-deftest rat-kingdom-board-test-age-text ()
   (should (equal (rat-kingdom-board-age-text 45) "45s"))
@@ -303,55 +362,57 @@ VALUE is `absent' for a message that removes PATH."
 ;;;; Keeping it up to date
 
 (ert-deftest rat-kingdom-board-test-updates-only-changed-stories ()
-  (rat-kingdom-board-test-with-stubs (space path)
-    (rat-kingdom-story-start space "demo" "One" nil "S-1")
-    (rat-kingdom-story-start space "demo" "Two" nil "S-2")
-    (rat-kingdom-board-show space)
-    (should (equal (rat-kingdom-board-test--column
-                    (rat-kingdom-board-test--data) "queued")
-                   '("S-1" "S-2")))
-    (setq rat-kingdom-board-test--sent nil)
-    ;; The change hook marks only the story that changed.
-    (rat-kingdom-reaction-run space)
-    (should (equal (sort (copy-sequence rat-kingdom-board--dirty) #'string<)
-                   '("S-1" "S-2")))
-    (rat-kingdom-board-flush)
-    (should (equal (mapcar #'car (rat-kingdom-board-test--updates))
-                   '("/cards/queued/S-1" "/cards/working/S-1"
-                     "/cards/queued/S-2" "/cards/working/S-2"
-                     "/columns/queued/title" "/columns/working/title")))
-    (should (eq (cdr (car (rat-kingdom-board-test--updates))) 'absent))
-    (should (equal (cdr (car (last (rat-kingdom-board-test--updates))))
-                   "Working (2)"))
-    ;; One story moves: only its paths are sent.
-    (setq rat-kingdom-board-test--sent nil)
-    (rat-kingdom-story-move space "S-2" "blocked" "Not now")
-    (rat-kingdom-reaction-run space)
-    (should (equal rat-kingdom-board--dirty '("S-2")))
-    (rat-kingdom-board-flush)
-    (should (equal (mapcar #'car (rat-kingdom-board-test--updates))
-                   '("/cards/working/S-2" "/cards/stopped/S-2"
-                     "/columns/working/title" "/columns/stopped/title")))
-    ;; A story marked that did not change sends nothing.
-    (setq rat-kingdom-board-test--sent nil)
-    (rat-kingdom-board-mark "S-1")
-    (should-not (rat-kingdom-board-flush))
-    (should-not rat-kingdom-board-test--sent)
-    ;; A change of the run, such as a name, changes the card in place.
-    (rat-kingdom-run-update space "S-1.1" :name "Whiskers")
-    (should (equal rat-kingdom-board--dirty '("S-1")))
-    (rat-kingdom-board-flush)
-    (should (equal (mapcar #'car (rat-kingdom-board-test--updates))
-                   '("/cards/working/S-1")))
-    (should (equal (gethash "name" (cdr (car (rat-kingdom-board-test--updates))))
-                   "Whiskers-1"))
-    ;; A cancelled story moves to Stopped.
-    (setq rat-kingdom-board-test--sent nil)
-    (rat-kingdom-story-cancel space "S-1")
-    (rat-kingdom-board-flush)
-    (should (equal (mapcar #'car (rat-kingdom-board-test--updates))
-                   '("/cards/working/S-1" "/cards/stopped/S-1"
-                     "/columns/working/title" "/columns/stopped/title")))))
+  ;; Every column is shown, so none is left out or brought back.
+  (let ((rat-kingdom-board-hide-empty-columns nil))
+    (rat-kingdom-board-test-with-stubs (space path)
+      (rat-kingdom-story-start space "demo" "One" nil "S-1")
+      (rat-kingdom-story-start space "demo" "Two" nil "S-2")
+      (rat-kingdom-board-show space)
+      (should (equal (rat-kingdom-board-test--column
+                      (rat-kingdom-board-test--data) "queued")
+                     '("S-1" "S-2")))
+      (setq rat-kingdom-board-test--sent nil)
+      ;; The change hook marks only the story that changed.
+      (rat-kingdom-reaction-run space)
+      (should (equal (sort (copy-sequence rat-kingdom-board--dirty) #'string<)
+                     '("S-1" "S-2")))
+      (rat-kingdom-board-flush)
+      (should (equal (mapcar #'car (rat-kingdom-board-test--updates))
+                     '("/cards/queued/S-1" "/cards/working/S-1"
+                       "/cards/queued/S-2" "/cards/working/S-2"
+                       "/columns/queued/title" "/columns/working/title")))
+      (should (eq (cdr (car (rat-kingdom-board-test--updates))) 'absent))
+      (should (equal (cdr (car (last (rat-kingdom-board-test--updates))))
+                     "Working (2)"))
+      ;; One story moves: only its paths are sent.
+      (setq rat-kingdom-board-test--sent nil)
+      (rat-kingdom-story-move space "S-2" "blocked" "Not now")
+      (rat-kingdom-reaction-run space)
+      (should (equal rat-kingdom-board--dirty '("S-2")))
+      (rat-kingdom-board-flush)
+      (should (equal (mapcar #'car (rat-kingdom-board-test--updates))
+                     '("/cards/working/S-2" "/cards/stopped/S-2"
+                       "/columns/working/title" "/columns/stopped/title")))
+      ;; A story marked that did not change sends nothing.
+      (setq rat-kingdom-board-test--sent nil)
+      (rat-kingdom-board-mark "S-1")
+      (should-not (rat-kingdom-board-flush))
+      (should-not rat-kingdom-board-test--sent)
+      ;; A change of the run, such as a name, changes the card in place.
+      (rat-kingdom-run-update space "S-1.1" :name "Whiskers")
+      (should (equal rat-kingdom-board--dirty '("S-1")))
+      (rat-kingdom-board-flush)
+      (should (equal (mapcar #'car (rat-kingdom-board-test--updates))
+                     '("/cards/working/S-1")))
+      (should (equal (gethash "name" (cdr (car (rat-kingdom-board-test--updates))))
+                     "Whiskers-1"))
+      ;; A cancelled story moves to Stopped.
+      (setq rat-kingdom-board-test--sent nil)
+      (rat-kingdom-story-cancel space "S-1")
+      (rat-kingdom-board-flush)
+      (should (equal (mapcar #'car (rat-kingdom-board-test--updates))
+                     '("/cards/working/S-1" "/cards/stopped/S-1"
+                       "/columns/working/title" "/columns/stopped/title"))))))
 
 (ert-deftest rat-kingdom-board-test-not-shown-not-followed ()
   (rat-kingdom-board-test-with-stubs (space path)
@@ -396,6 +457,158 @@ VALUE is `absent' for a message that removes PATH."
         (rat-kingdom-board-mark "S-1")
         (should (equal (car (car scheduled)) 0))
         (setq rat-kingdom-board--timer nil)))))
+
+;;;; Fitting the window
+
+(ert-deftest rat-kingdom-board-test-width-of-the-window-showing-it ()
+  ;; The board is measured in the window that shows it, not in the
+  ;; selected one, such as the king's shell when it calls board_show.
+  (let ((buffer (generate-new-buffer " *board*"))
+        (rat-kingdom-board--buffer nil))
+    (unwind-protect
+        (save-window-excursion
+          (delete-other-windows)
+          (let* ((selected (selected-window))
+                 (board (split-window-right 30)))
+            (should-not (rat-kingdom-board--window-width))
+            (set-window-buffer board buffer)
+            (setq rat-kingdom-board--buffer buffer)
+            (should (eq (selected-window) selected))
+            (should (/= (window-width selected) (window-width board)))
+            (should (= (rat-kingdom-board--window-width) (window-width board)))
+            ;; Not shown, it has no width.
+            (set-window-buffer board (get-buffer-create "*scratch*"))
+            (should-not (rat-kingdom-board--window-width))))
+      (kill-buffer buffer))))
+
+(ert-deftest rat-kingdom-board-test-hides-empty-columns ()
+  (rat-kingdom-board-test-with-stubs (space path)
+    (rat-kingdom-story-start space "demo" "One" nil "S-1")
+    ;; Only Queued holds a card: it alone is shown, and has the room.
+    (let ((rat-kingdom-board-hide-empty-columns t))
+      (rat-kingdom-board-show space)
+      (should (equal (rat-kingdom-board-test--board) '("Row" "column-queued")))
+      (should (eq rat-kingdom-board--layout 'row))
+      (let ((data (rat-kingdom-board-test--data)))
+        (should (equal (gethash "legend" data)
+                       "Working 0 · Checking 0 · Review 0 · Merging 0 · \
+Done 0 · Stopped 0"))
+        (should (eq (gethash "hasLegend" data) t))
+        (should (eq (gethash "visible" (gethash "working" (gethash "columns" data)))
+                    :false))))
+    ;; Off, every column is shown, and in 80 characters they are stacked.
+    (let ((rat-kingdom-board-hide-empty-columns nil))
+      (setq rat-kingdom-board-test--sent nil)
+      (rat-kingdom-board-show space)
+      (should (equal (rat-kingdom-board-test--board)
+                     (cons "Column"
+                           (mapcar (lambda (column) (format "column-%s" (car column)))
+                                   rat-kingdom-board-columns))))
+      (should (eq rat-kingdom-board--layout 'stacked))
+      (let ((data (rat-kingdom-board-test--data)))
+        (should (equal (gethash "legend" data) ""))
+        (should (eq (gethash "hasLegend" data) :false))))))
+
+(ert-deftest rat-kingdom-board-test-column-emptied-draws-again ()
+  (rat-kingdom-board-test-with-stubs (space path)
+    (let ((rat-kingdom-board-hide-empty-columns t))
+      (rat-kingdom-story-start space "demo" "One" nil "S-1")
+      (rat-kingdom-board-show space)
+      (should (equal (rat-kingdom-board-test--board) '("Row" "column-queued")))
+      (setq rat-kingdom-board-test--sent nil)
+      ;; Queued is emptied and Working filled: the board is drawn again.
+      (rat-kingdom-reaction-run space)
+      (rat-kingdom-board-flush)
+      (should (equal (rat-kingdom-board-test--board) '("Row" "column-working")))
+      (should (equal (rat-kingdom-board-test--column
+                      (rat-kingdom-board-test--data) "working")
+                     '("S-1")))
+      (should (string-search "Queued 0"
+                             (gethash "legend" (rat-kingdom-board-test--data))))
+      ;; A change that keeps the columns is sent alone.
+      (setq rat-kingdom-board-test--sent nil)
+      (rat-kingdom-run-update space "S-1.1" :name "Whiskers")
+      (rat-kingdom-board-flush)
+      (should (equal (mapcar #'car (rat-kingdom-board-test--updates))
+                     '("/cards/working/S-1"))))))
+
+(ert-deftest rat-kingdom-board-test-relayout-on-resize ()
+  (rat-kingdom-board-test-with-stubs (space path)
+    (let ((rat-kingdom-board-hide-empty-columns nil)
+          (rat-kingdom-board-column-width 32)
+          (rat-kingdom-board-min-column-width 18)
+          (scheduled nil))
+      (rat-kingdom-story-start space "demo" "One" nil "S-1")
+      (rat-kingdom-board-show space)
+      (should (eq rat-kingdom-board--layout 'stacked))
+      (cl-letf (((symbol-function 'run-at-time)
+                 (lambda (_delay _repeat function &rest _)
+                   (push function scheduled)
+                   'timer)))
+        ;; The window grows: one layout is scheduled, however often
+        ;; the hook runs before it.
+        (setq rat-kingdom-board-test--width 185
+              rat-kingdom-board-test--sent nil)
+        (rat-kingdom-board--resized (selected-window))
+        (rat-kingdom-board--resized (selected-window))
+        (should (equal scheduled '(rat-kingdom-board-relayout)))
+        (should-not rat-kingdom-board-test--sent)
+        (should (rat-kingdom-board-relayout))
+        (should-not rat-kingdom-board--relayout-timer)
+        (should (eq rat-kingdom-board--layout 'row))
+        (should (= rat-kingdom-board--column-width 26))
+        (should (equal (car (rat-kingdom-board-test--board)) "Row"))
+        ;; The same width again changes nothing.
+        (setq rat-kingdom-board-test--sent nil)
+        (should-not (rat-kingdom-board-relayout))
+        (should-not rat-kingdom-board-test--sent)
+        ;; It shrinks below seven columns of 18: stacked again.
+        (setq rat-kingdom-board-test--width 125)
+        (rat-kingdom-board--resized (selected-window))
+        (should (= (length scheduled) 2))
+        (should (rat-kingdom-board-relayout))
+        (should (eq rat-kingdom-board--layout 'stacked))
+        (should (equal (car (rat-kingdom-board-test--board)) "Column"))
+        ;; Not shown, it is left as it is.
+        (setq rat-kingdom-board-test--width nil
+              rat-kingdom-board-test--sent nil)
+        (should-not (rat-kingdom-board-relayout))
+        (should-not rat-kingdom-board-test--sent)))))
+
+(ert-deftest rat-kingdom-board-test-card-fits-its-column ()
+  (rat-kingdom-board-test-with-stubs (space path)
+    (let ((rat-kingdom-board-hide-empty-columns nil)
+          (rat-kingdom-board-column-width 32)
+          (rat-kingdom-board-min-column-width 18))
+      (rat-kingdom-story-start space "demo" (make-string 100 ?x) nil "S-1"
+                               nil nil nil "T-7")
+      (cl-flet ((card ()
+                  (gethash "S-1" (gethash "queued" (gethash "cards"
+                                                            (rat-kingdom-board-test--data)))))
+                (buttons ()
+                  (gethash "component"
+                           (gethash "card-buttons"
+                                    (rat-kingdom-board-test--components)))))
+        ;; Seven columns of 18: every line of a card has 16 characters.
+        (setq rat-kingdom-board-test--width 126)
+        (rat-kingdom-board-show space)
+        (should (eq rat-kingdom-board--layout 'row))
+        (dolist (key '("title" "detail"))
+          (should (= (string-width (gethash key (card))) 16)))
+        (should (equal (gethash "heading" (card)) "**S-1** · epic T-7"))
+        (should (equal (rat-kingdom-board--heading "S-3a9c" "Pip-3a9c" "T-7" 16)
+                       "**S-3a9c** · Pip-3a…"))
+        ;; The buttons go two to a line.
+        (should (equal (buttons) "Column"))
+        ;; Stacked, a card has the whole title width, buttons on one line.
+        (setq rat-kingdom-board-test--width 80
+              rat-kingdom-board-test--sent nil)
+        (rat-kingdom-board-show space)
+        (should (eq rat-kingdom-board--layout 'stacked))
+        (should (= (string-width (gethash "title" (card)))
+                   rat-kingdom-board-title-width))
+        (should (equal (gethash "heading" (card)) "**S-1** · epic T-7"))
+        (should (equal (buttons) "Row"))))))
 
 ;;;; The buttons
 
@@ -541,10 +754,16 @@ VALUE is `absent' for a message that removes PATH."
           (rat-kingdom-board--session nil)
           (rat-kingdom-board--filter (list :repo nil :ended t))
           (rat-kingdom-board--layout 'stacked)
+          (rat-kingdom-board--column-width rat-kingdom-board-column-width)
+          (rat-kingdom-board--shown nil)
+          (rat-kingdom-board--width nil)
+          (rat-kingdom-board--buffer nil)
+          (rat-kingdom-board--relayout-timer nil)
           (rat-kingdom-board--dirty nil)
           (rat-kingdom-board--timer nil)
           (rat-kingdom-board--tick-timer nil)
-          (rat-kingdom-board--last 0))
+          (rat-kingdom-board--last 0)
+          (rat-kingdom-board-hide-empty-columns t))
       (unwind-protect
           (save-window-excursion
             (rat-kingdom-story-start space "demo" "One" nil "S-1")
@@ -562,7 +781,9 @@ VALUE is `absent' for a message that removes PATH."
             (rat-kingdom-board-flush)
             (let ((text (rat-kingdom-board-test--text)))
               (should (string-search "Working (1)" text))
-              (should (string-search "Queued (0)" text))
+              ;; Queued, now empty, is left out and named below the filters.
+              (should-not (string-search "Queued (" text))
+              (should (string-search "Queued 0 · Checking 0" text))
               (should (string-search "S-1 · Pip-1" text))))
         (rat-kingdom-board--stop)
         (when (get-buffer "*a2ui: Story board*")

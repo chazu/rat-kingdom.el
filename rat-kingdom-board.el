@@ -45,12 +45,16 @@
 ;; Opening the board builds it from the space, so it is right after
 ;; Emacs restarts.
 ;;
-;; The layout depends on the width of the window it is shown in.  When
-;; each column shown can have `rat-kingdom-board-column-width'
-;; characters, the columns stand side by side, a Row of Columns;
-;; otherwise each phase is a Section, one above the other, titled with
-;; its count.  Most windows are too narrow for seven columns, so the
-;; Sections are what is usually seen.
+;; The layout depends on the width of the window the board is shown
+;; in, not the selected window, and it is laid out again when that
+;; window changes its width.  The columns shown share the width, each
+;; at most `rat-kingdom-board-column-width' characters wide.  When each
+;; has at least `rat-kingdom-board-min-column-width', they stand side by
+;; side, a Row of Columns, and every line of a card is cut to its
+;; column; otherwise each phase is a Section, one above the other,
+;; titled with its count.  With `rat-kingdom-board-hide-empty-columns',
+;; a column with no cards is left out, which gives the others more
+;; room, and a line under the filters names it with its count of 0.
 ;;
 ;; a2ui is optional, as for the epic plan (rat-kingdom-plan.el): it is
 ;; loaded when the board is first shown, and the board says plainly
@@ -89,6 +93,11 @@
 
 (defconst rat-kingdom-board--ended '(done stopped)
   "The columns the check box \"Show Done and Stopped\" hides.")
+
+(defconst rat-kingdom-board--buttons-width 34
+  "Characters a card's buttons take on one line.
+That is \"[Worker]  [Show]  [Diff]  [Cancel]\"; two to a line, they
+take 16.")
 
 (defcustom rat-kingdom-board-phases
   '((:spawn . working) (:check . checking) (:run . checking)
@@ -149,9 +158,26 @@ Its card then takes the warning tone."
   :group 'rat-kingdom)
 
 (defcustom rat-kingdom-board-column-width 32
-  "Characters a column needs for the story board to stand its columns side by side.
-In a narrower window each column is a section, one above the other."
+  "Most characters a column of the story board has.
+The columns shown share the width of the board's window, but none is
+wider than this, so that a wide window does not stretch the cards."
   :type 'natnum
+  :group 'rat-kingdom)
+
+(defcustom rat-kingdom-board-min-column-width 18
+  "Fewest characters a column of the story board needs to stand in a row.
+The columns shown share the width of the board's window, and when
+each has at least this, they stand side by side; when each has fewer,
+each column is a section, one above the other.  Below 18 the
+card buttons are wider than a column."
+  :type 'natnum
+  :group 'rat-kingdom)
+
+(defcustom rat-kingdom-board-hide-empty-columns t
+  "Non-nil means the story board leaves out the columns with no cards.
+The other columns then have more room.  A line names the columns left
+out, each with its count of 0, so that every phase is still seen."
+  :type 'boolean
   :group 'rat-kingdom)
 
 (defcustom rat-kingdom-board-title-width 60
@@ -176,6 +202,21 @@ non-nil to show the columns Done and Stopped.")
 
 (defvar rat-kingdom-board--layout 'stacked
   "How the board is laid out: `row' or `stacked'.")
+
+(defvar rat-kingdom-board--column-width rat-kingdom-board-column-width
+  "Characters each column of the board has in the layout `row'.")
+
+(defvar rat-kingdom-board--shown nil
+  "The columns the board shows, in order.")
+
+(defvar rat-kingdom-board--width nil
+  "The width of the window the board is laid out for, or nil.")
+
+(defvar rat-kingdom-board--buffer nil
+  "The buffer a2ui shows the board in, or nil.")
+
+(defvar rat-kingdom-board--relayout-timer nil
+  "The timer of the next layout of the board for its window, or nil.")
 
 (defvar rat-kingdom-board--dirty nil
   "The ids of the stories whose cards are to be made again.")
@@ -269,17 +310,30 @@ as Pip-3a9c; one without, by its id."
 (defun rat-kingdom-board--text-width ()
   "Return the most characters a line of a card may have.
 That is `rat-kingdom-board-title-width', and in the layout `row' no
-more than a column has."
+more than a column has, less the two spaces between columns."
   (if (eq rat-kingdom-board--layout 'row)
       (min rat-kingdom-board-title-width
-           (max 10 (- rat-kingdom-board-column-width 2)))
+           (max 10 (- rat-kingdom-board--column-width 2)))
     rat-kingdom-board-title-width))
 
-(defun rat-kingdom-board--truncate (text)
-  "Return TEXT on one line, no longer than `rat-kingdom-board--text-width'."
+(defun rat-kingdom-board--truncate (text &optional width)
+  "Return TEXT on one line, no longer than WIDTH.
+WIDTH is by default `rat-kingdom-board-title-width'."
   (truncate-string-to-width
    (replace-regexp-in-string "[\n\t ]+" " " (string-trim (or text "")))
-   (rat-kingdom-board--text-width) nil nil "…"))
+   (or width rat-kingdom-board-title-width) nil nil "…"))
+
+(defun rat-kingdom-board--heading (id name epic &optional width)
+  "Return the heading of the card of the story ID, in Markdown.
+NAME is its worker's display name and EPIC its epic, either \"\" for
+none.  What follows ID is cut so that the heading has no more than
+WIDTH characters, by default `rat-kingdom-board-title-width'."
+  (concat "**" id "**"
+          (truncate-string-to-width
+           (concat (if (string-empty-p name) "" (concat " · " name))
+                   (if (string-empty-p epic) "" (format " · epic %s" epic)))
+           (max 0 (- (or width rat-kingdom-board-title-width) (string-width id)))
+           nil nil "…")))
 
 (defun rat-kingdom-board--attention (column payload age stuck)
   "Return (TONE . NOTE) for a story in COLUMN with PAYLOAD.
@@ -339,11 +393,7 @@ it has a worker to open) and `:live' (non-nil unless it ended)."
                 :title (rat-kingdom-board--truncate (plist-get payload :title))
                 :agent agent :age age-text
                 :tone (car attention) :note (cdr attention)
-                :heading (concat "**" id "**"
-                                 (if (string-empty-p name) "" (concat " · " name))
-                                 (if (string-empty-p epic)
-                                     ""
-                                   (format " · epic %s" epic)))
+                :heading (rat-kingdom-board--heading id name epic)
                 :detail (rat-kingdom-board--truncate
                          (string-join
                           (delete "" (list repo agent
@@ -424,18 +474,25 @@ FILTER is as for `rat-kingdom-board-card-for'."
 ;;;; The surface, as data
 
 (defun rat-kingdom-board--card-object (card)
-  "Return CARD, a property list, as the JSON object the data model holds."
-  (rat-kingdom-plan--obj
-   "id" (plist-get card :id) "name" (plist-get card :name)
-   "repo" (plist-get card :repo) "epic" (plist-get card :epic)
-   "title" (plist-get card :title) "agent" (plist-get card :agent)
-   "age" (plist-get card :age) "tone" (plist-get card :tone)
-   "note" (plist-get card :note)
-   "hasNote" (rat-kingdom-plan--bool
-              (not (string-empty-p (plist-get card :note))))
-   "heading" (plist-get card :heading) "detail" (plist-get card :detail)
-   "worker" (rat-kingdom-plan--bool (plist-get card :worker))
-   "live" (rat-kingdom-plan--bool (plist-get card :live))))
+  "Return CARD, a property list, as the JSON object the data model holds.
+Its lines are cut to `rat-kingdom-board--text-width'."
+  (let ((width (rat-kingdom-board--text-width)))
+    (rat-kingdom-plan--obj
+     "id" (plist-get card :id) "name" (plist-get card :name)
+     "repo" (plist-get card :repo) "epic" (plist-get card :epic)
+     "title" (rat-kingdom-board--truncate (plist-get card :title) width)
+     "agent" (plist-get card :agent)
+     "age" (plist-get card :age) "tone" (plist-get card :tone)
+     "note" (rat-kingdom-board--truncate (plist-get card :note) width)
+     "hasNote" (rat-kingdom-plan--bool
+                (not (string-empty-p (plist-get card :note))))
+     "heading" (rat-kingdom-board--heading (plist-get card :id)
+                                           (plist-get card :name)
+                                           (plist-get card :epic)
+                                           width)
+     "detail" (rat-kingdom-board--truncate (plist-get card :detail) width)
+     "worker" (rat-kingdom-plan--bool (plist-get card :worker))
+     "live" (rat-kingdom-plan--bool (plist-get card :live)))))
 
 (defun rat-kingdom-board--column-title (column count)
   "Return the title of COLUMN holding COUNT cards."
@@ -448,15 +505,60 @@ FILTER is as for `rat-kingdom-board-card-for'."
              rat-kingdom-board--cards)
     count))
 
-(defun rat-kingdom-board-layout (width filter)
-  "Return the layout for a window WIDTH characters wide and FILTER.
-That is `row' if every column FILTER shows can have
-`rat-kingdom-board-column-width' characters, and `stacked' otherwise."
-  (let ((columns (if (plist-get filter :ended)
-                     (length rat-kingdom-board-columns)
-                   (- (length rat-kingdom-board-columns)
-                      (length rat-kingdom-board--ended)))))
-    (if (>= width (* columns rat-kingdom-board-column-width)) 'row 'stacked)))
+(defun rat-kingdom-board-shown-columns (filter held)
+  "Return the columns the board shows under FILTER, in order.
+HELD is the columns that hold cards.  Done and Stopped are shown if
+FILTER says so, and with `rat-kingdom-board-hide-empty-columns' only
+the columns in HELD are."
+  (cl-loop for (column . _) in rat-kingdom-board-columns
+           when (and (or (plist-get filter :ended)
+                         (not (memq column rat-kingdom-board--ended)))
+                     (or (not rat-kingdom-board-hide-empty-columns)
+                         (memq column held)))
+           collect column))
+
+(defun rat-kingdom-board--held ()
+  "Return the columns that hold cards on the board."
+  (let (held)
+    (maphash (lambda (_id entry) (cl-pushnew (car entry) held))
+             rat-kingdom-board--cards)
+    held))
+
+(defun rat-kingdom-board-layout (width count)
+  "Return the layout for COUNT columns in a window WIDTH characters wide.
+That is (LAYOUT . COLUMN-WIDTH): each column has the width shared
+equally, but no more than `rat-kingdom-board-column-width', and LAYOUT
+is `row' if that is at least `rat-kingdom-board-min-column-width', and
+`stacked' otherwise."
+  (let ((each (min rat-kingdom-board-column-width
+                   (/ width (max 1 count)))))
+    (cons (if (>= each rat-kingdom-board-min-column-width) 'row 'stacked)
+          each)))
+
+(defun rat-kingdom-board--arrange (held)
+  "Lay the board out for the columns HELD that hold cards.
+Set what it shows and how, from its filter and its window's width, and
+return non-nil if that changed."
+  (let* ((shown (rat-kingdom-board-shown-columns rat-kingdom-board--filter held))
+         (layout (rat-kingdom-board-layout
+                  (or rat-kingdom-board--width (rat-kingdom-board--guess-width))
+                  (length shown)))
+         (old (list rat-kingdom-board--shown rat-kingdom-board--layout
+                    rat-kingdom-board--column-width)))
+    (setq rat-kingdom-board--shown shown
+          rat-kingdom-board--layout (car layout)
+          rat-kingdom-board--column-width (cdr layout))
+    (not (equal old (list shown (car layout) (cdr layout))))))
+
+(defun rat-kingdom-board--legend (filter shown)
+  "Return the line naming the columns FILTER allows but SHOWN leaves out.
+Each is named with its count, 0, or the line is \"\" if there are none."
+  (mapconcat (lambda (column)
+               (format "%s 0" (alist-get column rat-kingdom-board-columns)))
+             (cl-set-difference (rat-kingdom-board-shown-columns
+                                 filter (mapcar #'car rat-kingdom-board-columns))
+                                shown)
+             " · "))
 
 (defun rat-kingdom-board--button (id label action)
   "Return the components of the card button ID saying LABEL for ACTION."
@@ -490,9 +592,18 @@ That is `row' if every column FILTER shows can have
                                  "text" (rat-kingdom-plan--path "note")
                                  "tone" (rat-kingdom-plan--path "tone")
                                  "visible" (rat-kingdom-plan--path "hasNote"))
+    ;; A narrow column takes the buttons two to a line.
+    (if (and (eq layout 'row)
+             (< (rat-kingdom-board--text-width) rat-kingdom-board--buttons-width))
+        (rat-kingdom-plan--component
+         "card-buttons" "Column" "children" ["card-buttons-1" "card-buttons-2"])
+      (rat-kingdom-plan--component
+       "card-buttons" "Row"
+       "children" ["card-open" "card-show" "card-diff" "card-cancel"]))
     (rat-kingdom-plan--component
-     "card-buttons" "Row"
-     "children" ["card-open" "card-show" "card-diff" "card-cancel"]))
+     "card-buttons-1" "Row" "children" ["card-open" "card-show"])
+    (rat-kingdom-plan--component
+     "card-buttons-2" "Row" "children" ["card-diff" "card-cancel"]))
    (let ((open (rat-kingdom-board--button "card-open" "Worker" "open")))
      (puthash "visible" (rat-kingdom-plan--path "worker") (car open))
      open)
@@ -528,13 +639,15 @@ That is `row' if every column FILTER shows can have
                                          "visible" visible)
             list))))
 
-(defun rat-kingdom-board-components (layout)
-  "Return the components of the story board for LAYOUT, `row' or `stacked'."
+(defun rat-kingdom-board-components (layout &optional shown)
+  "Return the components of the story board for LAYOUT, `row' or `stacked'.
+SHOWN is the columns shown, by default all of them."
+  (setq shown (or shown (mapcar #'car rat-kingdom-board-columns)))
   (append
    (list
     (rat-kingdom-plan--component
      "root" "Column"
-     "children" ["heading" "filters" "result" "board"])
+     "children" ["heading" "filters" "result" "legend" "board"])
     (rat-kingdom-plan--component "heading" "Text" "variant" "h2"
                                  "text" "Story board")
     (rat-kingdom-plan--component
@@ -559,14 +672,16 @@ That is `row' if every column FILTER shows can have
     (rat-kingdom-plan--component "result" "Text"
                                  "text" (rat-kingdom-plan--path "/result")
                                  "tone" (rat-kingdom-plan--path "/resultTone"))
+    (rat-kingdom-plan--component "legend" "Text" "variant" "caption"
+                                 "text" (rat-kingdom-plan--path "/legend")
+                                 "visible" (rat-kingdom-plan--path "/hasLegend"))
     (rat-kingdom-plan--component
      "board" (if (eq layout 'row) "Row" "Column")
-     "children" (vconcat (mapcar (lambda (column)
-                                   (format "column-%s" (car column)))
-                                 rat-kingdom-board-columns))))
+     "children" (vconcat (mapcar (lambda (column) (format "column-%s" column))
+                                 shown))))
    (mapcan (lambda (column)
-             (rat-kingdom-board--column-components (car column) layout))
-           rat-kingdom-board-columns)
+             (rat-kingdom-board--column-components column layout))
+           shown)
    (rat-kingdom-board--card-components layout)))
 
 (defun rat-kingdom-board--repo-options (space)
@@ -581,8 +696,11 @@ That is `row' if every column FILTER shows can have
 (defun rat-kingdom-board-data (space entries filter)
   "Return the board's data model for SPACE, holding ENTRIES under FILTER.
 ENTRIES are as `rat-kingdom-board-cards' returns them."
-  (let ((cards (rat-kingdom-plan--obj))
-        (columns (rat-kingdom-plan--obj)))
+  (let* ((cards (rat-kingdom-plan--obj))
+         (columns (rat-kingdom-plan--obj))
+         (shown (rat-kingdom-board-shown-columns
+                 filter (mapcar #'cadr entries)))
+         (legend (rat-kingdom-board--legend filter shown)))
     (pcase-dolist (`(,column . ,_) rat-kingdom-board-columns)
       (let ((name (symbol-name column))
             (held (rat-kingdom-plan--obj)))
@@ -594,12 +712,12 @@ ENTRIES are as `rat-kingdom-board-cards' returns them."
                  (rat-kingdom-plan--obj
                   "title" (rat-kingdom-board--column-title
                            column (hash-table-count held))
-                  "visible" (rat-kingdom-plan--bool
-                             (or (plist-get filter :ended)
-                                 (not (memq column rat-kingdom-board--ended)))))
+                  "visible" (rat-kingdom-plan--bool (memq column shown)))
                  columns)))
     (rat-kingdom-plan--obj
      "repos" (rat-kingdom-board--repo-options space)
+     "legend" legend
+     "hasLegend" (rat-kingdom-plan--bool (not (string-empty-p legend)))
      "filter" (rat-kingdom-plan--obj
                "repo" (or (plist-get filter :repo) "")
                "ended" (rat-kingdom-plan--bool (plist-get filter :ended)))
@@ -681,45 +799,93 @@ Return the window, or nil if that window cannot take it."
              a2ui-vui-display-in-main-window)))
          (buffer (a2ui-show-surface (rat-kingdom-board--a2ui-session)
                                     rat-kingdom-board-surface-id)))
+    (setq rat-kingdom-board--buffer buffer)
     (with-current-buffer buffer
       (rat-kingdom-board-mode 1)
-      ;; a2ui lays a Row out in `a2ui-vui-width' characters, so the
-      ;; columns stand side by side only if it is the window's width.
-      (if (eq rat-kingdom-board--layout 'row)
-          (setq-local a2ui-vui-width (max (default-value 'a2ui-vui-width)
-                                          (rat-kingdom-board--window-width)))
-        (kill-local-variable 'a2ui-vui-width))
-      (a2ui-surface-refresh))
-    (get-buffer-window buffer)))
+      (add-hook 'window-size-change-functions #'rat-kingdom-board--resized
+                nil t))
+    (get-buffer-window buffer t)))
 
 (defun rat-kingdom-board--window-width ()
-  "Return the width the board will be shown in."
+  "Return the width of the window that shows the board, or nil if none does.
+That is a window showing the board's buffer, on any frame, whichever
+window is selected."
+  (when-let* ((buffer rat-kingdom-board--buffer)
+              ((buffer-live-p buffer))
+              (window (get-buffer-window buffer t)))
+    (window-width window)))
+
+(defun rat-kingdom-board--guess-width ()
+  "Return the width of the window the board goes in, before it is shown."
   (window-width (or (rat-kingdom-board--main-window) (selected-window))))
+
+(defun rat-kingdom-board--fit ()
+  "Make a2ui lay out the board's buffer for the board's layout, and draw it."
+  (when (buffer-live-p rat-kingdom-board--buffer)
+    (with-current-buffer rat-kingdom-board--buffer
+      ;; a2ui lays a Row out in `a2ui-vui-width' characters, so the
+      ;; columns stand side by side only if it is the window's width.
+      (if (and (eq rat-kingdom-board--layout 'row) rat-kingdom-board--width)
+          (setq-local a2ui-vui-width (max (default-value 'a2ui-vui-width)
+                                          rat-kingdom-board--width))
+        (kill-local-variable 'a2ui-vui-width))
+      (a2ui-surface-refresh))))
+
+(defun rat-kingdom-board-relayout ()
+  "Lay the board out again for the width of the window that shows it.
+Draw it again if that changes what it shows or how.  Do nothing if no
+window shows it or its width did not change; otherwise return non-nil."
+  (when (timerp rat-kingdom-board--relayout-timer)
+    (cancel-timer rat-kingdom-board--relayout-timer))
+  (setq rat-kingdom-board--relayout-timer nil)
+  (when-let* ((space rat-kingdom-board--space)
+              ((rat-kingdom-space-db space))
+              (width (rat-kingdom-board--window-width))
+              ((not (eql width rat-kingdom-board--width))))
+    (setq rat-kingdom-board--width width)
+    (when (rat-kingdom-board--arrange (rat-kingdom-board--held))
+      (rat-kingdom-board-render space))
+    (rat-kingdom-board--fit)
+    t))
+
+(defun rat-kingdom-board--resized (_window)
+  "Lay the board out again soon: a window showing it changed its size.
+This is on `window-size-change-functions' in the board's buffer.  The
+layouts come at most every `rat-kingdom-board-interval' seconds."
+  (unless rat-kingdom-board--relayout-timer
+    (setq rat-kingdom-board--relayout-timer
+          (run-at-time rat-kingdom-board-interval nil
+                       #'rat-kingdom-board-relayout))))
 
 ;;;; Showing the board
 
 (defun rat-kingdom-board-render (space)
-  "Draw the whole story board of SPACE again, as the filter says."
+  "Draw the whole story board of SPACE again, as the filter says.
+Return the messages sent."
   (clrhash rat-kingdom-board--cards)
   (setq rat-kingdom-board--dirty nil)
   (let ((entries (rat-kingdom-board-cards space)))
     (pcase-dolist (`(,id . ,entry) entries)
       (puthash id entry rat-kingdom-board--cards))
-    (dolist (message
-             (list (rat-kingdom-board--message
-                    "createSurface" "catalogId" (rat-kingdom-plan--catalog)
-                    "theme" (rat-kingdom-plan--obj
-                             "agentDisplayName" "rat-kingdom"))
-                   (rat-kingdom-board--message
-                    "updateComponents"
-                    "components" (vconcat (rat-kingdom-board-components
-                                           rat-kingdom-board--layout)))
-                   (rat-kingdom-board--message
-                    "updateDataModel" "path" "/"
-                    "value" (rat-kingdom-board-data
-                             space entries rat-kingdom-board--filter))))
-      (rat-kingdom-board--send message))
-    (setq rat-kingdom-board--last (funcall rat-kingdom-board--now))))
+    (rat-kingdom-board--arrange (mapcar #'cadr entries))
+    (let ((messages
+           (list (rat-kingdom-board--message
+                  "createSurface" "catalogId" (rat-kingdom-plan--catalog)
+                  "theme" (rat-kingdom-plan--obj
+                           "agentDisplayName" "rat-kingdom"))
+                 (rat-kingdom-board--message
+                  "updateComponents"
+                  "components" (vconcat (rat-kingdom-board-components
+                                         rat-kingdom-board--layout
+                                         rat-kingdom-board--shown)))
+                 (rat-kingdom-board--message
+                  "updateDataModel" "path" "/"
+                  "value" (rat-kingdom-board-data
+                           space entries rat-kingdom-board--filter)))))
+      (dolist (message messages)
+        (rat-kingdom-board--send message))
+      (setq rat-kingdom-board--last (funcall rat-kingdom-board--now))
+      messages)))
 
 (defun rat-kingdom-board-show (&optional space select)
   "Show the story board of SPACE in the main window.
@@ -728,13 +894,16 @@ built from the space each time.  With SELECT, select its window.
 Signal an error if a2ui cannot be loaded.  Return the board's window."
   (rat-kingdom-board--require-a2ui)
   (let ((space (or space (rat-kingdom-space-default))))
+    ;; Until the board is shown, the width of its window is a guess;
+    ;; once it is, it is laid out again if the guess was wrong.
     (setq rat-kingdom-board--space space
-          rat-kingdom-board--layout
-          (rat-kingdom-board-layout (rat-kingdom-board--window-width)
-                                    rat-kingdom-board--filter))
+          rat-kingdom-board--width (or (rat-kingdom-board--window-width)
+                                       (rat-kingdom-board--guess-width)))
     (rat-kingdom-board-render space)
     (rat-kingdom-board--start-ticking)
     (let ((window (rat-kingdom-board--display)))
+      (unless (rat-kingdom-board-relayout)
+        (rat-kingdom-board--fit))
       (when (and select (window-live-p window))
         (select-window window))
       window)))
@@ -836,16 +1005,22 @@ whose counts changed."
             (if new
                 (puthash id new rat-kingdom-board--cards)
               (remhash id rat-kingdom-board--cards)))))
-      (dolist (column (reverse columns))
-        (setq messages
-              (append messages
-                      (list (rat-kingdom-board-update
-                             (format "/columns/%s/title" column)
-                             (rat-kingdom-board--column-title
-                              column (rat-kingdom-board--count column)))))))
-      (dolist (message messages)
-        (rat-kingdom-board--send message))
-      messages)))
+      (if (and columns (rat-kingdom-board--arrange (rat-kingdom-board--held)))
+          ;; A column was emptied or filled, and is left out or brought
+          ;; back: the columns shown, their widths and the cards' lines
+          ;; change, so the board is drawn again.
+          (prog1 (rat-kingdom-board-render space)
+            (rat-kingdom-board--fit))
+        (dolist (column (reverse columns))
+          (setq messages
+                (append messages
+                        (list (rat-kingdom-board-update
+                               (format "/columns/%s/title" column)
+                               (rat-kingdom-board--column-title
+                                column (rat-kingdom-board--count column)))))))
+        (dolist (message messages)
+          (rat-kingdom-board--send message))
+        messages))))
 
 (defun rat-kingdom-board--tick ()
   "Refresh the ages on the board, or stop if it is gone."
@@ -870,11 +1045,13 @@ whose counts changed."
 
 (defun rat-kingdom-board--stop ()
   "Stop following the space: the board is no longer shown."
-  (dolist (timer (list rat-kingdom-board--timer rat-kingdom-board--tick-timer))
+  (dolist (timer (list rat-kingdom-board--timer rat-kingdom-board--tick-timer
+                      rat-kingdom-board--relayout-timer))
     (when (timerp timer)
       (cancel-timer timer)))
   (setq rat-kingdom-board--timer nil
         rat-kingdom-board--tick-timer nil
+        rat-kingdom-board--relayout-timer nil
         rat-kingdom-board--space nil
         rat-kingdom-board--dirty nil)
   (clrhash rat-kingdom-board--cards))
