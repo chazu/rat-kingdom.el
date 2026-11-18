@@ -85,6 +85,12 @@ Your workspace:
 What to do:
 - Explore and explain the code, answer the user's questions, and propose \
 designs.
+- When you explain a concept, walk through implementation details, or lay \
+out a plan, such as an architecture, a design, how code works, a sequence of \
+changes, a plan with steps or dependencies, or a trade-off, also show it with \
+a2ui: call a2ui_catalog once for the components, then render_a2ui a diagram, \
+a table or a side-by-side. Keep the text answer complete. Skip it for short \
+factual answers, and if the a2ui tools are not available.
 - Write docs with the write_doc tool of the rat-kingdom server when the \
 user asks, or when a discussion reaches a decision worth keeping. Make each \
 doc stand on its own: its readers know nothing of this conversation. Every \
