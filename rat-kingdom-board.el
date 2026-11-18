@@ -245,20 +245,14 @@ WORKFLOW is normalized, or nil if the story's is not defined.  See
 
 ;;;; Cards
 
-(defun rat-kingdom-board--hex (run-id)
-  "Return the hex part of the story id in RUN-ID, such as 3a9c of S-3a9c.1."
-  (if (string-match "\\`S-\\([0-9a-f]+\\)" run-id)
-      (match-string 1 run-id)
-    run-id))
-
 (defun rat-kingdom-board-rat-name (space run-id)
   "Return the name to show for the worker RUN-ID in SPACE, or nil.
-A run with a `:name' is shown as Name-hex, such as Pip-3a9c; one
-without, by its id."
+A run with a `:name' is shown by `rat-kingdom-run-display-name', such
+as Pip-3a9c; one without, by its id."
   (when (and run-id (not (equal run-id "")))
-    (if-let* ((name (plist-get (rat-kingdom-run-get space run-id) :name)))
-        (format "%s-%s" name (rat-kingdom-board--hex run-id))
-      run-id)))
+    (or (rat-kingdom-run-display-name
+         (or (rat-kingdom-run-get space run-id) (list :id run-id)))
+        run-id)))
 
 (defun rat-kingdom-board-age-text (seconds)
   "Return SECONDS as a short age, such as 45s, 12m, 3h 5m or 2d."

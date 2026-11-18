@@ -203,21 +203,21 @@ VALUE is `absent' for a message that removes PATH."
     (let ((card (rat-kingdom-board-card-for space "S-3a9c")))
       (should (eq (car card) 'working))
       (should (equal (plist-get (cdr card) :id) "S-3a9c"))
-      ;; Without :name, the worker is shown by its run's id.
-      (should (equal (plist-get (cdr card) :name) "S-3a9c.1"))
+      ;; Every worker gets a name: the first in a fresh space is Pip.
+      (should (equal (plist-get (cdr card) :name) "Pip-3a9c"))
+      (should (equal (plist-get (cdr card) :heading) "**S-3a9c** · Pip-3a9c"))
       (should (equal (plist-get (cdr card) :repo) "demo"))
       (should (equal (plist-get (cdr card) :title) "Add a parser"))
       (should (equal (plist-get (cdr card) :agent) "claude"))
       (should (equal (plist-get (cdr card) :age) "12m"))
       (should (equal (plist-get (cdr card) :epic) ""))
-      (should (equal (plist-get (cdr card) :heading) "**S-3a9c** · S-3a9c.1"))
       (should (equal (plist-get (cdr card) :tone) ""))
       (should (plist-get (cdr card) :live)))
-    ;; With :name, as S-88aa gives runs, it is Name-hex.
-    (rat-kingdom-run-update space "S-3a9c.1" :name "Pip")
+    ;; A run with no :name, as before rats had names, shows its id.
+    (rat-kingdom-run-update space "S-3a9c.1" :name nil)
     (let ((card (rat-kingdom-board-card-for space "S-3a9c")))
-      (should (equal (plist-get (cdr card) :name) "Pip-3a9c"))
-      (should (equal (plist-get (cdr card) :heading) "**S-3a9c** · Pip-3a9c")))))
+      (should (equal (plist-get (cdr card) :name) "S-3a9c.1"))
+      (should (equal (plist-get (cdr card) :heading) "**S-3a9c** · S-3a9c.1")))))
 
 (ert-deftest rat-kingdom-board-test-card-attention ()
   (rat-kingdom-board-test-with-stubs (space path)
@@ -338,13 +338,13 @@ VALUE is `absent' for a message that removes PATH."
     (should-not (rat-kingdom-board-flush))
     (should-not rat-kingdom-board-test--sent)
     ;; A change of the run, such as a name, changes the card in place.
-    (rat-kingdom-run-update space "S-1.1" :name "Pip")
+    (rat-kingdom-run-update space "S-1.1" :name "Whiskers")
     (should (equal rat-kingdom-board--dirty '("S-1")))
     (rat-kingdom-board-flush)
     (should (equal (mapcar #'car (rat-kingdom-board-test--updates))
                    '("/cards/working/S-1")))
     (should (equal (gethash "name" (cdr (car (rat-kingdom-board-test--updates))))
-                   "Pip-1"))
+                   "Whiskers-1"))
     ;; A cancelled story moves to Stopped.
     (setq rat-kingdom-board-test--sent nil)
     (rat-kingdom-story-cancel space "S-1")
@@ -563,7 +563,7 @@ VALUE is `absent' for a message that removes PATH."
             (let ((text (rat-kingdom-board-test--text)))
               (should (string-search "Working (1)" text))
               (should (string-search "Queued (0)" text))
-              (should (string-search "S-1 · S-1.1" text))))
+              (should (string-search "S-1 · Pip-1" text))))
         (rat-kingdom-board--stop)
         (when (get-buffer "*a2ui: Story board*")
           (kill-buffer "*a2ui: Story board*"))))))
