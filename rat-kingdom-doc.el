@@ -27,7 +27,9 @@
 ;; `inbox', `block' and its own `finish', which needs a doc rather than
 ;; a commit.  A rat has `read_doc' too.  The king has `doc_list',
 ;; `doc_show' and `doc_forget', and sees a story's docs in `story_show'
-;; and `story_diff'.
+;; and `story_diff'.  A consul (rat-kingdom-consul.el) has `write_doc'
+;; and `read_doc'; its docs are approved when written, since the user
+;; asked for them, and belong to no story.
 ;;
 ;; A pass verdict on a story approves its drafts, in the transaction
 ;; that moves the story on (`rat-kingdom-story-verdict-functions').
@@ -145,12 +147,16 @@ ACTOR is recorded as who wrote it.  Return the new tuple."
 TITLE and BODY are required; TOPIC is a few words.  Without ID the doc
 is new; with it, the doc ID of RUN's repository is replaced whole,
 keeping its id.  Either way it is a draft of RUN's story.  RUN must be
-its story's working run."
+its story's working run, or a consul (rat-kingdom-consul.el), whose
+docs, written with the user, are approved at once and belong to no
+story."
   (let ((title (rat-kingdom-doc--text title))
         (body (rat-kingdom-doc--text body))
-        (repo (plist-get run :repo)))
-    (unless (and (plist-get run :story)
-                 (rat-kingdom-run--story-waiting-p space run))
+        (repo (plist-get run :repo))
+        (consul (equal (plist-get run :role) "consul")))
+    (unless (or consul
+                (and (plist-get run :story)
+                     (rat-kingdom-run--story-waiting-p space run)))
       (error "You are not this task's working worker, or you have already \
 reported, so you cannot write docs for it"))
     (unless title
@@ -173,7 +179,7 @@ Make it shorter, or split it into several docs"
        :payload (list :title (replace-regexp-in-string "[\n\t ]+" " " title)
                       :body body
                       :topic (rat-kingdom-doc--text topic)
-                      :status "draft"
+                      :status (if consul "approved" "draft")
                       :story (plist-get run :story)
                       :run (plist-get run :id)
                       :updated (funcall rat-kingdom-space-now-function))
@@ -201,11 +207,17 @@ Return the doc's tuple.  Signal an error if ID is not a live doc."
                      :body (alist-get 'body arguments)
                      :topic (alist-get 'topic arguments)
                      :id revising)))
-    (format "%s doc %s, a draft: %s. To revise it, call write_doc again with \
+    (if (equal (plist-get run :role) "consul")
+        (format "%s doc %s: %s. It is approved, so every later worker in %s \
+is told of it. To revise it, call write_doc again with the id %s."
+                (if revising "Revised" "Wrote")
+                (plist-get doc :identity) (rat-kingdom-doc--field doc :title)
+                (plist-get doc :scope) (plist-get doc :identity))
+      (format "%s doc %s, a draft: %s. To revise it, call write_doc again with \
 the id %s. Call finish when your docs are written."
-            (if revising "Revised" "Wrote")
-            (plist-get doc :identity) (rat-kingdom-doc--field doc :title)
-            (plist-get doc :identity))))
+              (if revising "Revised" "Wrote")
+              (plist-get doc :identity) (rat-kingdom-doc--field doc :title)
+              (plist-get doc :identity)))))
 
 (defun rat-kingdom-doc--describe (doc)
   "Return the doc tuple DOC as `read_doc' shows it."
@@ -258,7 +270,7 @@ start other work."
 once approved, for every later worker in this repository to read. It answers \
 with the doc's id. Give id to revise a doc instead of writing a new one; the \
 doc is replaced whole."
- :roles '(researcher)
+ :roles '(researcher consul)
  :args '((:name "title" :type string
           :description "The doc's title, one line.")
          (:name "body" :type string
@@ -275,7 +287,7 @@ D-1a2b. Leave it out to write a new doc."))
  "read_doc"
  :description "Read a doc of this repository by its id: its title, topic, \
 status and text. Your brief lists the approved docs."
- :roles '(rat researcher)
+ :roles '(rat researcher consul)
  :args '((:name "id" :type string :description "The doc's id, like D-1a2b."))
  :function #'rat-kingdom-doc--read-tool)
 

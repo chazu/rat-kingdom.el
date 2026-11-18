@@ -115,6 +115,11 @@ stories and steers its workers for you, and reports to you. While it runs, \
 news of the epic's stories goes to it, not to you; you still hear when the \
 epic is done, review its landing, and get its reports. `foreman_stop` hands \
 its reviews back to you.
+- When the user wants to talk a project through while you are busy, \
+`consul_start` gives them a consul: a rat in that repository that talks with \
+them directly, in its own buffer. You do not drive it and hear nothing from \
+it. When the user is done, `consul_dismiss` ends it; any commits it made \
+become a story that you review as usual.
 
 Rules:
 - Do not write code yourself, and do not edit files in the repositories. \
@@ -263,7 +268,7 @@ For a gate that is when it opens or the signal it waits for; for a
                               (cond
                                ((and run (equal (plist-get payload :awaiting)
                                                 "worker"))
-                                (format " %s, %s" (plist-get run :id)
+                                (format " %s, %s" (rat-kingdom-run-label run)
                                         (plist-get run :state)))
                                ((rat-kingdom-king--waiting-detail space story)
                                 (concat ": " (rat-kingdom-king--waiting-detail
@@ -616,7 +621,10 @@ its branch"
                                                   others))
                                          :key (lambda (run) (plist-get run :id))
                                          :test #'equal)))
-                       (format "Worker %s: %s" (plist-get payload :run)
+                       (format "Worker %s: %s"
+                               (if run
+                                   (rat-kingdom-run-label run)
+                                 (plist-get payload :run))
                                (or (plist-get run :state) "unknown"))))
                 (and (not archived)
                      (when-let* ((notes (rat-kingdom-king--story-notes

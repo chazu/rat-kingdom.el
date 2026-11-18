@@ -114,7 +114,8 @@ STORY is the story that wrote it.  Return its id."
                      '("block" "finish" "inbox" "note_fact" "read_doc"
                        "write_doc")))
       (should (equal (rat-kingdom-agent-shell--buffer-name run)
-                     "researcher S-1.1")))
+                     (format "researcher %s-1 (S-1.1)"
+                             (plist-get run :name)))))
     (let* ((id (rat-kingdom-doc-test--write-ok
                 "S-1.1" "  How the cache\nworks " "# Cache\n\nIt is LRU."
                 '(topic . "cache")))

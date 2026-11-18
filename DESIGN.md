@@ -711,7 +711,7 @@ the list, other than whitespace and comments, makes the file invalid.
 | `:commands` | a property list from a command name (`:lint`) to an argument list of strings, run without a shell | global, repo |
 | `:setup` | an argument list of strings, or a list of command names | global, repo |
 | `:check` | as `:setup` | all |
-| `:agents` | a property list: `:worker`, `:foreman`, each an agent kind, `claude` or `codex` | all |
+| `:agents` | a property list: `:worker`, `:foreman`, `:consul`, each an agent kind, `claude` or `codex` | all |
 | `:timeouts` | a property list: `:worker`, `:check`, each a number of seconds | all |
 | `:attempts` | how many workers a story is given before it is parked, a positive integer | all |
 | `:max-workers` | how many workers run at once, across all repositories, a positive integer | global |
@@ -763,7 +763,8 @@ the list, other than whitespace and comments, makes the file invalid.
   `rat-kingdom-story-default-workflow`, `:target` from
   `rat-kingdom-git-default-target`, `:agents :worker` from
   `rat-kingdom-default-agent`, `:agents :foreman` is `claude` (as the
-  foreman runs today), `:timeouts` from `rat-kingdom-story-timeouts` (its
+  foreman runs today), `:agents :consul` from `rat-kingdom-default-agent`,
+  `:timeouts` from `rat-kingdom-story-timeouts` (its
   `:spawn` entry is `:worker`), `:attempts` from
   `rat-kingdom-story-attempts`, `:max-workers` from
   `rat-kingdom-story-max-workers`, `:track :beads` from
@@ -997,6 +998,24 @@ Run states, kept distinct as in rk2: `starting`, `working`, `ready`,
 `blocked`, `stopped`, `exited` (its session ended before it reported) and
 `interrupted` (Emacs stopped while it worked). A run that cannot be
 started is `exited` with the error.
+
+**Built: names.** Every rat, that is every run but the king's (workers,
+researchers, foremen, consuls), has a name, `:name` in its run record,
+taken in turn from `rat-kingdom-rat-names` (Pip, Nibbles, Whiskers and
+some sixty more, each one word). The place in the list is kept in the
+file `rat-names` in `rat-kingdom-directory`, so it carries on after a
+restart, and a name a live rat holds is skipped: one whose run is
+`starting`, `working` or `interrupted`, or whose agent runs in this
+Emacs, or a consul not yet dismissed. If every name is held, the next is
+numbered, as Pip2. A name is shown with the run's suffix, the four hex
+digits of its story or consul, or the epic's id for a foreman: Pip-3a9c
+for S-3a9c's first worker, Nibbles-3a9c for its second, Bean-T-1 for the
+foreman F-T-1. People see it with the id beside it, "Pip-3a9c
+(S-3a9c.1)", in agent-shell buffer names ("rat Pip-3a9c (S-3a9c.1)"),
+status lines, `story_show`'s worker line, `tell`'s answers and the
+engine's news, and a worker is told its own in its prompt. Ids stay the
+references every tool takes. A foreman or consul taken up again after a
+restart keeps its name.
 
 A story's run counts against the worker limit (section 7.2) while it is
 `starting` or `working`. Once it reports, its agent sits idle until its
@@ -1262,9 +1281,10 @@ go, and it lets a role be denied built-in tools as well.
 
 | Role | Lifetime | Tools |
 |---|---|---|
-| king | long-lived, global, no worktree | built: `status` (with the tracker tasks available, each with its epic and agent), `repo_add`, `repo_sync`, `workflow_list`, `story_start` (optionally from a `task`, with an `agent` and a `model`; a task's `rk-agent:` and `rk-workflow:` labels are the defaults), `story_show`, `story_diff`, `story_move`, `story_cancel`, `verdict`, `publish`, `query`, `fact_forget`, `task_create`, `epic_create`, `epic_propose` (the epic plan surface, 14.1), `epic_start` (optionally with a `feature_branch`, and a `foreman`), `epic_pause`, `epic_resume`, `epic_cancel`, `epic_retry`, `epic_show`, `epic_diff`, `epic_verdict` (section 10), `tell`, `foreman_start`, `foreman_stop`, `config_show` and `config_set` (7.3), `doc_list`, `doc_show` and `doc_forget` (7.1), `story_signal` (7.1); `story_start` also takes a rarely needed `target`; built (step 8): `mixins` and `git` on `repo_add` |
+| king | long-lived, global, no worktree | built: `status` (with the tracker tasks available, each with its epic and agent), `repo_add`, `repo_sync`, `workflow_list`, `story_start` (optionally from a `task`, with an `agent` and a `model`; a task's `rk-agent:` and `rk-workflow:` labels are the defaults), `story_show`, `story_diff`, `story_move`, `story_cancel`, `verdict`, `publish`, `query`, `fact_forget`, `task_create`, `epic_create`, `epic_propose` (the epic plan surface, 14.1), `epic_start` (optionally with a `feature_branch`, and a `foreman`), `epic_pause`, `epic_resume`, `epic_cancel`, `epic_retry`, `epic_show`, `epic_diff`, `epic_verdict` (section 10), `tell`, `foreman_start`, `foreman_stop`, `consul_start`, `consul_dismiss`, `config_show` and `config_set` (7.3), `doc_list`, `doc_show` and `doc_forget` (7.1), `story_signal` (7.1); `story_start` also takes a rarely needed `target`; built (step 8): `mixins` and `git` on `repo_add` |
 | rat (worker) | one task | built: `finish`, `block`, `note_fact`, `inbox`, `read_doc` |
 | researcher | one task | built: `write_doc`, `read_doc`, `note_fact`, `inbox`, `block`, `finish` |
+| consul | one repository, until the user dismisses it | built: `write_doc` (its docs are approved at once), `read_doc`, `note_fact` |
 | foreman | one epic, optional | built: `status` (its epic: the `epic_show` view and its stories' lines), `story_show`, `story_diff`, `verdict`, `tell`, `query`, `task_create` (its epic is the parent), `epic_retry`, `story_start` (for a task of its epic), `report` (to the king); every one but `query` limited to its epic |
 | ambient | one event | set by the reaction that starts it |
 
@@ -1310,6 +1330,60 @@ king's, offered to both roles. The foreman has no `publish`, `repo_add`,
 `story_move`, `story_cancel` or `foreman_*`. `status` and `epic_show`
 show "foreman F-… (agent, working)", idle, starting or stopped.
 
+**Built: the consul** (`rat-kingdom-consul.el`). A rat the user asks
+the king for in one registered repository, whose only job is to talk
+with the user about that project, directly, in its own agent-shell
+buffer, while the king is busy. The king does not drive it, review its
+turns or relay messages to it. It is a run like the foreman's, with the
+id `C-` and four hex digits (unique as story ids are, against live and
+archived runs), the role `consul`, and `:repo`, `:name`, `:topic` (an
+optional line), `:branch`, `:worktree`, `:target` and `:started` in its
+record. It works in a worktree of its own under
+`rat-kingdom-directory`, cut from the repository's target on a new
+branch made by `:git :branch` with the id `consul-NAME-XXXX`
+(`rats/consul-pip-3a9c` by default), push-guarded as any `rats/*`
+branch; it never touches the user's checkout. It runs the agent it is
+given, else `:agents :consul` for its repository (7.3), and the model
+it is given, else `rat-kingdom-worker-model`. Its instructions
+(`rat-kingdom-consul-instructions`, with `{name}`, `{repo}`, `{topic}`,
+`{worktree}`, `{branch}`, `{target}`, `{checkout}` and `{tools}`) say:
+explore and explain the code, answer questions, propose designs; write
+docs when asked or when a discussion reaches a decision worth keeping;
+change code and commit in its worktree when the user asks; never push;
+never start stories or epics; wait until the user dismisses it.
+
+Lifecycle:
+
+- **Start.** The king's `consul_start` (`repo`, optionally `topic`,
+  `agent`, `model`) makes the worktree and branch, records the run and
+  starts its agent; its buffer is shown to the user. It answers with the
+  consul's name, id and buffer. `M-x rat-kingdom-consul-start` asks for
+  a repository and a topic and pops to the buffer, which is in
+  `rat-kingdom-consul-mode`.
+- **While it runs.** No engine news goes to it: it has no story and no
+  epic, so nothing routes to it, and the king's story tools (`tell`,
+  `story_*`, `verdict`) never reach it. `status` lists the consuls in a
+  section of their own: id, name, repository, state, age, agent, topic,
+  branch and how many commits it is ahead of the target.
+- **Dismissal.** `consul_dismiss` (`consul`, its id or name, and
+  optionally `force`), or `M-x rat-kingdom-consul-dismiss`, bound to
+  `C-c ~ d` in the consul's buffer, stops its agent. Uncommitted changes
+  in its worktree refuse the dismissal, with the paths, unless `force`
+  is given; then they are committed first as a WIP commit. If its
+  branch then has commits its target lacks, they become a story in the
+  repository's workflow (`rat-kingdom-story-start-from-branch`), titled
+  by the topic or "Consul NAME: <first commit's subject>", on the
+  consul's branch and worktree, at the place a worker's finished work
+  goes (`rat-kingdom-story-work-place`, where the spawn steps from the
+  start lead: `checking` in `story`), so the check runs and the king
+  reviews and merges it as usual. Otherwise its worktree and branch are
+  removed. Its docs stay either way. The answer says which happened.
+  Its run record is then archived.
+- **Restarts.** A consul lasts until it is dismissed. One that Emacs cut
+  off is taken up again in its session, with its name, on reconcile
+  (`rat-kingdom-consul-reconcile`); `M-x rat-kingdom-consul-show` shows
+  its buffer, starting it again if its agent ended.
+
 **Built:** `query` (`rat-kingdom-fact.el`) is the king's read-only look
 into the space (5.5). It takes a `category`, which must be a known one,
 and optionally `scope`, `identity`, `owner`, `contains` (a substring of
@@ -1334,7 +1408,10 @@ and `git` arguments (7.3), are in `rat-kingdom-king.el`.
   or body, a body over `rat-kingdom-doc-max-length` (100000) characters,
   an `id` that is not a doc of this repo, and a run that is not its
   story's working run. It answers with the doc's id.
-- `read_doc` (rat, researcher): `id`. It returns the doc's title, topic,
+- `write_doc` (consul): as the researcher's, but the doc is `approved`
+  when written, since the user asked for it, and belongs to no story;
+  `:run` is the consul's id.
+- `read_doc` (rat, researcher, consul): `id`. It returns the doc's title, topic,
   status and body, and refuses a doc of another repo.
 - `finish` (researcher): `summary` and `checks`, as a rat's. It needs at
   least one doc whose `:story` is this story, and no commit (7.1).
@@ -1916,7 +1993,11 @@ wait longer for review than for implementation.
    and `foreman_stop`, news of an epic's stories routed to it through the
    king's delivery, its tools limited to its epic, `report`, its end with
    the epic's, and its session taken up again on reconcile, tested with
-   the backend that starts no agent.
+   the backend that starts no agent. The consul is built
+   (`rat-kingdom-consul.el`): `consul_start` and `consul_dismiss`, its own
+   worktree and branch, its work made a story on dismissal, and its
+   session taken up again on reconcile. Every rat has a name from
+   `rat-kingdom-rat-names`, shown with its id.
 
    **Facts** (built: `rat-kingdom-fact.el`): the worker's `note_fact`,
    facts in every worker's brief through
