@@ -9,6 +9,7 @@
 ;;; Code:
 
 (require 'ert)
+(require 'rat-kingdom-test-helper)
 ;; The whole package, so that its files load in their usual order.
 (require 'rat-kingdom)
 

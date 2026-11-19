@@ -7,6 +7,7 @@
 ;;; Code:
 
 (require 'ert)
+(require 'rat-kingdom-test-helper)
 (require 'rat-kingdom-inspector)
 
 (defvar rat-kingdom-inspector-test--now 1000.0

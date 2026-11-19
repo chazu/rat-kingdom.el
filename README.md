@@ -706,6 +706,15 @@ eldev compile -W
 eldev lint
 ```
 
+The tests do not depend on the machine or on the session that runs them.
+Each test file requires `test/rat-kingdom-test-helper.el`, which runs every
+rat-kingdom test with a Git configuration of its own (GIT_CONFIG_GLOBAL is a
+temporary file with only a commit identity, and GIT_CONFIG_NOSYSTEM is set),
+without the GIT_ variables and the variables of a rat-kingdom session, and
+with `native-comp-enable-subr-trampolines` set to nil, so that a test that
+stubs a primitive such as `call-process` needs no working native compiler.
+A new test file must require it too.
+
 The tests of the epic plan surface and the story board that draw them
 with the real a2ui are
 skipped unless a2ui and vui can be loaded. Name the directories that hold

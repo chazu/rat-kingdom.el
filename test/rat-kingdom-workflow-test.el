@@ -7,6 +7,7 @@
 ;;; Code:
 
 (require 'ert)
+(require 'rat-kingdom-test-helper)
 (require 'rat-kingdom-workflow)
 
 (defconst rat-kingdom-workflow-test--sound

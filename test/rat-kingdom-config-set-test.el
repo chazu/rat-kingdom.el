@@ -12,6 +12,7 @@
 ;;; Code:
 
 (require 'ert)
+(require 'rat-kingdom-test-helper)
 (require 'rat-kingdom)
 (require 'rat-kingdom-config)
 (require 'rat-kingdom-config-engine-test)

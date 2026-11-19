@@ -10,6 +10,7 @@
 ;;; Code:
 
 (require 'ert)
+(require 'rat-kingdom-test-helper)
 (require 'cl-lib)
 (require 'rat-kingdom)
 
