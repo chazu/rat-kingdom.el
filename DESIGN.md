@@ -1281,7 +1281,7 @@ go, and it lets a role be denied built-in tools as well.
 
 | Role | Lifetime | Tools |
 |---|---|---|
-| king | long-lived, global, no worktree | built: `status` (with the tracker tasks available, each with its epic and agent), `repo_add`, `repo_sync`, `workflow_list`, `story_start` (optionally from a `task`, with an `agent` and a `model`; a task's `rk-agent:` and `rk-workflow:` labels are the defaults), `story_show`, `story_diff`, `story_move`, `story_cancel`, `verdict`, `publish`, `query`, `fact_forget`, `task_create`, `epic_create`, `epic_propose` (the epic plan surface, 14.1), `epic_start` (optionally with a `feature_branch`, and a `foreman`), `epic_pause`, `epic_resume`, `epic_cancel`, `epic_retry`, `epic_show`, `epic_diff`, `epic_verdict` (section 10), `tell`, `foreman_start`, `foreman_stop`, `consul_start`, `consul_dismiss`, `config_show` and `config_set` (7.3), `doc_list`, `doc_show` and `doc_forget` (7.1), `story_signal` (7.1), `compact_self` (below); `story_start` also takes a rarely needed `target`; built (step 8): `mixins` and `git` on `repo_add` |
+| king | long-lived, global, no worktree | built: `status` (with the tracker tasks available, each with its epic and agent), `repo_add`, `repo_sync`, `workflow_list`, `story_start` (optionally from a `task`, with an `agent` and a `model`; a task's `rk-agent:` and `rk-workflow:` labels are the defaults), `story_show`, `story_diff`, `story_move`, `story_cancel`, `verdict`, `publish`, `query`, `fact_forget`, `task_create`, `epic_create`, `epic_propose` (the epic plan surface, 14.1), `epic_start` (optionally with a `feature_branch`, and a `foreman`), `epic_pause`, `epic_resume`, `epic_cancel`, `epic_retry`, `epic_show`, `epic_diff`, `epic_verdict` (section 10), `tell`, `foreman_start`, `foreman_stop`, `consul_start`, `consul_dismiss`, `config_show` and `config_set` (7.3), `doc_list`, `doc_show` and `doc_forget` (7.1), `story_signal` (7.1), `issue_show` (the issue inspector, 14.1), `compact_self` (below); `story_start` also takes a rarely needed `target`; built (step 8): `mixins` and `git` on `repo_add` |
 | rat (worker) | one task | built: `finish`, `block`, `note_fact`, `inbox`, `read_doc` |
 | researcher | one task | built: `write_doc`, `read_doc`, `note_fact`, `inbox`, `block`, `finish` |
 | consul | one repository, until the user dismisses it | built: `write_doc` (its docs are approved at once), `read_doc`, `note_fact` |
@@ -1992,6 +1992,64 @@ otherwise a Section per column titled with its count. Columns with no
 cards are left out (`rat-kingdom-board-hide-empty-columns`) and named on
 one line with a count of 0; a flush that empties or fills a column draws
 the board again.
+
+**Built: the issue inspector**, in `rat-kingdom-issue.el`. It shows one
+tracker issue in full in the surface "Issue inspector". The command
+`rat-kingdom-issue` opens it, with completion over `br list`, and so does
+the king's `issue_show` (`repo`, `id`). It goes in the main window, as
+the story board does. `q` buries it and `g` draws it again.
+
+The issue comes from the generic function `rat-kingdom-issue-read`. Its
+br method runs one `br show ID --json`. In br 0.2 that output has every
+field, the `dependencies` and `dependents` with their `dependency_type`,
+and the `comments`. (`br comments ID --json` and `br comments list ID
+--json` give the same comments.) `rat-kingdom-issue-open-issues` gives
+the candidates for completion.
+
+The stories are the live `story` tokens whose `:task` is the issue, and
+the archived ones, found by their payload in the archive. A child story
+has `:config-task`, not `:task`, so the inspector leaves it out. A row
+of the Stories table has the workers (the story's `rat` and
+`researcher` runs, live and archived) and the workflow. It also has the
+place or outcome, the fix rounds (the workers less one) and the merge
+commit. The engine takes a verdict when the story moves on, so the
+inspector reads the verdicts and their notes from the operations log.
+
+The layout is one Column. It holds a dense header line, a line of the
+rarer fields, the title, the buttons and one Section for each part:
+
+- Description: Text, with each blank line kept as a space.
+- Acceptance: a Table of the `- [ ]` and `- [x]` items of the
+  description and the acceptance criteria, then the criteria.
+- Design and Notes: Text.
+- Dependencies: a templated Row for each link. Its Button has the other
+  issue's id and inspects it. Its Text has the relation, status and
+  title.
+- Stories: a Table, then the verdicts.
+- Comments: oldest first.
+
+The inspector sends no Section that has nothing to show, except
+Description and Stories. The `collapsed` property of each Section is
+bound to `/collapsed/NAME`. Before each redraw, the inspector reads the
+folds back from the surface. It keeps them for every issue it shows,
+until Close deletes the surface. The buttons are Open parent epic,
+Refresh and Close. Open parent epic calls
+`rat-kingdom-issue-open-epic-function` if it is set, so that an epic
+surface can take over. Otherwise it inspects the parent. No button
+starts a story or writes to the tracker.
+
+Two hooks schedule a redraw. `rat-kingdom-space-change-functions` does
+so for a change to one of the issue's stories, their runs or their
+verdicts. It also does so for a sweep of one of them, and for a story
+that starts for the issue.
+`rat-kingdom-task-settled-functions` does so when the task of such a
+story is closed or released. A redraw comes at most every
+`rat-kingdom-issue-interval` seconds. It reads the tracker again and
+sends the whole surface. Nothing watches the `.beads` JSONL file, so a
+change made with br outside rat-kingdom shows on `g` or Refresh.
+`issue_show` answers with a one-line summary. It fails, says why and
+shows nothing for an unknown repository, an unknown issue, a tracker
+that fails, or a missing a2ui.
 
 | # | Surface | Shows | Actions | Kind |
 |---|---|---|---|---|

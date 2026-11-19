@@ -225,6 +225,50 @@ cards are left out, and named on one line with their count of 0, unless
 column each kind of step, or a place or step by name, belongs in. The
 board needs a2ui.
 
+### The issue inspector
+
+`M-x rat-kingdom-issue` shows all of one tracker issue. It asks for a
+repository and an issue, with completion over the issues that are not
+closed. The inspector takes the place of the buffer in the selected
+window. The king can also show you an issue: ask it, or let it show one
+while you talk about it. Its tool `issue_show` takes a `repo` and an
+`id`, and changes nothing.
+
+The first line has the issue's id, priority, type, status and age. It
+also has the time since the last update, the parent epic, the labels and
+the assignee. A second line has the fields that br keeps for some issues
+only. These are the creator, the owner, the close date and reason, and
+the deferred and due dates. The full title follows. Then come sections that
+fold with `RET` or `TAB` on their headings:
+
+- Description: the full Markdown.
+- Acceptance: a checklist made from the `- [ ]` and `- [x]` lines of the
+  description and of the acceptance criteria. Its heading counts the
+  items done. The acceptance criteria follow in full. The inspector
+  leaves this section out if the issue has neither.
+- Design and Notes, if the issue has them.
+- Dependencies: one line for each issue that blocks this one, each issue
+  that this one blocks, and each child of an epic. A line has the other
+  issue's id, status and title. The id is a button that shows that issue
+  in the inspector. The inspector leaves the section out if there are
+  none.
+- Stories: each story that the engine ran for the issue. A row has the
+  story's id, its workers, its workflow and its place or outcome. It
+  also has the number of times the story went back to a worker, and the
+  merge commit. The verdicts and their notes follow.
+- Comments: the author, time and full text of each comment, oldest
+  first. The inspector leaves the section out if there are none.
+
+All sections start unfolded. A section that you fold stays folded until
+you close the inspector, also for the next issue that you open. The
+buttons are **Open parent epic**, **Refresh** and **Close**. No button
+starts a story or changes the tracker. `q` buries the inspector, and `g`
+draws it again. The inspector also draws itself again when one of the
+issue's stories changes or a story starts for the issue. It does this at
+most every `rat-kingdom-issue-interval` seconds (0.5). Nothing watches
+the tracker's files. If you change the issue with `br`, press `g` or
+Refresh to see it. The inspector needs a2ui.
+
 ### Epics
 
 **Plan.** The king proposes the epic's stories and their dependencies,
