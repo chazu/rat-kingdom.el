@@ -212,7 +212,15 @@ in a warning or error tone when it waits for review, is stopped, stuck
 or running long. Its buttons open the worker's buffer, show the story
 and its diff as `story_show` and `story_diff` do, and cancel it after
 asking; verdicts stay the king's. A picker keeps the board to one
-repository, and a check box hides Done and Stopped. The board updates
+repository, and a check box hides Done and Stopped. `C-u M-x
+rat-kingdom-board` asks for a repository, with completion, and opens the
+board with the picker set to it (a blank answer shows all), and the
+king's `board_show` does the same with its `repo` argument. A name that
+is not registered is an error that lists the registered names. Opened
+without a repository, a board that is already open keeps the
+repository its picker is set to, and one that is not open shows all;
+`board_show` with `all` true shows all of them in either case. The
+king's answer says which repositories the board shows. The board updates
 itself as stories move, at most twice a second, and is built afresh from
 the space each time it is opened. `q` buries it and `g` draws it again.
 The columns share the width of the window the board is shown in, each

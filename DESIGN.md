@@ -1973,7 +1973,15 @@ agent and time at its place, in a tone when it waits for review, is
 stopped, stuck or running long, and buttons that open the worker's
 buffer, show `story_show` and `story_diff` text, and cancel after
 asking; no verdict. A picker limits it to one repository and a check
-box hides Done and Stopped. Cards live at `/cards/COLUMN/ID`.
+box hides Done and Stopped. `board_show` takes an optional `repo`, a
+registered repository's name, and `rat-kingdom-board` with a prefix
+argument asks for one with completion: the board opens, or is drawn
+again if it is open, with the picker set to it. An unknown name is an
+error that lists the registered names, and nothing is shown. Without a
+repository, an open board keeps its picker and a closed one shows all
+repositories; `board_show`'s `all` true shows all of them in either
+case. The check box is kept, and the tool's answer names the scope
+shown (`rat-kingdom-board-open`, `rat-kingdom-board-scope`). Cards live at `/cards/COLUMN/ID`.
 `rat-kingdom-space-change-functions` marks the stories a change to a
 `story`, `run` or `stuck` tuple, or a sweep, touches; at most every
 half second the marked cards are made again and only those that

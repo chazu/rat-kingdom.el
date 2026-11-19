@@ -690,14 +690,130 @@ Done 0 · Stopped 0"))
   (rat-kingdom-board-test-with-stubs (space path)
     (rat-kingdom-king-test--start space)
     (rat-kingdom-story-start space "demo" "One" nil "S-1")
-    (should (string-search "the story board, with 1 stories"
-                           (rat-kingdom-king-test--ok "board_show")))
+    (should (string-search
+             "the story board for all repositories, with 1 stories"
+             (rat-kingdom-king-test--ok "board_show")))
     (should (eq rat-kingdom-board--space space))
     (cl-letf (((symbol-function 'rat-kingdom-plan-a2ui-p) #'ignore))
       (let ((answer (rat-kingdom-king-test--call "board_show")))
         (should (cdr answer))
         (should (string-search "a2ui is not installed" (car answer))))
       (should-error (rat-kingdom-board) :type 'error))))
+
+(defun rat-kingdom-board-test--add-repo (space path name)
+  "Register a second repository NAME in SPACE, beside the one at PATH."
+  (let ((other (expand-file-name (format "../%s/" name) path)))
+    (make-directory other)
+    (rat-kingdom-story-test--git other "init" "-q" "-b" "main")
+    (rat-kingdom-story-test--git other "config" "user.name" "Test")
+    (rat-kingdom-story-test--git other "config" "user.email" "test@example.com")
+    (rat-kingdom-story-test--commit other "README" "other\n" "Initial commit")
+    (rat-kingdom-repo-add space other)))
+
+(defun rat-kingdom-board-test--picker ()
+  "Return the value of the repository picker in the data model last sent."
+  (gethash "repo" (gethash "filter" (rat-kingdom-board-test--data))))
+
+(defun rat-kingdom-board-test--shown-ids ()
+  "Return the ids of every card in the data model last sent, sorted."
+  (let ((data (rat-kingdom-board-test--data)))
+    (sort (cl-loop for (column . _) in rat-kingdom-board-columns
+                   append (rat-kingdom-board-test--column
+                           data (symbol-name column)))
+          #'string<)))
+
+(ert-deftest rat-kingdom-board-test-board-show-repo ()
+  (rat-kingdom-board-test-with-stubs (space path)
+    (rat-kingdom-board-test--add-repo space path "other")
+    (rat-kingdom-king-test--start space)
+    (rat-kingdom-story-start space "demo" "One" nil "S-1")
+    (rat-kingdom-story-start space "other" "Two" nil "S-2")
+    ;; With a repository, the picker is set to it and only its stories show.
+    (should (string-search
+             "the story board for the repository demo, with 1 stories"
+             (rat-kingdom-king-test--ok "board_show" '(repo . "demo"))))
+    (should (equal (rat-kingdom-board-test--picker) "demo"))
+    (should (equal (rat-kingdom-board-test--shown-ids) '("S-1")))
+    ;; The board is open: without a repository, it keeps its own.
+    (setq rat-kingdom-board-test--sent nil)
+    (should (string-search "for the repository demo"
+                           (rat-kingdom-king-test--ok "board_show")))
+    (should (equal (rat-kingdom-board-test--picker) "demo"))
+    ;; Opened again with another repository, the picker follows.
+    (should (string-search
+             "for the repository other"
+             (rat-kingdom-king-test--ok "board_show" '(repo . "other"))))
+    (should (equal (rat-kingdom-board-test--picker) "other"))
+    (should (equal (rat-kingdom-board-test--shown-ids) '("S-2")))
+    ;; all shows every repository, and the picker is blank.
+    (should (string-search
+             "the story board for all repositories, with 2 stories"
+             (rat-kingdom-king-test--ok "board_show" '(all . t))))
+    (should (equal (rat-kingdom-board-test--picker) ""))
+    (should (equal (rat-kingdom-board-test--shown-ids) '("S-1" "S-2")))
+    ;; The check box is not changed.
+    (rat-kingdom-board-filter (rat-kingdom-plan--obj "repo" "" "ended" :false))
+    (rat-kingdom-king-test--ok "board_show" '(repo . "demo"))
+    (should (equal rat-kingdom-board--filter '(:repo "demo" :ended nil)))
+    ;; A board that is not open shows all repositories.
+    (rat-kingdom-board--stop)
+    (should (string-search "for all repositories"
+                           (rat-kingdom-king-test--ok "board_show")))
+    (should (equal (rat-kingdom-board-test--picker) ""))))
+
+(ert-deftest rat-kingdom-board-test-board-show-unknown-repo ()
+  (rat-kingdom-board-test-with-stubs (space path)
+    (rat-kingdom-board-test--add-repo space path "other")
+    (rat-kingdom-king-test--start space)
+    (let ((answer (rat-kingdom-king-test--call "board_show" '(repo . "nope"))))
+      (should (cdr answer))
+      (should (string-search "There is no repository named nope" (car answer)))
+      (should (string-search "The registered repositories are: demo, other"
+                             (car answer)))
+      (should (string-search "Nothing was shown" (car answer))))
+    (let ((answer (rat-kingdom-king-test--call "board_show" '(repo . "demo")
+                                               '(all . t))))
+      (should (cdr answer))
+      (should (string-search "not both" (car answer))))
+    ;; Nothing was shown.
+    (should-not rat-kingdom-board-test--sent)
+    (should-not rat-kingdom-board--space)
+    (should (equal rat-kingdom-board--filter '(:repo nil :ended t)))
+    ;; The same from Lisp, and an open board keeps its repository.
+    (rat-kingdom-board-open space "demo")
+    (setq rat-kingdom-board-test--sent nil)
+    (should-error (rat-kingdom-board-open space "nope") :type 'user-error)
+    (should-not rat-kingdom-board-test--sent)
+    (should (equal (plist-get rat-kingdom-board--filter :repo) "demo"))))
+
+(ert-deftest rat-kingdom-board-test-command-asks-for-a-repo ()
+  (rat-kingdom-board-test-with-stubs (space path)
+    (rat-kingdom-board-test--add-repo space path "other")
+    (rat-kingdom-story-start space "demo" "One" nil "S-1")
+    (rat-kingdom-story-start space "other" "Two" nil "S-2")
+    (let* ((answer "other")
+           collection
+           (current-prefix-arg '(4)))
+      (cl-letf (((symbol-function 'completing-read)
+                 (lambda (_prompt names &rest _)
+                   (setq collection names)
+                   answer)))
+        (call-interactively #'rat-kingdom-board)
+        (should (equal (sort (copy-sequence collection) #'string<)
+                       '("demo" "other")))
+        (should (equal (rat-kingdom-board-test--picker) "other"))
+        (should (equal (rat-kingdom-board-test--shown-ids) '("S-2")))
+        ;; Without a prefix argument, the open board keeps its repository.
+        (let ((current-prefix-arg nil))
+          (setq collection 'not-asked)
+          (call-interactively #'rat-kingdom-board)
+          (should (eq collection 'not-asked))
+          (should (equal (rat-kingdom-board-test--picker) "other")))
+        ;; A blank answer shows all repositories.
+        (setq answer "")
+        (call-interactively #'rat-kingdom-board)
+        (should (equal (rat-kingdom-board-test--picker) ""))
+        (should (equal (rat-kingdom-board-test--shown-ids) '("S-1" "S-2")))))))
 
 (ert-deftest rat-kingdom-board-test-loading-does-not-need-a2ui ()
   (let* ((directory (rat-kingdom--directory))
