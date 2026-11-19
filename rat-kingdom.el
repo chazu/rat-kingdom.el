@@ -86,6 +86,7 @@
 (require 'rat-kingdom-plan)
 (require 'rat-kingdom-board)
 (require 'rat-kingdom-issue)
+(require 'rat-kingdom-ledger)
 (require 'rat-kingdom-foreman)
 (require 'rat-kingdom-consul)
 
@@ -471,7 +472,7 @@ rest is read from the space at each call, so it is current."
     "rat-kingdom-fact" "rat-kingdom-message" "rat-kingdom-doc"
     "rat-kingdom-epic"
     "rat-kingdom-plan" "rat-kingdom-board" "rat-kingdom-issue"
-    "rat-kingdom-foreman" "rat-kingdom-consul"
+    "rat-kingdom-ledger" "rat-kingdom-foreman" "rat-kingdom-consul"
     "rat-kingdom")
   "The package's files, each after the files it requires.")
 
