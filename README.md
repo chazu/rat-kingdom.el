@@ -233,6 +233,91 @@ cards are left out, and named on one line with their count of 0, unless
 column each kind of step, or a place or step by name, belongs in. The
 board needs a2ui.
 
+### The issue inspector
+
+`M-x rat-kingdom-issue` shows all of one tracker issue. It asks for a
+repository and an issue, with completion over the issues that are not
+closed. The inspector takes the place of the buffer in the selected
+window. The king can also show you an issue: ask it, or let it show one
+while you talk about it. Its tool `issue_show` takes a `repo` and an
+`id`, and changes nothing.
+
+The first line has the issue's id, priority, type, status and age. It
+also has the time since the last update, the parent epic, the labels and
+the assignee. A second line has the fields that br keeps for some issues
+only. These are the creator, the owner, the close date and reason, and
+the deferred and due dates. The full title follows. Then come sections that
+fold with `RET` or `TAB` on their headings:
+
+- Description: the full Markdown.
+- Acceptance: a checklist made from the `- [ ]` and `- [x]` lines of the
+  description and of the acceptance criteria. Its heading counts the
+  items done. The acceptance criteria follow in full. The inspector
+  leaves this section out if the issue has neither.
+- Design and Notes, if the issue has them.
+- Dependencies: one line for each issue that blocks this one, each issue
+  that this one blocks, and each child of an epic. A line has the other
+  issue's id, status and title. The id is a button that shows that issue
+  in the inspector. The inspector leaves the section out if there are
+  none.
+- Stories: each story that the engine ran for the issue. A row has the
+  story's id, its workers, its workflow and its place or outcome. It
+  also has the number of times the story went back to a worker, and the
+  merge commit. The verdicts and their notes follow.
+- Comments: the author, time and full text of each comment, oldest
+  first. The inspector leaves the section out if there are none.
+
+All sections start unfolded. A section that you fold stays folded until
+you close the inspector, also for the next issue that you open. The
+buttons are **Open parent epic**, **Refresh** and **Close**. No button
+starts a story or changes the tracker. `q` buries the inspector, and `g`
+draws it again. The inspector also draws itself again when one of the
+issue's stories changes or a story starts for the issue. It does this at
+most every `rat-kingdom-issue-interval` seconds (0.5). Nothing watches
+the tracker's files. If you change the issue with `br`, press `g` or
+Refresh to see it. The inspector needs a2ui.
+
+### The epic ledger
+
+`M-x rat-kingdom-ledger` shows every open epic of the registered
+repositories, one line for each. With a prefix argument, it asks for one
+repository. The ledger takes the place of the buffer in the selected
+window. The king can also show it to you: ask it how the epics stand.
+Its tool `ledger_show` takes an optional `repo`, changes nothing, and
+answers with a one-line summary such as "5 open epics, 1 held".
+
+A row is made to fit in `rat-kingdom-ledger-width` columns (100). It has:
+
+- the epic's id, and its repository and title, cut to fit;
+- a bar of the tasks closed, and the counts of the tasks closed, in
+  progress, ready and blocked (`C/P/R/B`);
+- the engine's state: not started, running (with the number of stories
+  in progress), paused, landing, or held with the held task named. `+F`
+  says that the epic has a foreman;
+- the next ready task, the epic's age and the time since its last change;
+- a sparkline of the tasks closed on each of the last 14 days, if br
+  gives their close times.
+
+The epics that need attention come first: those with a held task, then
+those with blocked tasks and nothing ready or in progress. The running
+epics follow, and then the others. Each group is sorted by priority.
+
+Select a row with the box before it to expand it. Its tasks then show
+under the table, with their id, priority, status, title and story in
+progress. `RET` on the id of an epic or of a task shows it in the issue
+inspector. The inspector's **Open parent epic** shows the ledger again,
+with that epic expanded. A picker limits the ledger to one repository,
+and a check box adds the epics closed in the last 7 days. Press
+**Apply** after you change them. Above the rows, a bar and a sparkline
+sum up all the epics shown.
+
+No button starts, pauses or retries an epic. Ask the king for that. `q`
+buries the ledger, and `g` draws it again. The ledger also draws itself
+again when the engine changes an epic or one of its stories. It does
+this at most every `rat-kingdom-ledger-interval` seconds (1), and each
+time it reads the trackers again. If you change an epic with `br`, press
+`g` to see it. The ledger needs a2ui.
+
 ### Epics
 
 **Plan.** The king proposes the epic's stories and their dependencies,
@@ -713,6 +798,15 @@ eldev test
 eldev compile -W
 eldev lint
 ```
+
+The tests do not depend on the machine or on the session that runs them.
+Each test file requires `test/rat-kingdom-test-helper.el`, which runs every
+rat-kingdom test with a Git configuration of its own (GIT_CONFIG_GLOBAL is a
+temporary file with only a commit identity, and GIT_CONFIG_NOSYSTEM is set),
+without the GIT_ variables and the variables of a rat-kingdom session, and
+with `native-comp-enable-subr-trampolines` set to nil, so that a test that
+stubs a primitive such as `call-process` needs no working native compiler.
+A new test file must require it too.
 
 The tests of the epic plan surface and the story board that draw them
 with the real a2ui are

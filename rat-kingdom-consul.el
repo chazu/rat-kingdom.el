@@ -659,14 +659,17 @@ TOPIC, if not empty, is what you want to talk about."
   "Dismiss CONSUL: stop it, and make its commits a story for the king.
 With a prefix argument FORCE, commit its uncommitted changes first, as
 work in progress; without, they stop the dismissal.  In a consul's
-buffer, that consul is the default."
+buffer, that consul is the default.  Show the answer and return it."
   (interactive (list (rat-kingdom-consul--read "Dismiss consul")
                      current-prefix-arg))
   (let* ((space (rat-kingdom-space-default))
          (answer (rat-kingdom-consul-end space consul force)))
     (when rat-kingdom-mode
       (rat-kingdom-reaction-run space))
-    (message "%s" answer)))
+    ;; Return ANSWER itself: the value of `message' can be nil, as it is
+    ;; when Eldev reroutes messages or `inhibit-message' is set.
+    (message "%s" answer)
+    answer))
 
 (provide 'rat-kingdom-consul)
 ;;; rat-kingdom-consul.el ends here

@@ -8,6 +8,7 @@
 ;;; Code:
 
 (require 'ert)
+(require 'rat-kingdom-test-helper)
 (require 'rat-kingdom-reaction)
 
 (defvar rat-kingdom-reaction-test--now 1000.0

@@ -9,6 +9,7 @@
 ;;; Code:
 
 (require 'ert)
+(require 'rat-kingdom-test-helper)
 (require 'url)
 (require 'rat-kingdom-story)
 (require 'rat-kingdom-king)
