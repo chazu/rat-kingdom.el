@@ -37,6 +37,10 @@
 ;;   M-x rat-kingdom-king         start the king, or show it; then tell
 ;;                                it what you want done and where
 ;;   M-x rat-kingdom-inspect      watch the space
+;;   M-x rat-kingdom-consul-start start a consul, a rat to talk with
+;;                                about one repository, and show it
+;;   M-x rat-kingdom-consul-dismiss dismiss one; its commits become
+;;                                a story for the king
 ;;
 ;; Everything the king does can also be done by hand:
 ;;
@@ -52,6 +56,7 @@
 ;;   M-x rat-kingdom-reload       load changed source into this Emacs
 ;;   M-x rat-kingdom-king-restart restart the king's session in place,
 ;;                                so it has its current tools
+;;   M-x rat-kingdom-king-compact compact the king's conversation
 ;;
 ;; A worker is a Claude Code or Codex session in an agent-shell buffer,
 ;; in its own worktree; the story chooses which, by default
@@ -79,7 +84,9 @@
 (require 'rat-kingdom-doc)
 (require 'rat-kingdom-epic)
 (require 'rat-kingdom-plan)
+(require 'rat-kingdom-board)
 (require 'rat-kingdom-foreman)
+(require 'rat-kingdom-consul)
 
 (defgroup rat-kingdom nil
   "Swarm orchestration for coding agents."
@@ -98,17 +105,18 @@
   "Recover the work that was in flight when Emacs last stopped.
 A worker that was cut off is replaced by a new one in the same
 worktree, and a check or setup that was running is run again, as is
-the check of an epic that was landing.  An epic's foreman that was cut
-off takes up its session again.  Turning on `rat-kingdom-mode' does
-this, so it is seldom needed by hand.  Return what
-`rat-kingdom-story-reconcile' does, with `:landings', the ids of the
-epics whose landing check is run again, and `:foremen', the ids of the
-foremen started again."
+the check of an epic that was landing.  An epic's foreman, and a
+consul, that was cut off takes up its session again.  Turning on
+`rat-kingdom-mode' does this, so it is seldom needed by hand.  Return
+what `rat-kingdom-story-reconcile' does, with `:landings', the ids of
+the epics whose landing check is run again, `:foremen', the ids of the
+foremen started again, and `:consuls', those of the consuls."
   (interactive)
   (let* ((space (rat-kingdom-space-default))
          (found (append (rat-kingdom-story-reconcile space)
                         (list :landings (rat-kingdom-epic-reconcile space)
-                              :foremen (rat-kingdom-foreman-reconcile space))))
+                              :foremen (rat-kingdom-foreman-reconcile space)
+                              :consuls (rat-kingdom-consul-reconcile space))))
          (runs (plist-get found :runs))
          (checks (append (plist-get found :checks)
                          (plist-get found :landings)))
@@ -146,8 +154,9 @@ again (%s), %d to set up again (%s)"
 While this is on, stories move: workers are started, their results
 checked, reviewed and merged.  Turning it on first recovers whatever
 an earlier Emacs left in flight, makes sure every registered repository
-has a br workspace and that its info/exclude says what the
-configuration's :track says, then shows each repository's ready tasks as
+has a br workspace, that its info/exclude says what the configuration's
+:track says and that its branches are guarded from a push with no
+remote as :git :push-guard says, then shows each repository's ready tasks as
 `available' in the space, and starts the stories running epics have
 room for.  A repository whose workspace cannot be made is reported and
 skipped."
@@ -164,6 +173,8 @@ skipped."
           (rat-kingdom-task-ensure-all space))
         (with-demoted-errors "rat-kingdom: applying :track: %S"
           (rat-kingdom-config-track-apply-all space))
+        (with-demoted-errors "rat-kingdom: applying :git :push-guard: %S"
+          (rat-kingdom-config-push-guard-apply-all space))
         (with-demoted-errors "rat-kingdom: projecting tasks: %S"
           (rat-kingdom-task-project-all space))
         (with-demoted-errors "rat-kingdom: running epics: %S"
@@ -210,6 +221,22 @@ something in its buffer that is not sent."
   (interactive)
   (rat-kingdom-king-restart-session (rat-kingdom-space-default))
   (message "rat-kingdom: restarted the king's session in place"))
+
+;;;###autoload
+(defun rat-kingdom-king-compact (&optional focus)
+  "Compact the king's conversation, as /compact does in its buffer.
+FOCUS, read from the minibuffer, says what the summary should keep;
+leave it blank for none.  If the king is in the middle of a turn, or
+you have typed something in its buffer that is not sent, this is done
+when that turn ends or the input is sent.  Afterwards the king is told
+to call `status', and news that waited meanwhile follows."
+  (interactive (list (read-string "Compact the king, keeping (optional): ")))
+  (let ((space (rat-kingdom-space-default)))
+    (rat-kingdom-king-compact-schedule space focus t)
+    (message (if (eq rat-kingdom-king--compaction 'compacting)
+                 "rat-kingdom: compacting the king's context"
+               "rat-kingdom: the king's context will be compacted when \
+its turn ends"))))
 
 ;;;; By hand
 
@@ -386,6 +413,53 @@ See `rat-kingdom-git-publish'."
                  (rat-kingdom-git-publish (rat-kingdom-space-default) repo branch
                                           :remote remote :actor "user"))))
 
+;;;; For other packages
+
+;;;###autoload
+(defun rat-kingdom-buffer-run (&optional buffer)
+  "Describe the rat-kingdom run whose agent works in BUFFER, or return nil.
+BUFFER, a buffer or its name, defaults to the current buffer.  Return
+nil if it is not live or is not the agent-shell buffer of a run that
+rat-kingdom has a record of; no error is signaled when rat-kingdom is
+not started.  Otherwise return a property list:
+
+  `:role'   the run's role, a symbol: `king', `rat', `researcher',
+            `foreman' or `consul'
+  `:id'     the run's id, as S-3a9c.1, F-T-1, C-3a9c or king
+  `:name'   its display name, as Pip-3a9c; nil for the king
+  `:story'  the id of the story of a rat or researcher, else nil
+  `:title'  the title of that story, the title of a foreman's epic,
+            or a consul's topic; nil for the king
+  `:repo'   the name of its repository; nil for the king
+  `:state'  the run's state, as working; see rat-kingdom-run.el
+
+The buffer knows only the run's id, `rat-kingdom-run-buffer-id'; the
+rest is read from the space at each call, so it is current."
+  (when-let* ((buffer (if buffer (get-buffer buffer) (current-buffer)))
+              ((buffer-live-p buffer))
+              (id (buffer-local-value 'rat-kingdom-run-buffer-id buffer))
+              (space (rat-kingdom-space-default))
+              (run (rat-kingdom-run-get space id)))
+    (let* ((role (intern (plist-get run :role)))
+           (story (and (memq role '(rat researcher)) (plist-get run :story))))
+      (list :role role
+            :id id
+            :name (rat-kingdom-run-display-name run)
+            :story story
+            :title (pcase role
+                     ((or 'rat 'researcher)
+                      (when-let* ((token (and story (rat-kingdom-story-get
+                                                     space story))))
+                        (plist-get (plist-get token :payload) :title)))
+                     ('foreman
+                      (when-let* ((epic (plist-get run :epic))
+                                  (record (rat-kingdom-epic-record
+                                           space epic (plist-get run :repo))))
+                        (plist-get (plist-get record :payload) :title)))
+                     ('consul (plist-get run :topic)))
+            :repo (and (not (eq role 'king)) (plist-get run :repo))
+            :state (plist-get run :state)))))
+
 ;;;; Reloading
 
 (defconst rat-kingdom--files
@@ -395,7 +469,9 @@ See `rat-kingdom-git-publish'."
     "rat-kingdom-config" "rat-kingdom-story" "rat-kingdom-king"
     "rat-kingdom-fact" "rat-kingdom-message" "rat-kingdom-doc"
     "rat-kingdom-epic"
-    "rat-kingdom-plan" "rat-kingdom-foreman" "rat-kingdom")
+    "rat-kingdom-plan" "rat-kingdom-board" "rat-kingdom-foreman"
+    "rat-kingdom-consul"
+    "rat-kingdom")
   "The package's files, each after the files it requires.")
 
 (defun rat-kingdom--directory ()

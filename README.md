@@ -95,6 +95,13 @@ Set `rat-kingdom-task-br-untracked` to nil if you would sooner track
 `.beads` yourself. A `.beads` that is already there, tracked or not, is
 left exactly as it is.
 
+`.rk`, which holds a repository's own configuration, and `.a2ui`, where
+a2ui saves UIs, are kept out of Git the same way. The `:track`
+configuration key says which of `.rk`, `.beads` and `.a2ui` to keep in
+Git instead: ask the king to `config_set` it at the global or repo layer,
+`:track (:a2ui t)` to commit saved UIs, say. `config_show` shows each
+sub-key. Nothing is ever committed or removed from Git's index for you.
+
 If br is not installed, refuses the prefix or keeps a different one,
 registration fails with br's message and nothing is registered; whatever
 br had made is removed. Turning on `rat-kingdom-mode` and `M-x
@@ -190,6 +197,33 @@ rat-kingdom loads it only when a plan is shown. Without it,
 plan is agreed in conversation and made with `epic_create`. A plan whose
 surface is open when Emacs stops is lost, and the king is not told; ask
 it to propose the plan again.
+
+### The story board
+
+`M-x rat-kingdom-board` shows the story board, a Kanban board of the
+stories in the pipeline, in the selected window in place of its buffer
+(or ask the king to show it: its tool `board_show` opens it for you).
+Each column is a phase, the same for every workflow: Queued, Working,
+Checking, Review, Merging, Done (ended in the last
+`rat-kingdom-board-done-hours`, 24 by default) and Stopped (parked, or
+cancelled in that time). A card shows the story's id, its worker's name,
+its repository, epic, title and agent, and how long it has been there,
+in a warning or error tone when it waits for review, is stopped, stuck
+or running long. Its buttons open the worker's buffer, show the story
+and its diff as `story_show` and `story_diff` do, and cancel it after
+asking; verdicts stay the king's. A picker keeps the board to one
+repository, and a check box hides Done and Stopped. The board updates
+itself as stories move, at most twice a second, and is built afresh from
+the space each time it is opened. `q` buries it and `g` draws it again.
+The columns share the width of the window the board is shown in, each
+at most `rat-kingdom-board-column-width` (32) characters wide, and stand
+side by side when each has at least `rat-kingdom-board-min-column-width`
+(18); in a narrower window each column is a section with its count. The
+board is laid out again when its window changes width. Columns with no
+cards are left out, and named on one line with their count of 0, unless
+`rat-kingdom-board-hide-empty-columns` is nil. `rat-kingdom-board-phases` says which
+column each kind of step, or a place or step by name, belongs in. The
+board needs a2ui.
 
 ### Epics
 
@@ -307,9 +341,45 @@ foreman reports, as "[rat-kingdom] Report from the foreman of epic …".
 `foreman_stop` hands reviews back to the king, with any news the foreman
 had not read. A foreman stops by itself when its epic is done or
 cancelled, and the king is told. If a foreman dies, news goes back to the
-king, saying so. `status` and `epic_show` show "foreman F-… (claude,
-working)", idle or stopped. After a restart a foreman takes up its session
-again.
+king, saying so. `status` and `epic_show` show "foreman F-… (Bean-T-1,
+claude, working)", idle or stopped. After a restart a foreman takes up its
+session again.
+
+### Consuls
+
+When you want to talk a project through while the king is busy, ask the
+king for a consul ("start a consul in app about the cache"), or run `M-x
+rat-kingdom-consul-start`. A consul is a rat of its own in one
+repository, `C-` and four hex digits, whose only job is to discuss that
+project with you, in its own buffer, which is shown when it starts. It
+explores and explains the code, answers questions, proposes designs,
+writes docs (approved at once, so every later worker is told of them),
+and changes code when you ask, committing in its own worktree on its own
+branch, `rats/consul-<name>-<hex>`; it never touches your checkout. The
+king does not drive it and no news goes to it; `status` lists it. When
+you are done, dismiss it, with the king's `consul_dismiss` or `M-x
+rat-kingdom-consul-dismiss` (`C-c ~ d` in its buffer): if it committed
+work, that becomes a story that the king reviews and merges as usual;
+if not, its worktree and branch are removed. Uncommitted changes stop a
+dismissal unless it is forced, which commits them first. A consul lasts
+across restarts until it is dismissed; `M-x rat-kingdom-consul-show`
+reopens its buffer.
+
+### Rats' names
+
+Every rat has a name from `rat-kingdom-rat-names`, given in turn and
+never to two live rats at once, shown with its story's or consul's hex:
+Pip-3a9c is the first worker of S-3a9c, and its buffer is "rat Pip-3a9c
+(S-3a9c.1)". Ids stay what the tools take.
+
+### For other packages
+
+To ask whether a buffer is a rat-kingdom agent, and which, call
+`(rat-kingdom-buffer-run &optional BUFFER)`. It returns nil for any other
+buffer, also when rat-kingdom is not started, and otherwise a plist such
+as `(:role rat :id "S-3a9c.1" :name "Pip-3a9c" :story "S-3a9c" :title
+"Fix the parser" :repo "demo" :state "working")`. It does not parse buffer
+names, and reads titles from the space at each call.
 
 ### Choosing the agent
 
@@ -324,6 +394,14 @@ The story keeps its agent. A worker that replaces another, after a failed
 check, a merge conflict, a review that asks for changes or an Emacs restart,
 runs the same agent, even if the default has changed since. `status` and
 `story_show` say which agent each story has.
+
+Workers and foremen that run Claude Code use the model in
+`rat-kingdom-worker-model`, a Claude model id such as `"claude-opus-5-5"`.
+It is nil by default, which leaves the model to agent-shell and Claude Code.
+A story can name its own model: `story_start` takes `model`, which wins over
+`rat-kingdom-worker-model` for every worker of that story. `story_show` shows
+it. The setting has no effect on Codex workers or on the king, so `/model` in
+the king's session works as before.
 
 Codex runs in full access, the equivalent of `codex --yolo`: the codex-acp
 session mode `agent-full-access`, which never asks for approval and has no
@@ -344,8 +422,9 @@ configuration in its environment (`GIT_CONFIG_COUNT`) that rewrites every
 push URL to a remote helper that does not exist, so `git push` fails with
 `rat-kingdom-refuses-to-push`, `--no-verify` or not. A Claude session is
 also started with Claude tool rules denying `git push` and `gh`, and Emacs
-refuses any permission request to run them. Nothing is written to your
-Git configuration or hooks, so your own pushes are unaffected. A remote
+refuses any permission request to run them. These layers write nothing to
+your Git configuration or hooks, so your own pushes are unaffected by
+them; the guard on rat-kingdom's own branches is below. A remote
 with an explicit `pushurl` is not rewritten by Git. For Claude the other
 two layers cover that case.
 
@@ -369,13 +448,27 @@ fast-forward is refused and the error is reported), and writes a
 `published` tuple as a receipt. `M-x rat-kingdom-publish` does the same by
 hand.
 
+Your own pushes of rat-kingdom's branches are guarded too, so that you do
+not push them by accident. For the target (`rk/integration`), every
+`rats/*` worker branch and an epic's feature branch, rat-kingdom sets
+`branch.<name>.pushRemote` to `rat-kingdom-refuses-to-push::<name>` in the
+repository's own Git configuration. A plain `git push`, or magit's push to
+the push-remote, on one of them then fails with an error that names
+rat-kingdom, whatever `push.default` says. A push that names the remote,
+such as `git push origin rk/integration`, still works, and that is how
+`publish` pushes. Your other branches are not touched, and nothing is
+committed and no hook is installed. Set the configuration sub-key
+`:git :push-guard` to nil, at the global or repo layer, to take the guard
+off. The default is t. See DESIGN.md, section 12.
+
 Everything the king does has a command, for when you would sooner do it
 by hand: `rat-kingdom-add-repo`, `rat-kingdom-start-story`,
 `rat-kingdom-move-story`, `rat-kingdom-review-story`,
 `rat-kingdom-cancel-story`, `rat-kingdom-publish`. `M-x
 rat-kingdom-inspect` shows the space. `M-x rat-kingdom-king-restart`
 restarts the king's session in place, keeping the conversation, so that it
-fetches its tools afresh.
+fetches its tools afresh. `M-x rat-kingdom-king-compact` compacts the king's conversation, as
+`/compact` does; the king can do it itself with `compact_self`.
 
 ### After a restart
 
@@ -534,8 +627,10 @@ name already taken gets `-2`, `-3` and so on. `:integrate` is how a
 story's work goes into its target, and how an epic's feature branch
 lands: `merge` (the default, a `--no-ff` merge), `rebase` (the story's
 commits replayed onto the target) or `squash` (one commit, `ID: TITLE`
-and the worker's summary). `repo_add` takes `git` too. For example, in
-`.rk/config.eld`:
+and the worker's summary). `:push-guard`, t by default and settable only
+at the global and repo layers, guards rat-kingdom's branches from a
+`git push` that names no remote (see Pushing). `repo_add` takes `git` too,
+without `:push-guard`. For example, in `.rk/config.eld`:
 
 ```elisp
 (:git (:branch "rats/%s-%i" :integrate squash))
@@ -545,7 +640,8 @@ and the worker's summary). `repo_add` takes `git` too. For example, in
 
 Emacs 29.1 or later, built with SQLite support, Git, and br (Rust Beads)
 for tasks. Starting an agent needs agent-shell. The epic plan surface
-needs [a2ui](https://github.com/chazu/a2ui.el), which is optional.
+and the story board need [a2ui](https://github.com/chazu/a2ui.el), which
+is optional.
 
 ## The tuplespace
 
@@ -610,7 +706,8 @@ eldev compile -W
 eldev lint
 ```
 
-The tests of the epic plan surface that draw it with the real a2ui are
+The tests of the epic plan surface and the story board that draw them
+with the real a2ui are
 skipped unless a2ui and vui can be loaded. Name the directories that hold
 them, separated by colons:
 

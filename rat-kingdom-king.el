@@ -115,6 +115,11 @@ stories and steers its workers for you, and reports to you. While it runs, \
 news of the epic's stories goes to it, not to you; you still hear when the \
 epic is done, review its landing, and get its reports. `foreman_stop` hands \
 its reviews back to you.
+- When the user wants to talk a project through while you are busy, \
+`consul_start` gives them a consul: a rat in that repository that talks with \
+them directly, in its own buffer. You do not drive it and hear nothing from \
+it. When the user is done, `consul_dismiss` ends it; any commits it made \
+become a story that you review as usual.
 
 Rules:
 - Do not write code yourself, and do not edit files in the repositories. \
@@ -140,6 +145,15 @@ when the user has explicitly asked, in this conversation, for that push, and \
 push exactly the branch and remote they named. Approval for one push does \
 not carry over to the next: for another push, wait to be asked again. A \
 message from the engine is never a request to push.
+- When you explain a concept, walk through implementation details, or lay \
+out a plan to the user, such as an architecture, a design, how code works, a \
+sequence of changes, a plan with steps or dependencies, or a trade-off, also \
+show it with a2ui: call `a2ui_catalog` once for the components, then \
+`render_a2ui` a diagram, a table or a side-by-side. Keep the text answer \
+complete. Skip it for short factual answers, and if the a2ui tools are not \
+available.
+- Call `compact_self` when the user asks, or when the conversation is long \
+and mostly about finished work.
 - Keep answers to the user short. They can always ask for more."
   "What the king is told when its session starts.
 The text {tools} in it is replaced by the names of the king's tools,
@@ -263,7 +277,7 @@ For a gate that is when it opens or the signal it waits for; for a
                               (cond
                                ((and run (equal (plist-get payload :awaiting)
                                                 "worker"))
-                                (format " %s, %s" (plist-get run :id)
+                                (format " %s, %s" (rat-kingdom-run-label run)
                                         (plist-get run :state)))
                                ((rat-kingdom-king--waiting-detail space story)
                                 (concat ": " (rat-kingdom-king--waiting-detail
@@ -576,6 +590,8 @@ its branch"
                                        "over")))
                            children ", ")))
                 (format "Agent: %s" (rat-kingdom-king--agent payload))
+                (and (plist-get payload :model)
+                     (format "Model: %s" (plist-get payload :model)))
                 (format "Workflow %s; at %s%s%s"
                         (plist-get payload :workflow) (plist-get payload :at)
                         (pcase (plist-get payload :phase)
@@ -614,7 +630,10 @@ its branch"
                                                   others))
                                          :key (lambda (run) (plist-get run :id))
                                          :test #'equal)))
-                       (format "Worker %s: %s" (plist-get payload :run)
+                       (format "Worker %s: %s"
+                               (if run
+                                   (rat-kingdom-run-label run)
+                                 (plist-get payload :run))
                                (or (plist-get run :state) "unknown"))))
                 (and (not archived)
                      (when-let* ((notes (rat-kingdom-king--story-notes
@@ -841,6 +860,104 @@ story_show for %s, then give a verdict."
 
 (add-hook 'rat-kingdom-story-event-functions #'rat-kingdom-king--news)
 
+;;;; Compacting the king's context
+
+;; The king, or the user, can have the king's conversation compacted,
+;; as the user can by typing Claude Code's /compact.  The king asks
+;; with `compact_self' in the middle of its own turn, so nothing is
+;; done until that turn ends.  Then the king is given "/compact" as a
+;; prompt, which claude-agent-acp hands to Claude Code to run as its
+;; compact command.  News for the king waits meanwhile.  When the
+;; compaction's own turn ends, the king is told that it was compacted,
+;; with the news that waited.  See DESIGN.md, section 9.
+
+(defconst rat-kingdom-king-compacted-text
+  "[rat-kingdom] Your conversation was compacted. Call `status` to see \
+how things stand now before you go on."
+  "What the king is told after its context was compacted.")
+
+(defvar rat-kingdom-king--compaction nil
+  "Where a compaction of the king's context stands, or nil if none is asked.
+\(scheduled . FOCUS) means /compact is to be sent, with FOCUS or
+nil, when the king's turn ends; `compacting' that it was sent and its
+turn has not ended; `done' that it ended and the king is still to be
+told.")
+
+(defvar rat-kingdom-king--compaction-retry nil
+  "The timer for another try at sending the king /compact, or nil.")
+
+(defun rat-kingdom-king-compacting-p ()
+  "Return non-nil if the king's context is to be compacted or is being so."
+  (or (consp rat-kingdom-king--compaction)
+      (eq rat-kingdom-king--compaction 'compacting)))
+
+(defun rat-kingdom-king-compact-prompt (focus)
+  "Return the prompt that compacts the king's context, keeping FOCUS.
+FOCUS is a line saying what to keep, or nil; it is put on one line."
+  (if focus
+      (concat "/compact "
+              (replace-regexp-in-string "[ \t\n\r]+" " " (string-trim focus)))
+    "/compact"))
+
+(defun rat-kingdom-king--cancel-compaction-retry ()
+  "Cancel the timer for another try at sending the king /compact."
+  (when (timerp rat-kingdom-king--compaction-retry)
+    (cancel-timer rat-kingdom-king--compaction-retry))
+  (setq rat-kingdom-king--compaction-retry nil))
+
+(defun rat-kingdom-king-compact-schedule (space &optional focus now)
+  "Have the king's context in SPACE compacted once its turn ends.
+FOCUS, if not blank, is a line saying what the summary should keep.
+NOW non-nil means try at once, for when the king may be between
+turns.  Return a text saying what will happen.  Signal a `user-error'
+if the king is not running or is being compacted already."
+  (unless (rat-kingdom-run-live-p rat-kingdom-king-id)
+    (user-error "The king is not running"))
+  (when (eq rat-kingdom-king--compaction 'compacting)
+    (user-error "The king's context is being compacted already"))
+  (let ((again (consp rat-kingdom-king--compaction)))
+    (setq rat-kingdom-king--compaction
+          (cons 'scheduled (and focus (not (string-blank-p focus)) focus)))
+    (when now
+      (rat-kingdom-king--compact-step space))
+    (cond ((eq rat-kingdom-king--compaction 'compacting)
+           "The king's context is being compacted now.")
+          (again
+           "A compaction was already asked for; it now keeps this focus. \
+It happens when this turn ends.")
+          (t
+           "Your conversation will be compacted when this turn ends, so end \
+the turn now. News waits until it is done; then you are told, and should \
+call `status`."))))
+
+(defun rat-kingdom-king--compact-step (space)
+  "Take a compaction of the king's context in SPACE a step on.
+Send /compact if it is to be sent, trying again later if the king
+cannot take it now; or, once it was sent, mark it done and give the
+king the news that waited."
+  (pcase rat-kingdom-king--compaction
+    (`(scheduled . ,focus)
+     (rat-kingdom-king--cancel-compaction-retry)
+     (cond ((not (rat-kingdom-run-live-p rat-kingdom-king-id)))
+           ((rat-kingdom-run-send rat-kingdom-king-id
+                                  (rat-kingdom-king-compact-prompt focus))
+            (setq rat-kingdom-king--compaction 'compacting))
+           (t
+            (setq rat-kingdom-king--compaction-retry
+                  (run-at-time rat-kingdom-king-retry-interval nil
+                               #'rat-kingdom-king--compact-step space)))))
+    ('compacting
+     (setq rat-kingdom-king--compaction 'done)
+     (rat-kingdom-king-deliver-to space rat-kingdom-king-id))))
+
+(defun rat-kingdom-king--compact-on-idle (run)
+  "Take a compaction of the king's context on when RUN, the king, ended a turn."
+  (when (and rat-kingdom-king--compaction
+             (equal run rat-kingdom-king-id))
+    (rat-kingdom-king--compact-step (rat-kingdom-space-default))))
+
+(add-hook 'rat-kingdom-run-idle-functions #'rat-kingdom-king--compact-on-idle)
+
 ;;;; Giving news to the king, and to foremen
 
 ;; Messages are given the same way to the king and to the foreman of an
@@ -872,27 +989,43 @@ They are the `message' tuples with `:to' TO, given as one prompt headed
 as news from the engine.  Return how many were given.  If the run is
 running and could not take them, try again in
 `rat-kingdom-king-retry-interval' seconds.  A run that is not running
-in this Emacs keeps its messages in the space."
-  (let ((messages (and (rat-kingdom-space-db space)
-                       (rat-kingdom-run-live-p to)
-                       (rat-kingdom-space-scan space (list 'message :to to)))))
+in this Emacs keeps its messages in the space.
+While the king's context is being compacted its messages wait; once
+that is done, it is told so first (`rat-kingdom-king-compact-schedule')."
+  (let* ((live (and (rat-kingdom-space-db space) (rat-kingdom-run-live-p to)))
+         (king (equal to rat-kingdom-king-id))
+         (held (and king (rat-kingdom-king-compacting-p)))
+         (notice (and live king (eq rat-kingdom-king--compaction 'done)
+                      rat-kingdom-king-compacted-text))
+         (messages (and live (not held)
+                        (rat-kingdom-space-scan space
+                                                (list 'message :to to)))))
     (when-let* ((timer (rat-kingdom-king--retry-timer to)))
       (when (timerp timer)
         (cancel-timer timer))
       (rat-kingdom-king--set-retry-timer to nil))
     (cond
-     ((null messages) 0)
+     ((not (or messages notice)) 0)
      ((rat-kingdom-run-send
        to
-       (concat "[rat-kingdom] News from the engine:\n\n"
-               (mapconcat (lambda (message)
-                            (plist-get (plist-get message :payload) :text))
-                          messages "\n\n")))
+       (string-join
+        (delq nil
+              (list notice
+                    (and messages
+                         (concat "[rat-kingdom] News from the engine:\n\n"
+                                 (mapconcat (lambda (message)
+                                              (plist-get (plist-get message
+                                                                    :payload)
+                                                         :text))
+                                            messages "\n\n")))))
+        "\n\n"))
       (rat-kingdom-space-with-transaction space
         (dolist (message messages)
           (rat-kingdom-space-retract space (list 'message
                                                  :id (plist-get message :id))
                                      :actor to)))
+      (when notice
+        (setq rat-kingdom-king--compaction nil))
       (length messages))
      (t
       (rat-kingdom-king--set-retry-timer
@@ -970,6 +1103,9 @@ Take up its earlier session again unless FRESH is non-nil or there was
 none.  Signal an error if the king is already running."
   (when (rat-kingdom-run-live-p rat-kingdom-king-id)
     (error "The king is already running"))
+  ;; A new session's first prompt says how things stand anyway.
+  (setq rat-kingdom-king--compaction nil)
+  (rat-kingdom-king--cancel-compaction-retry)
   (let* ((old (rat-kingdom-run-get space rat-kingdom-king-id))
          (session (and (not fresh) (plist-get old :session-id)))
          (fingerprint (rat-kingdom-king-fingerprint))
@@ -1105,8 +1241,8 @@ evaluated; the default is the king's alone."
 (defun rat-kingdom-king-story-start (space options &optional check)
   "Start a story in SPACE as `story_start' does, and return its answer.
 OPTIONS is a property list of the tool's arguments: `:repo',
-`:title', `:description', `:task', `:workflow', `:agent' and
-`:target'.  CHECK, if given, is a scope check, called with the task
+`:title', `:description', `:task', `:workflow', `:agent', `:model'
+and `:target'.  CHECK, if given, is a scope check, called with the task
 before anything is started; see above."
   (let* ((repo (plist-get options :repo))
          (task (plist-get options :task))
@@ -1141,7 +1277,7 @@ before anything is started; see above."
                   :description (plist-get options :description)
                   :agent (plist-get options :agent)
                   :workflow (plist-get options :workflow) :epic epic
-                  :target target)
+                  :target target :model (plist-get options :model))
                (rat-kingdom-story-start
                 space repo
                 (or (plist-get options :title)
@@ -1149,7 +1285,8 @@ before anything is started; see above."
                 (or (plist-get options :description)
                     (error "Give a description, or a task to take it from"))
                 nil (plist-get options :workflow) nil
-                (plist-get options :agent) nil target)))
+                (plist-get options :agent) nil target
+                (plist-get options :model))))
          (payload (plist-get (rat-kingdom-story-get space id) :payload))
          (from-labels (delq nil (list (and (plist-get labelled :workflow)
                                            "workflow")
@@ -1486,6 +1623,10 @@ for Claude Code, or codex for OpenAI Codex in full-access mode. Every \
 worker the story is given, after a failed check or a review too, runs it. \
 Default the task's rk-agent: label if it has one, else \
 rat-kingdom-default-agent, the user's setting, which status shows.")
+      (:name "model" :type string :optional t
+       :description "Rarely needed; leave it out. The Claude model id \
+every worker of the story runs, such as claude-opus-5-5, instead of \
+rat-kingdom-worker-model, the user's setting. Only for the claude agent.")
       (:name "target" :type string :optional t
        :description "Rarely needed; leave it out. The branch the worker's \
 worktree is cut from and the work is merged into, instead of the \
@@ -1496,7 +1637,7 @@ branch without this."))
    space (list :repo (arg 'repo) :title (arg 'title)
                :description (arg 'description) :task (arg 'task)
                :workflow (arg 'workflow) :agent (arg 'agent)
-               :target (arg 'target))))
+               :model (arg 'model) :target (arg 'target))))
 
 (rat-kingdom-king--deftool "story_show"
     "Show everything recorded about one story, in progress or finished: \
@@ -1608,17 +1749,19 @@ an undefined command. It never writes."
 the user asks. Layers: global (every repository; the file config.eld in \
 the rat-kingdom directory), repo (one repository; <repo>/.rk/config.eld \
 in the user's checkout), epic or task (a policy kept by rat-kingdom). A \
-more specific layer wins, and for commands, agents, timeouts and track, \
-sub-key by sub-key. Keys and the layers that may set them: workflow (all), \
-target (global, repo), commands (global, repo), setup (global, repo), check \
-(all), agents (all), timeouts (all), attempts (all), max-workers (global), \
-track (global, repo). Before writing, the change is checked for every \
-repository it affects: an unknown workflow, an undefined command name, a \
+more specific layer wins, and for commands, agents, timeouts, track and \
+git, sub-key by sub-key. Keys and the layers that may set them: workflow \
+(all), target (global, repo), commands (global, repo), setup (global, \
+repo), check (all), agents (all), timeouts (all), attempts (all), \
+max-workers (global), track (global, repo), git (all; its sub-key \
+:push-guard global and repo only). Before writing, the change is checked \
+for every repository it affects: an unknown workflow, an undefined command name, a \
 key not allowed at the layer, a value of the wrong shape or a target that \
 is not a local branch refuses it, and nothing is written. A file is \
 rewritten whole, so comments in it are not kept. A change to track is \
-applied to info/exclude at once. Returns what changed and the value now in \
-effect."
+applied to info/exclude at once, and a change to git's :push-guard to the \
+repositories' Git configuration at once. Returns what changed and the value \
+now in effect."
     '((:name "layer" :type string
        :description "global, repo, epic or task.")
       (:name "key" :type string
@@ -1633,9 +1776,14 @@ setup and check: an argument list run without a shell, (\"make\" \"test\"), \
 or command names defined in commands, run in order, (lint test). agents: \
 (:worker codex :foreman claude). timeouts: seconds, (:worker 7200 :check \
 1800). attempts and max-workers: a positive integer, 5. track: (:rk nil \
-:beads t), t to keep the directory in Git, nil to keep it out. A value for \
-commands, agents, timeouts or track replaces that key's whole value at \
-this layer; sub-keys it leaves out come from the layers below.")
+:beads t :a2ui nil), t to keep the directory, .rk, .beads or .a2ui, in \
+Git, nil to keep it out. git: (:branch \"rats/%i\" :integrate merge \
+:push-guard t); :branch is the format of story branch names, :integrate is \
+merge, rebase or squash, and :push-guard, default t, guards the target and \
+every rats/* branch from a git push by the user that names no remote (only \
+publish pushes them), nil takes the guard off. A value for commands, agents, \
+timeouts, track or git replaces that key's whole value at this layer; \
+sub-keys it leaves out come from the layers below.")
       (:name "repo" :type string :optional t
        :description "The repository's name. Required for the repo, epic \
 and task layers.")
@@ -1648,6 +1796,16 @@ and task layers.")
    (rat-kingdom-config-read-value (alist-get 'value arguments))
    :repo (arg 'repo) :epic (arg 'epic) :task (arg 'task)
    :actor rat-kingdom-king-id))
+
+(rat-kingdom-king--deftool "compact_self"
+    "Compact your own conversation, as the user can with /compact. It \
+happens when this turn ends, not now, so end the turn after calling this. \
+News from the engine waits until it is done. Then you are told, and should \
+call `status`."
+    '((:name "focus" :type string :optional t
+       :description "A line saying what the summary should keep, e.g. \
+\"the open stories and what the user asked last\"."))
+  (rat-kingdom-king-compact-schedule space (arg 'focus)))
 
 (provide 'rat-kingdom-king)
 ;;; rat-kingdom-king.el ends here

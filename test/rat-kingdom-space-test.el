@@ -240,6 +240,28 @@
 				     (should-not (rat-kingdom-space-archived space "S-2"))
 				     (should-error (rat-kingdom-space-sweep space nil))))
 
+(ert-deftest rat-kingdom-space-test-archived-in ()
+  (rat-kingdom-space-test-with-space space
+    (rat-kingdom-space-out space 'story :identity "S-1" :owner "S-1"
+                           :payload '(:at done))
+    (rat-kingdom-space-out space 'result :identity "S-1" :owner "S-1")
+    (rat-kingdom-space-sweep space "S-1")
+    (setq rat-kingdom-space-test--now 2000.0)
+    (rat-kingdom-space-out space 'story :identity "S-2" :owner "S-2")
+    (rat-kingdom-space-sweep space "S-2")
+    (cl-flet ((ids (&rest arguments)
+                (mapcar (lambda (tuple) (plist-get tuple :identity))
+                        (apply #'rat-kingdom-space-archived-in space arguments))))
+      (should (equal (ids 'story) '("S-1" "S-2")))
+      (should (equal (ids 'story 1500.0) '("S-2")))
+      (should (equal (ids 'story nil "S-1") '("S-1")))
+      (should-not (ids 'story 1500.0 "S-1"))
+      (should (equal (ids 'result) '("S-1"))))
+    (let ((tuple (car (rat-kingdom-space-archived-in space 'story nil "S-1"))))
+      (should (equal (plist-get tuple :payload) '(:at "done")))
+      (should (= (plist-get tuple :archived) 1000.0))
+      (should (eq (plist-get tuple :reason) 'sweep)))))
+
 ;;;; Transactions, hooks and the log
 
 (ert-deftest rat-kingdom-space-test-failed-transaction-keeps-nothing ()

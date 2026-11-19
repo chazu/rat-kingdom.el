@@ -9,6 +9,7 @@
 ;;; Code:
 
 (require 'ert)
+(require 'rat-kingdom)
 (require 'rat-kingdom-king)
 (require 'rat-kingdom-story-test)
 (require 'rat-kingdom-task-test)
@@ -91,7 +92,8 @@ run codex" (rat-kingdom-king-test--ok "status")))
         (rat-kingdom-reaction-run space)
         (should (equal (rat-kingdom-story-test--agent (concat id ".1"))
                        "claude"))
-        (should (string-search (format "%s.1, working), " id)
+        (should (string-search (format "%s, working), "
+                                       (rat-kingdom-run-label (concat id ".1")))
                                (rat-kingdom-king-test--ok "status")))
         (should (string-match-p ", [0-9]+s, claude: Add a file"
                                 (rat-kingdom-king-test--ok "status")))
@@ -126,6 +128,34 @@ codex" (car answer))))
                  (plist-get (gethash "agent" (plist-get schema :properties))
                             :description)))
         (should-not (seq-contains-p (plist-get schema :required) "agent"))))))
+
+(ert-deftest rat-kingdom-king-test-chooses-the-model ()
+  (rat-kingdom-story-test-with-repo (space _path)
+    (rat-kingdom-king-test--start space)
+    ;; The king's own run names no model.
+    (should-not (plist-get (rat-kingdom-run-get space "king") :model))
+    (let* ((answer (rat-kingdom-king-test--ok
+                    "story_start" '(repo . "demo") '(title . "Add a file")
+                    '(description . "Call it feature.txt.")
+                    '(model . "claude-opus-5-5")))
+           (id (progn (string-match "Started \\(S-[0-9a-f]+\\)" answer)
+                      (match-string 1 answer))))
+      (rat-kingdom-reaction-run space)
+      (should (equal (plist-get (rat-kingdom-run-get space (concat id ".1"))
+                                :model)
+                     "claude-opus-5-5"))
+      (should (string-search "\nModel: claude-opus-5-5\n"
+                             (rat-kingdom-king-test--ok "story_show"
+                                                        `(story . ,id)))))
+    ;; Left out, story_show names none.
+    (let* ((answer (rat-kingdom-king-test--ok
+                    "story_start" '(repo . "demo") '(title . "Another")
+                    '(description . "D")))
+           (id (progn (string-match "Started \\(S-[0-9a-f]+\\)" answer)
+                      (match-string 1 answer))))
+      (should-not (string-search "\nModel: "
+                                 (rat-kingdom-king-test--ok "story_show"
+                                                            `(story . ,id)))))))
 
 (ert-deftest rat-kingdom-king-test-resumes-with-the-same-agent ()
   (rat-kingdom-story-test-with-repo (space _path)
@@ -172,7 +202,7 @@ codex" (car answer))))
       (rat-kingdom-reaction-run space)
       (let ((status (rat-kingdom-king-test--ok "status")))
         (should (string-search (format "- %s [demo] ready (waiting for worker \
-%s.1, working)" id id)
+%s, working)" id (rat-kingdom-run-label (concat id ".1")))
                                status))
         (should (string-search "Add a file" status)))
       (should (string-search "no commits of its own yet"
@@ -251,7 +281,8 @@ codex" (car answer))))
       (should (string-search "Which file?" news)))
     (let ((status (rat-kingdom-king-test--ok "status")))
       (should (string-search "blocked (stopped)" status))
-      (should (string-search "reason: The worker S-1.1 is blocked: Which file?"
+      (should (string-search "reason: The worker Pip-1 (S-1.1) is blocked: \
+Which file?"
                              status)))
     (should (cdr (rat-kingdom-king-test--call "story_move" '(story . "S-1")
                                               '(place . "nowhere"))))
@@ -572,6 +603,182 @@ You are the king. Rule two.
       (should (eql (length rat-kingdom-story-test--started) 1))
       (should-not rat-kingdom-story-test--stopped)
       (should (rat-kingdom-king-stale-p space)))))
+
+;;;; Compacting the king's context
+
+(defmacro rat-kingdom-king-test-compacting (&rest body)
+  "Run BODY with no compaction of the king's context under way.
+Cancel any timer for another try at it afterwards."
+  (declare (indent 0))
+  `(let ((rat-kingdom-king--compaction nil)
+         (rat-kingdom-king--compaction-retry nil))
+     (unwind-protect (progn ,@body)
+       (rat-kingdom-king--cancel-compaction-retry))))
+
+(ert-deftest rat-kingdom-king-test-compact-waits-for-the-turn ()
+  (rat-kingdom-story-test-with-repo (space _path)
+    (rat-kingdom-king-test-compacting
+      (rat-kingdom-king-test--tell-busy)
+      (rat-kingdom-king-test--start space)
+      ;; The king asks in the middle of its turn; nothing is sent yet.
+      (setq rat-kingdom-story-test--busy t)
+      (should (string-search "when this turn ends"
+                             (rat-kingdom-king-test--ok
+                              "compact_self"
+                              '(focus . "the open stories\nand S-1"))))
+      (should (equal rat-kingdom-king--compaction
+                     '(scheduled . "the open stories\nand S-1")))
+      (should-not rat-kingdom-story-test--sent)
+      ;; News that comes meanwhile waits, even for a king that is idle.
+      (rat-kingdom-story-start space "demo" "Add a file" nil "S-1")
+      (rat-kingdom-reaction-run space)
+      (rat-kingdom-story-test--work space "S-1" "feature.txt")
+      (rat-kingdom-story-test--settle space "S-1")
+      (let ((news (rat-kingdom-king-test--news space)))
+        (should news)
+        (setq rat-kingdom-story-test--busy nil)
+        (should (zerop (rat-kingdom-king-deliver space)))
+        (should-not rat-kingdom-story-test--sent)
+        ;; Another run's turn ending does nothing.
+        (run-hook-with-args 'rat-kingdom-run-idle-functions "S-1.1")
+        (should-not rat-kingdom-story-test--sent)
+        ;; When the king's turn ends it is given /compact, on one line.
+        (run-hook-with-args 'rat-kingdom-run-idle-functions "king")
+        (should (equal rat-kingdom-story-test--sent
+                       '(("king" . "/compact the open stories and S-1"))))
+        (should (eq rat-kingdom-king--compaction 'compacting))
+        (should (equal (rat-kingdom-king-test--news space) news))
+        ;; A second ask while it compacts is refused.
+        (should (cdr (rat-kingdom-king-test--call "compact_self")))
+        ;; When the compaction's turn ends, the king is told, with the news.
+        (run-hook-with-args 'rat-kingdom-run-idle-functions "king")
+        (should (eql (length rat-kingdom-story-test--sent) 2))
+        (let ((text (cdr (car rat-kingdom-story-test--sent))))
+          (should (string-prefix-p rat-kingdom-king-compacted-text text))
+          (should (string-search "Call `status`" text))
+          (dolist (item news)
+            (should (string-search item text))))
+        (should-not (rat-kingdom-king-test--news space))
+        (should-not rat-kingdom-king--compaction)
+        ;; And only once.
+        (run-hook-with-args 'rat-kingdom-run-idle-functions "king")
+        (should (eql (length rat-kingdom-story-test--sent) 2))))))
+
+(ert-deftest rat-kingdom-king-test-compact-without-news-or-focus ()
+  (rat-kingdom-story-test-with-repo (space _path)
+    (rat-kingdom-king-test-compacting
+      (rat-kingdom-king-test--tell-busy)
+      (rat-kingdom-king-test--start space)
+      (setq rat-kingdom-story-test--busy t)
+      (rat-kingdom-king-test--ok "compact_self" '(focus . "  "))
+      ;; The turn ends, but the user has typed something not sent: the
+      ;; engine tries again later.
+      (run-hook-with-args 'rat-kingdom-run-idle-functions "king")
+      (should-not rat-kingdom-story-test--sent)
+      (should (timerp rat-kingdom-king--compaction-retry))
+      (setq rat-kingdom-story-test--busy nil)
+      (rat-kingdom-king--compact-step space)
+      (should-not rat-kingdom-king--compaction-retry)
+      (should (equal (cdr (car rat-kingdom-story-test--sent)) "/compact"))
+      ;; With no news the notice comes alone.
+      (run-hook-with-args 'rat-kingdom-run-idle-functions "king")
+      (should (equal (cdr (car rat-kingdom-story-test--sent))
+                     rat-kingdom-king-compacted-text))
+      (should-not rat-kingdom-king--compaction))))
+
+(ert-deftest rat-kingdom-king-test-compact-by-the-user ()
+  (rat-kingdom-story-test-with-repo (space _path)
+    (rat-kingdom-king-test-compacting
+      (should-error (rat-kingdom-king-compact "anything") :type 'user-error)
+      (rat-kingdom-king-test--tell-busy)
+      (rat-kingdom-king-test--start space)
+      ;; A king between turns is compacted at once.
+      (rat-kingdom-king-compact "")
+      (should (equal rat-kingdom-story-test--sent '(("king" . "/compact"))))
+      (should (eq rat-kingdom-king--compaction 'compacting))
+      ;; A new session forgets a compaction under way.
+      (rat-kingdom-run-stop space "king")
+      (rat-kingdom-king-test--start space)
+      (should-not rat-kingdom-king--compaction)
+      ;; A busy one when its turn ends.
+      (setq rat-kingdom-story-test--sent nil
+            rat-kingdom-story-test--busy t)
+      (rat-kingdom-king-compact "the plan")
+      (should-not rat-kingdom-story-test--sent)
+      (setq rat-kingdom-story-test--busy nil)
+      (run-hook-with-args 'rat-kingdom-run-idle-functions "king")
+      (should (equal rat-kingdom-story-test--sent
+                     '(("king" . "/compact the plan")))))))
+
+(ert-deftest rat-kingdom-king-test-compact-through-agent-shell ()
+  ;; The king runs in an agent-shell buffer whose agent-shell is stubbed:
+  ;; its events are fired by hand and what it is given is recorded.
+  (rat-kingdom-story-test-with-repo (space _path)
+    (rat-kingdom-king-test-compacting
+      (let ((buffer (generate-new-buffer " *rat-kingdom-king-compact*"))
+            (require (symbol-function 'require))
+            (rat-kingdom-run-backend nil)
+            (rat-kingdom-agent-shell-session-end-command nil)
+            (events nil)
+            (inserted nil)
+            (busy nil))
+        (unwind-protect
+            (cl-letf (((symbol-function 'require)
+                       (lambda (feature &rest args)
+                         (or (eq feature 'agent-shell)
+                             (apply require feature args))))
+                      ;; Kept where `rat-kingdom-king-test--call' looks.
+                      ((symbol-function 'rat-kingdom-agent-shell-run-config)
+                       (lambda (run token)
+                         (push (list run nil token)
+                               rat-kingdom-story-test--started)
+                         nil))
+                      ((symbol-function 'agent-shell--start)
+                       (lambda (&rest _) buffer))
+                      ((symbol-function 'agent-shell-subscribe-to)
+                       (lambda (&rest args)
+                         (push (cons (plist-get args :event)
+                                     (plist-get args :on-event))
+                               events)))
+                      ((symbol-function 'agent-shell-insert)
+                       (lambda (&rest args)
+                         (push (plist-get args :text) inserted)))
+                      ((symbol-function 'shell-maker-busy)
+                       (lambda () busy)))
+              (cl-flet ((fire (event)
+                          (funcall (alist-get event events) nil)
+                          ;; The turn-complete handler runs the idle
+                          ;; functions from a timer.
+                          (dotimes (_ 5) (accept-process-output nil 0.01))))
+                (with-current-buffer buffer
+                  (setq-local agent-shell--state
+                              (list (cons :session (list (cons :id "s-1"))))))
+                (rat-kingdom-king-test--start space)
+                (fire 'prompt-ready)
+                (should (string-search "You are the king" (car inserted)))
+                ;; In its turn the king asks for a compaction.
+                (setq busy t)
+                (rat-kingdom-king-test--ok "compact_self"
+                                           '(focus . "open stories"))
+                (should (eql (length inserted) 1))
+                (setq busy nil)
+                (fire 'turn-complete)
+                (should (equal (car inserted) "/compact open stories"))
+                (fire 'turn-complete)
+                (should (equal (car inserted) rat-kingdom-king-compacted-text))
+                (should (eql (length inserted) 3))
+                (should-not rat-kingdom-king--compaction)))
+          (rat-kingdom-run-stop space "king")
+          (when (buffer-live-p buffer)
+            (kill-buffer buffer)))))))
+
+(ert-deftest rat-kingdom-king-test-compact-is-the-kings-alone ()
+  (should (member "compact_self" (rat-kingdom-mcp-tool-names 'king)))
+  (dolist (role '(rat researcher foreman consul))
+    (should-not (member "compact_self" (rat-kingdom-mcp-tool-names role))))
+  (should (string-search "compact_self" (rat-kingdom-king-tool-names)))
+  (should (string-search "Call `compact_self` when the user asks"
+                         (rat-kingdom-king-instructions))))
 
 ;;;; Tasks
 

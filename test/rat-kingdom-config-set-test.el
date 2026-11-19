@@ -78,7 +78,8 @@
                       "- :check (lint test) (repo)"
                       "- :agents :foreman claude (defaults)"
                       "- :attempts 2 (epic)"
-                      "- :track :rk nil (defaults)"))
+                      "- :track :rk nil (defaults)"
+                      "- :track :a2ui nil (defaults)"))
         (should (string-search (concat line "\n") (concat text "\n"))))
       (should (string-search (format "- global: %s\n"
                                      (rat-kingdom-config-global-file))
@@ -196,7 +197,7 @@
                    '(:agents (:worker codex))))
     (should (equal (rat-kingdom-config-get space :agents :repo "demo"
                                            :epic "E-1")
-                   '(:worker codex :foreman claude)))
+                   '(:worker codex :foreman claude :consul claude)))
     (rat-kingdom-config-set-test--ok
      "config_set" '(layer . "task") '(repo . "demo") '(task . "T-1")
      '(key . "workflow") '(value . "story"))
@@ -373,8 +374,8 @@
 
 (ert-deftest rat-kingdom-config-set-test-track-is-applied ()
   (rat-kingdom-config-set-test-with-repo (_space path)
-    (should (equal (last (rat-kingdom-config-set-test--exclude path) 2)
-                   '("/.beads/" "/.rk/")))
+    (should (equal (last (rat-kingdom-config-set-test--exclude path) 3)
+                   '("/.beads/" "/.rk/" "/.a2ui/")))
     (let ((text (rat-kingdom-config-set-test--ok
                  "config_set" '(layer . "repo") '(repo . "demo")
                  '(key . "track") '(value . "(:rk t)"))))
@@ -400,7 +401,21 @@
              (rat-kingdom-config-set-test--ok
               "config_set" '(layer . "repo") '(repo . "demo")
               '(key . "track") '(value . "(:rk nil)"))))
-    (should (member "/.rk/" (rat-kingdom-config-set-test--exclude path)))))
+    (should (member "/.rk/" (rat-kingdom-config-set-test--exclude path)))
+    ;; :a2ui t keeps .a2ui in Git, and touches no other line.
+    (let ((before (rat-kingdom-config-set-test--exclude path)))
+      (should (string-search
+               "Applied :track to demo: removed /.a2ui/"
+               (rat-kingdom-config-set-test--ok
+                "config_set" '(layer . "global") '(key . "track")
+                '(value . "(:beads t :a2ui t)"))))
+      (should (equal (rat-kingdom-config-set-test--exclude path)
+                     (remove "/.a2ui/" before))))
+    (should (string-search
+             ":track :a2ui is t or nil"
+             (rat-kingdom-config-set-test--refused
+              "config_set" '(layer . "global") '(key . "track")
+              '(value . "(:a2ui yes)"))))))
 
 ;;;; Roles
 
