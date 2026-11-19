@@ -235,6 +235,47 @@ most every `rat-kingdom-issue-interval` seconds (0.5). Nothing watches
 the tracker's files. If you change the issue with `br`, press `g` or
 Refresh to see it. The inspector needs a2ui.
 
+### The epic ledger
+
+`M-x rat-kingdom-ledger` shows every open epic of the registered
+repositories, one line for each. With a prefix argument, it asks for one
+repository. The ledger takes the place of the buffer in the selected
+window. The king can also show it to you: ask it how the epics stand.
+Its tool `ledger_show` takes an optional `repo`, changes nothing, and
+answers with a one-line summary such as "5 open epics, 1 held".
+
+A row is made to fit in `rat-kingdom-ledger-width` columns (100). It has:
+
+- the epic's id, and its repository and title, cut to fit;
+- a bar of the tasks closed, and the counts of the tasks closed, in
+  progress, ready and blocked (`C/P/R/B`);
+- the engine's state: not started, running (with the number of stories
+  in progress), paused, landing, or held with the held task named. `+F`
+  says that the epic has a foreman;
+- the next ready task, the epic's age and the time since its last change;
+- a sparkline of the tasks closed on each of the last 14 days, if br
+  gives their close times.
+
+The epics that need attention come first: those with a held task, then
+those with blocked tasks and nothing ready or in progress. The running
+epics follow, and then the others. Each group is sorted by priority.
+
+Select a row with the box before it to expand it. Its tasks then show
+under the table, with their id, priority, status, title and story in
+progress. `RET` on the id of an epic or of a task shows it in the issue
+inspector. The inspector's **Open parent epic** shows the ledger again,
+with that epic expanded. A picker limits the ledger to one repository,
+and a check box adds the epics closed in the last 7 days. Press
+**Apply** after you change them. Above the rows, a bar and a sparkline
+sum up all the epics shown.
+
+No button starts, pauses or retries an epic. Ask the king for that. `q`
+buries the ledger, and `g` draws it again. The ledger also draws itself
+again when the engine changes an epic or one of its stories. It does
+this at most every `rat-kingdom-ledger-interval` seconds (1), and each
+time it reads the trackers again. If you change an epic with `br`, press
+`g` to see it. The ledger needs a2ui.
+
 ### Epics
 
 **Plan.** The king proposes the epic's stories and their dependencies,

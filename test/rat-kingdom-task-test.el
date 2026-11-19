@@ -121,7 +121,9 @@ file show-fails.  `rat-kingdom-task-test--calls' lists every call."
       (should (equal (car tasks)
                      '(:id "bd-duw" :title "First task" :description "Do it"
                        :status "open" :priority 1 :type "task" :assignee nil
-                       :labels ("ui") :parent nil :depends-on nil)))
+                       :labels ("ui") :parent nil :depends-on nil
+                       :created-at "2026-11-13T13:09:26Z"
+                       :updated-at "2026-11-13T13:09:26Z" :closed-at nil)))
       (should (equal (plist-get (cadr tasks) :id) "bd-s9g"))
       (should (null (plist-get (cadr tasks) :description)))
       (should (null (plist-get (cadr tasks) :assignee)))

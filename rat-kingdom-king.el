@@ -129,6 +129,9 @@ is merged.
 - When the user asks to see an issue, or an issue is being discussed, \
 show it to them with `issue_show`. It shows the whole issue in Emacs and \
 changes nothing.
+- When the user asks how the epics stand, show them the epic ledger with \
+`ledger_show`, for one `repo` or for all. It shows every open epic in Emacs, \
+those that need attention first, and changes nothing.
 - A message that begins with [rat-kingdom] comes from the engine, not from \
 the user. Act on it: review when asked, look into a story that stopped, and \
 tell the user briefly what happened. Do not start new stories on the \

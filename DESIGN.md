@@ -1247,7 +1247,7 @@ go, and it lets a role be denied built-in tools as well.
 
 | Role | Lifetime | Tools |
 |---|---|---|
-| king | long-lived, global, no worktree | built: `status` (with the tracker tasks available, each with its epic and agent), `repo_add`, `repo_sync`, `workflow_list`, `story_start` (optionally from a `task`, with an `agent`; a task's `rk-agent:` and `rk-workflow:` labels are the defaults), `story_show`, `story_diff`, `story_move`, `story_cancel`, `verdict`, `publish`, `query`, `fact_forget`, `task_create`, `epic_create`, `epic_propose` (the epic plan surface, 14.1), `epic_start` (optionally with a `feature_branch`, and a `foreman`), `epic_pause`, `epic_resume`, `epic_cancel`, `epic_retry`, `epic_show`, `epic_diff`, `epic_verdict` (section 10), `tell`, `foreman_start`, `foreman_stop`, `config_show` and `config_set` (7.3), `doc_list`, `doc_show` and `doc_forget` (7.1), `story_signal` (7.1), `issue_show` (the issue inspector, 14.1); `story_start` also takes a rarely needed `target`; built (step 8): `mixins` and `git` on `repo_add` |
+| king | long-lived, global, no worktree | built: `status` (with the tracker tasks available, each with its epic and agent), `repo_add`, `repo_sync`, `workflow_list`, `story_start` (optionally from a `task`, with an `agent`; a task's `rk-agent:` and `rk-workflow:` labels are the defaults), `story_show`, `story_diff`, `story_move`, `story_cancel`, `verdict`, `publish`, `query`, `fact_forget`, `task_create`, `epic_create`, `epic_propose` (the epic plan surface, 14.1), `epic_start` (optionally with a `feature_branch`, and a `foreman`), `epic_pause`, `epic_resume`, `epic_cancel`, `epic_retry`, `epic_show`, `epic_diff`, `epic_verdict` (section 10), `tell`, `foreman_start`, `foreman_stop`, `config_show` and `config_set` (7.3), `doc_list`, `doc_show` and `doc_forget` (7.1), `story_signal` (7.1), `issue_show` (the issue inspector, 14.1), `ledger_show` (the epic ledger, 14.1); `story_start` also takes a rarely needed `target`; built (step 8): `mixins` and `git` on `repo_add` |
 | rat (worker) | one task | built: `finish`, `block`, `note_fact`, `inbox`, `read_doc` |
 | researcher | one task | built: `write_doc`, `read_doc`, `note_fact`, `inbox`, `block`, `finish` |
 | foreman | one epic, optional | built: `status` (its epic: the `epic_show` view and its stories' lines), `story_show`, `story_diff`, `verdict`, `tell`, `query`, `task_create` (its epic is the parent), `epic_retry`, `story_start` (for a task of its epic), `report` (to the king); every one but `query` limited to its epic |
@@ -1850,6 +1850,69 @@ change made with br outside rat-kingdom shows on `g` or Refresh.
 `issue_show` answers with a one-line summary. It fails, says why and
 shows nothing for an unknown repository, an unknown issue, a tracker
 that fails, or a missing a2ui.
+
+**Built: the epic ledger**, in `rat-kingdom-ledger.el`. It shows one
+dense row for each open epic of the registered repositories, or of one,
+in the surface "Epic ledger". The command `rat-kingdom-ledger` opens it,
+and so does the king's `ledger_show` (an optional `repo`). It goes in
+the main window, as the inspector does. `q` buries it and `g` draws it
+again.
+
+The epics come from the generic function `rat-kingdom-ledger-read-epics`.
+Its br method runs `br list --type epic --json`, and with the check box
+also `br list --type epic --status closed --json`. The ledger keeps the
+closed epics whose `closed_at` is in the last
+`rat-kingdom-ledger-closed-days` days (7). The tasks and the engine's
+state come from the functions that `epic_show` uses:
+`rat-kingdom-epic--tasks` gives each task its class (closed, story,
+held, ready, waiting or other), and `rat-kingdom-epic--ready` gives the
+next ready task. An epic that was never started has no `epic` tuple, so
+the ledger gives `rat-kingdom-epic--tasks` a bare record with only its
+repository and id. The br adapter now keeps `created_at`, `updated_at`
+and `closed_at` on each task as `:created-at`, `:updated-at` and
+`:closed-at`.
+
+A row counts a task as closed, in progress (it has a story, or br says
+`in_progress`), ready, or blocked (any other open task). The state is
+not started, running with the count of stories in progress, paused,
+landing, or held with the first held task. A closed epic says closed.
+The age is from the epic's `created_at`. The last change is the latest
+of the epic's and its tasks' br times and of the `epic` tuple. The
+sparkline counts the tasks closed on each local day of the last
+`rat-kingdom-ledger-spark-days` days (14). A row with no `closed_at`
+has no sparkline. The rows are sorted by rank, then priority, then
+repository and id. The ranks are held, blocked with nothing ready or in
+progress, running, other open, and closed.
+
+The layout is one Column. It holds the summary line, the filters (a
+Picker of the repositories, a CheckBox and Apply), a Progress of all the
+tasks closed with a Sparkline of all the closures, a legend, and the
+rows. The rows are one Table, one line each. Its `done` column has
+`display` `bar` and its `spark` column `display` `sparkline`. The title
+column takes what the other columns leave of `rat-kingdom-ledger-width`
+(100). The Table is `selectable` `multiple`, with its `selection` bound
+to `/expanded` and the rows' `rowKey` REPO/ID. a2ui calls the session's
+`on-change-fn` when the user selects a row. The ledger then reads
+`/expanded` and sets `/details/N/visible`. Under the Table, a templated
+Section for each epic holds a Table of its tasks, visible when its row
+is selected. The `rowAction` of both Tables sends `open` with the row's
+`repo` and `id`, which shows the issue in the inspector. The ledger sets
+`rat-kingdom-issue-open-epic-function` to `rat-kingdom-ledger-open-epic`
+if nothing else has set it. So the inspector's Open parent epic shows
+the ledger of the epic's repository with the epic expanded. It looks
+among the closed epics too, and leaves the epic to the inspector if the
+ledger cannot show it. No component starts, pauses or retries an epic.
+
+`rat-kingdom-space-change-functions` schedules a redraw for a change to
+an `epic` tuple, to a `story` with an `:epic`, or to an `available` tuple
+with a `:parent`, in the repository shown. `rat-kingdom-task-settled-functions`
+does so for a story of an epic. A redraw comes at most every
+`rat-kingdom-ledger-interval` seconds (1). It reads the trackers again
+and sends the whole surface, and the rows expanded stay expanded. A
+tracker that fails is named on the surface, and the other repositories
+are still shown. `ledger_show` answers with a one-line summary, such as
+"5 open epics, 1 held", and names what could not be read. It fails and
+shows nothing for an unknown repository or a missing a2ui.
 
 | # | Surface | Shows | Actions | Kind |
 |---|---|---|---|---|
