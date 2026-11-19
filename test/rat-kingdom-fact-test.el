@@ -10,6 +10,7 @@
 ;;; Code:
 
 (require 'ert)
+(require 'rat-kingdom-test-helper)
 (require 'rat-kingdom)
 (require 'rat-kingdom-fact)
 (require 'rat-kingdom-story-test)

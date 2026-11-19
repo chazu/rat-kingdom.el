@@ -13,6 +13,7 @@
 ;;; Code:
 
 (require 'ert)
+(require 'rat-kingdom-test-helper)
 (require 'rat-kingdom)
 (require 'rat-kingdom-foreman)
 (require 'rat-kingdom-story-test)
@@ -43,6 +44,11 @@ Run reactions, so that its agent is started, and return the answer."
   (prog1 (apply #'rat-kingdom-king-test--ok "foreman_start" '(epic . "T-1")
                 arguments)
     (rat-kingdom-reaction-run space)))
+
+(defun rat-kingdom-foreman-test--name (space)
+  "Return the display name of the foreman of T-1 in SPACE, as Pip-T-1."
+  (rat-kingdom-run-display-name
+   (rat-kingdom-run-get space rat-kingdom-foreman-test--id)))
 
 (defun rat-kingdom-foreman-test--call (tool &rest arguments)
   "Call TOOL as the foreman of T-1 with ARGUMENTS.  Return (TEXT . FAILED)."
@@ -102,8 +108,13 @@ Return the id of the story started for T-7."
            (run (rat-kingdom-run-get space rat-kingdom-foreman-test--id))
            (prompt (rat-kingdom-story-test--prompt
                     rat-kingdom-foreman-test--id)))
-      (should (string-search "Started the foreman F-T-1 (claude) for the epic \
-T-1 (Plan)" answer))
+      (should (string-search (format "Started the foreman F-T-1 (%s, claude) \
+for the epic T-1 (Plan)"
+                                     (rat-kingdom-foreman-test--name space))
+                             answer))
+      ;; It has a name, shown with the epic's id.
+      (should (string-match-p "\\`[A-Z][a-z]+-T-1\\'"
+                              (rat-kingdom-foreman-test--name space)))
       ;; A run of its own, in the role foreman, for the epic, in the
       ;; repository's checkout, running Claude Code whatever workers run.
       (should (equal (plist-get run :role) "foreman"))
@@ -162,7 +173,9 @@ the repository demo" prompt))
     ;; Its status is its epic's, with the lines of its stories.
     (let ((status (rat-kingdom-foreman-test--ok "status")))
       (should (string-search "Epic T-1 in demo: Plan" status))
-      (should (string-search "foreman F-T-1 (claude, " status))
+      (should (string-search (format "foreman F-T-1 (%s, claude, "
+                                     (rat-kingdom-foreman-test--name space))
+                             status))
       (should (string-match-p "Its stories in progress:\n- S-[0-9a-f]+ \
 \\[demo\\] ready" status))
       (should-not (string-search "Repositories:" status)))
@@ -175,17 +188,22 @@ the repository demo" prompt))
     (should-not (string-search "foreman" (rat-kingdom-king-test--ok "status")))
     (rat-kingdom-foreman-test--start space '(agent . "codex"))
     ;; The fake backend has no :busy, so an agent is taken to be working.
-    (should (string-search "    foreman F-T-1 (codex, working)"
+    (should (string-search (format "    foreman F-T-1 (%s, codex, working)"
+                                   (rat-kingdom-foreman-test--name space))
                            (rat-kingdom-king-test--ok "status")))
-    (should (string-search "It has a foreman F-T-1 (codex, working)."
+    (should (string-search (format "It has a foreman F-T-1 (%s, codex, \
+working)."
+                                   (rat-kingdom-foreman-test--name space))
                            (rat-kingdom-king-test--ok "epic_show"
                                                       '(epic . "T-1"))))
     (let ((rat-kingdom-run-backend (append (list :busy #'ignore)
                                            rat-kingdom-run-backend)))
-      (should (string-search "foreman F-T-1 (codex, idle)"
+      (should (string-search (format "foreman F-T-1 (%s, codex, idle)"
+                                     (rat-kingdom-foreman-test--name space))
                              (rat-kingdom-king-test--ok "status"))))
     (rat-kingdom-king-test--ok "foreman_stop" '(epic . "T-1"))
-    (should (string-search "foreman F-T-1 (codex, stopped)"
+    (should (string-search (format "foreman F-T-1 (%s, codex, stopped)"
+                                   (rat-kingdom-foreman-test--name space))
                            (rat-kingdom-king-test--ok "status")))))
 
 (ert-deftest rat-kingdom-foreman-test-start-needs-a-running-or-paused-epic ()
@@ -324,7 +342,8 @@ epic.")))
     (let* ((story (rat-kingdom-epic-dispatch-test--story space "T-2"))
            (worker (rat-kingdom-story-test--get space story :run)))
       (rat-kingdom-reaction-run space)
-      (should (string-search (format "Delivered now to worker %s" worker)
+      (should (string-search (format "Delivered now to worker %s"
+                                     (rat-kingdom-run-label worker))
                              (rat-kingdom-foreman-test--ok
                               "tell" (cons 'story story)
                               '(text . "Use tabs."))))

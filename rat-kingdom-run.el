@@ -41,6 +41,14 @@
 ;;
 ;; A run need not belong to a story.  The king is a run too; see
 ;; rat-kingdom-king.el.
+;;
+;; Every rat, that is every run but the king's, has a name, `:name' in
+;; its record, taken in turn from `rat-kingdom-rat-names'.  The name is
+;; for people: buffers, status lines and news show it, as Pip-3a9c,
+;; with the run's id beside it.  Ids stay the references tools take.
+;; The place in the list is kept in a file in `rat-kingdom-directory',
+;; so that it carries on after a restart, and a name a live rat holds
+;; is skipped, so no two live rats share one.
 
 ;;; Code:
 
@@ -170,6 +178,110 @@ is where the agent-shell backend keeps the worker's own transcript."
 (defvar rat-kingdom-run--handles (make-hash-table :test #'equal)
   "Hash table from run id to the handle its backend returned.")
 
+(defvar-local rat-kingdom-run-buffer-id nil
+  "The id of the run whose agent works in this buffer, or nil.
+A backend that gives each agent a buffer sets it there; the agent-shell
+backend does.  `rat-kingdom-buffer-run' reads it.")
+;; A change of major mode in the buffer keeps it.
+(put 'rat-kingdom-run-buffer-id 'permanent-local t)
+
+;;;; Names
+
+(defcustom rat-kingdom-rat-names
+  '("Pip" "Nibbles" "Whiskers" "Scamper" "Remy" "Templeton" "Biscuit"
+    "Pocket" "Squeak" "Maple" "Truffle" "Pepper" "Clover" "Hazel" "Button"
+    "Gnocchi" "Mochi" "Pumpkin" "Sprout" "Juniper" "Rascal" "Bramble"
+    "Sniffles" "Wiggles" "Cheddar" "Brie" "Gouda" "Crumb" "Toffee" "Noodle"
+    "Pickles" "Dumpling" "Bean" "Tater" "Fig" "Sage" "Basil" "Ziggy"
+    "Domino" "Pebble" "Zuzu" "Nutmeg" "Cinnamon" "Marble" "Smudge" "Tinker"
+    "Rolo" "Twix" "Waffle" "Pretzel" "Kiwi" "Mango" "Tofu" "Bao" "Pippin"
+    "Merry" "Acorn" "Biscotti" "Cashew" "Dottie" "Echo" "Fennel" "Ginger"
+    "Hopper" "Inky" "Jellybean" "Kernel" "Lentil" "Muffin" "Nugget")
+  "The names rats are given, in turn.
+Each is one word.  A new rat takes the next name in the list that no
+live rat holds; after the last, the list starts again."
+  :type '(repeat string)
+  :group 'rat-kingdom)
+
+(defun rat-kingdom-run--names-file ()
+  "Return the file that keeps the place in `rat-kingdom-rat-names'."
+  (expand-file-name "rat-names" rat-kingdom-directory))
+
+(defun rat-kingdom-run--names-place ()
+  "Return the place in `rat-kingdom-rat-names' the next name is looked for at."
+  (let ((file (rat-kingdom-run--names-file)))
+    (or (and (file-readable-p file)
+             (with-temp-buffer
+               (insert-file-contents file)
+               (let ((place (ignore-errors (read (current-buffer)))))
+                 (and (natnump place) place))))
+        0)))
+
+(defun rat-kingdom-run--held-names (space)
+  "Return the names that live rats in SPACE hold.
+A rat is live while its run is starting, working or interrupted, or its
+agent runs in this Emacs; a consul is live until it is dismissed."
+  (delq nil
+        (mapcar (lambda (run)
+                  (and (or (member (plist-get run :state)
+                                   '("starting" "working" "interrupted"))
+                           (equal (plist-get run :role) "consul")
+                           (rat-kingdom-run-live-p (plist-get run :id)))
+                       (plist-get run :name)))
+                (rat-kingdom-run-list space))))
+
+(defun rat-kingdom-run-new-name (space)
+  "Return the next name from `rat-kingdom-rat-names' that no live rat holds.
+SPACE holds the runs.  The place in the list moves past the name, and
+is kept in `rat-kingdom-directory'.  If every name is held, the next is
+given a number, as Pip2."
+  (let* ((names (or rat-kingdom-rat-names '("Rat")))
+         (count (length names))
+         (place (rat-kingdom-run--names-place))
+         (held (rat-kingdom-run--held-names space))
+         (step (cl-loop for i below count
+                        unless (member (nth (% (+ place i) count) names) held)
+                        return i))
+         (name (if step
+                   (nth (% (+ place step) count) names)
+                 (let ((base (nth (% place count) names)) (n 2))
+                   (while (member (format "%s%d" base n) held)
+                     (cl-incf n))
+                   (format "%s%d" base n)))))
+    (make-directory rat-kingdom-directory t)
+    (with-temp-file (rat-kingdom-run--names-file)
+      (prin1 (% (+ place (or step 0) 1) count) (current-buffer)))
+    name))
+
+(defun rat-kingdom-run-suffix (id)
+  "Return the part of the run id ID that a rat's name is shown with.
+That is the four hex digits of a story or consul, as 3a9c for S-3a9c.2
+and C-3a9c, or else the id without its letter and dash, as T-1 for the
+foreman F-T-1."
+  (if (string-match "\\`[A-Z]-\\([0-9a-f]\\{4\\}\\)\\(?:[./]\\|\\'\\)" id)
+      (match-string 1 id)
+    (replace-regexp-in-string "\\`[A-Z]-\\|\\.[0-9]+\\'" "" id)))
+
+(defun rat-kingdom-run-display-name (run)
+  "Return the name RUN, a run record, is shown to people by, or nil.
+That is its `:name' and the suffix of its id, as Pip-3a9c; nil if it
+has no name, as the king has none."
+  (when-let* ((name (plist-get run :name)))
+    (format "%s-%s" name (rat-kingdom-run-suffix (plist-get run :id)))))
+
+(defun rat-kingdom-run-label (run)
+  "Return how RUN, a run record or an id, is named to people.
+That is its display name with its id, as Pip-3a9c (S-3a9c.1), or its id
+alone if it has no name.  An id is looked up in the default space."
+  (let ((run (if (stringp run)
+                 (or (ignore-errors
+                       (rat-kingdom-run-get (rat-kingdom-space-default) run))
+                     (list :id run))
+               run)))
+    (if-let* ((display (rat-kingdom-run-display-name run)))
+        (format "%s (%s)" display (plist-get run :id))
+      (plist-get run :id))))
+
 ;;;; Records
 
 (defun rat-kingdom-run--record (tuple)
@@ -192,16 +304,20 @@ A record is the tuple's payload with `:id', `:repo' and `:story'."
            space (if story (list 'run :owner story) '(run)))))
 
 (cl-defun rat-kingdom-run-create (space &key id (repo "system") story role
-                                        agent worktree branch target prompt
-                                        resume)
+                                        agent model worktree branch target
+                                        prompt resume name)
   "Record a new run in SPACE, to be started by `rat-kingdom-run-launch'.
 ID names the run.  It belongs to STORY in REPO, plays ROLE, runs the
 agent AGENT, and works in WORKTREE on BRANCH, which was cut from
 TARGET.  AGENT names an agent kind, such as \"claude\" or \"codex\"; nil
 leaves it to the backend, which for agent-shell means Claude Code.
-PROMPT is what its agent is told.  RESUME is the id of an agent
-session to take up again, which must be one AGENT started.  A run of
-that name that is over is replaced.  Return the record."
+MODEL, if given, is the Claude model id the agent runs; see
+`rat-kingdom-worker-model'.  PROMPT is what its agent is told.  RESUME
+is the id of an agent session to take up again, which must be one
+AGENT started.  NAME is the rat's name; a run in any role but the
+king's is given the next one, `rat-kingdom-run-new-name', unless it is
+given.  A run of that name that is over is replaced.  Return the
+record."
   (when-let* ((old (rat-kingdom-run-get space id)))
     (when (or (rat-kingdom-run-live-p id)
               (equal (plist-get old :state) "starting"))
@@ -209,7 +325,12 @@ that name that is over is replaced.  Return the record."
   (rat-kingdom-space-put
    space 'run :scope repo :identity id :owner story
    :payload (append (list :state "starting" :role (format "%s" role))
+                    (let ((name (or name
+                                    (and (not (equal (format "%s" role) "king"))
+                                         (rat-kingdom-run-new-name space)))))
+                      (and name (list :name name)))
                     (and agent (list :agent (format "%s" agent)))
+                    (and model (list :model model))
                     (list :worktree worktree :branch branch :target target
                           :prompt prompt :resume resume))
    :actor "engine")

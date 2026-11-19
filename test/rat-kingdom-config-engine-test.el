@@ -14,6 +14,7 @@
 ;;; Code:
 
 (require 'ert)
+(require 'rat-kingdom-test-helper)
 (require 'rat-kingdom)
 (require 'rat-kingdom-config)
 (require 'rat-kingdom-story-test)
@@ -313,8 +314,9 @@ is 10"
     (rat-kingdom-foreman-test-with-epic (space _fake)
       (let ((path (plist-get (rat-kingdom-repo-get space "demo") :path)))
         (rat-kingdom-config-engine-test--repo path '(:agents (:foreman codex)))
-        (should (string-search "Started the foreman F-T-1 (codex)"
-                               (rat-kingdom-foreman-test--start space)))
+        (should (string-match-p "Started the foreman F-T-1 ([A-Za-z]+-T-1, \
+codex)"
+                                (rat-kingdom-foreman-test--start space)))
         (should (equal (plist-get (rat-kingdom-run-get
                                    space rat-kingdom-foreman-test--id)
                                   :agent)

@@ -24,7 +24,9 @@
 ;; `rat-kingdom-agent-shell-define-agent'.  A run that names none, such as
 ;; the king's, gets Claude Code.  A story's workers run the agent the
 ;; story was started with, `rat-kingdom-default-agent' unless it named
-;; one.  Codex runs in its full-access mode, approval policy never and
+;; one.  A worker or foreman that runs Claude Code runs the model its
+;; story was started with, else `rat-kingdom-worker-model', else
+;; agent-shell's default; the king always runs agent-shell's default.  Codex runs in its full-access mode, approval policy never and
 ;; no sandbox, the equivalent of `codex --yolo'.
 ;;
 ;; Each run's shell is given the rat-kingdom tool endpoint with the run's
@@ -49,6 +51,11 @@
 ;;
 ;; Pushing is left to the king's `publish' tool, which runs Git in Emacs
 ;; itself (rat-kingdom-git.el).
+;;
+;; Stopping an agent kills its buffer, and with it Claude Code's process,
+;; so Claude Code's own SessionEnd hooks never run for it.  In their
+;; place `rat-kingdom-agent-shell-session-end-command' is started,
+;; detached, with the session's transcript file.
 
 ;;; Code:
 
@@ -72,7 +79,9 @@
 (declare-function agent-shell-openai-make-codex-config "agent-shell-openai")
 (declare-function rat-kingdom-run-exited "rat-kingdom-run")
 (declare-function rat-kingdom-run-update "rat-kingdom-run")
+(declare-function rat-kingdom-run-label "rat-kingdom-run")
 (defvar rat-kingdom-run-idle-functions)
+(defvar rat-kingdom-run-buffer-id)
 
 (defun rat-kingdom-agent-shell--servers (token)
   "Return the MCP servers for a run holding TOKEN.
@@ -109,6 +118,16 @@ always Claude Code."
   :type '(choice (const :tag "Claude Code" claude)
                  (const :tag "Codex, in full-access mode" codex)
                  (symbol :tag "Another defined agent kind"))
+  :group 'rat-kingdom)
+
+(defcustom rat-kingdom-worker-model nil
+  "The Claude model id the workers run, or nil for agent-shell's default.
+An id such as \"claude-opus-5-5\".  It applies to the workers and
+foremen that run the `claude' agent kind only: other kinds, such as
+Codex, are left alone, and the king is never affected.  A story
+started with a model of its own runs that model instead."
+  :type '(choice (const :tag "The agent-shell default" nil)
+                 (string :tag "Model id"))
   :group 'rat-kingdom)
 
 (defconst rat-kingdom-agent-shell-fallback-agent "claude"
@@ -463,21 +482,46 @@ had before, if it is a function.  Return non-nil if it was answered."
 
 (defun rat-kingdom-agent-shell--buffer-name (run)
   "Return the name for the shell buffer of RUN.
-A worker's, a rat's or a researcher's, starts with its role."
-  (if (member (plist-get run :role) '("rat" "researcher"))
-      (format "%s %s" (plist-get run :role) (plist-get run :id))
+A rat's starts with its role and has its name and id, as \"rat
+Pip-3a9c (S-3a9c.1)\"; see `rat-kingdom-run-label'.  The king's is its
+id."
+  (if (member (plist-get run :role) '("rat" "researcher" "foreman" "consul"))
+      (format "%s %s" (plist-get run :role) (rat-kingdom-run-label run))
     (plist-get run :id)))
+
+(defun rat-kingdom-agent-shell--model (run)
+  "Return the Claude model id RUN is to run, or nil for the default.
+It is RUN's `:model', the model of its story, or else
+`rat-kingdom-worker-model'.  It is nil for the king's run and for a
+run whose agent kind is not `claude'."
+  (let ((model (seq-find (lambda (model)
+                           (and (stringp model) (not (string-empty-p model))))
+                         (list (plist-get run :model)
+                               rat-kingdom-worker-model))))
+    (and model
+         (not (equal (format "%s" (plist-get run :role)) "king"))
+         (equal (rat-kingdom-agent-name
+                 (or (plist-get run :agent)
+                     rat-kingdom-agent-shell-fallback-agent))
+                "claude")
+         model)))
 
 (defun rat-kingdom-agent-shell-run-config (run token)
   "Return the agent config for RUN, whose tool endpoint token is TOKEN.
 It is the config of RUN's `:agent', with the push guards, the run's
-buffer name and its MCP servers."
-  (rat-kingdom-agent-shell--override
-   (rat-kingdom-agent-shell--guard
-    (rat-kingdom-agent-shell-config (plist-get run :agent))
-    (plist-get run :id))
-   :buffer-name (rat-kingdom-agent-shell--buffer-name run)
-   :mcp-servers (rat-kingdom-agent-shell--servers token)))
+buffer name and its MCP servers.  A worker's or foreman's Claude Code
+is given its model, if one is chosen; see
+`rat-kingdom-agent-shell--model'."
+  (let ((config (rat-kingdom-agent-shell--override
+                 (rat-kingdom-agent-shell--guard
+                  (rat-kingdom-agent-shell-config (plist-get run :agent))
+                  (plist-get run :id))
+                 :buffer-name (rat-kingdom-agent-shell--buffer-name run)
+                 :mcp-servers (rat-kingdom-agent-shell--servers token))))
+    (if-let* ((model (rat-kingdom-agent-shell--model run)))
+        (rat-kingdom-agent-shell--override
+         config :default-model-id (lambda () model))
+      config)))
 
 (defun rat-kingdom-agent-shell-start (run prompt)
   "Start an agent-shell for RUN, send it PROMPT and return its buffer.
@@ -501,6 +545,7 @@ RUN has `:resume', take that session up again, with the same agent."
                                            :session-strategy 'new)))))
          (sent nil))
     (with-current-buffer buffer
+      (setq-local rat-kingdom-run-buffer-id id)
       (let ((previous (bound-and-true-p
                        agent-shell-permission-responder-function)))
         (setq-local agent-shell-permission-responder-function
@@ -564,9 +609,83 @@ typed something there that is not yet sent."
                               :shell-buffer buffer))
         t))))
 
-(defun rat-kingdom-agent-shell-stop (buffer)
-  "Stop the agent in BUFFER by killing the buffer."
+;;;; The session's transcript
+
+(defcustom rat-kingdom-agent-shell-session-end-command
+  '("cm" "hook" "session-end" "--transcript")
+  "The command given a stopped agent's Claude Code transcript, or nil.
+A list of a program and its arguments; the transcript's path is
+appended as the last argument.  The command runs detached when an
+agent is stopped, in the user's home directory, and is not waited
+for.  It stands in for Claude Code's SessionEnd hooks, which do not
+run when the agent's process is killed with its buffer.  Nothing
+happens when the program is not found through the variable
+`exec-path', or when no transcript is found.  nil turns this off."
+  :type '(choice (const :tag "Off" nil)
+                 (repeat :tag "Program and arguments" string))
+  :group 'rat-kingdom)
+
+(defun rat-kingdom-agent-shell-project-slug (directory)
+  "Return the name Claude Code keeps DIRECTORY's transcripts under.
+That is DIRECTORY made absolute, without a trailing slash, with every
+character that is not a letter or a digit replaced by `-'."
+  (replace-regexp-in-string "[^a-zA-Z0-9]" "-"
+                            (directory-file-name
+                             (expand-file-name directory))))
+
+(defun rat-kingdom-agent-shell--transcript-root ()
+  "Return the directory Claude Code keeps every project's transcripts in."
+  (expand-file-name "projects"
+                    (or (getenv "CLAUDE_CONFIG_DIR") "~/.claude")))
+
+(defun rat-kingdom-agent-shell-transcript (buffer)
+  "Return the Claude Code transcript of the agent in BUFFER, or nil.
+The transcript is <session id>.jsonl under the project's slug in
+`CLAUDE_CONFIG_DIR', or ~/.claude, where the session id is the ACP
+session's and the project is BUFFER's directory.  Without a session id
+it is the most recently modified transcript there.  nil when BUFFER is
+dead or no such file exists."
   (when (buffer-live-p buffer)
+    (with-current-buffer buffer
+      (let* ((directory (expand-file-name
+                         (rat-kingdom-agent-shell-project-slug default-directory)
+                         (rat-kingdom-agent-shell--transcript-root)))
+             (session (map-nested-elt (bound-and-true-p agent-shell--state)
+                                      '(:session :id)))
+             (named (and session
+                         (expand-file-name (concat session ".jsonl")
+                                           directory))))
+        (cond ((and named (file-regular-p named)) named)
+              ((file-directory-p directory)
+               (seq-reduce (lambda (newest file)
+                             (if (or (null newest)
+                                     (file-newer-than-file-p file newest))
+                                 file
+                               newest))
+                           (directory-files directory t "\\.jsonl\\'" t)
+                           nil)))))))
+
+(defun rat-kingdom-agent-shell--end-session (buffer)
+  "Give the transcript of the agent in BUFFER to the session-end command.
+See `rat-kingdom-agent-shell-session-end-command'.  Nothing is run
+when it is nil, its program is not found or there is no transcript,
+and nothing that goes wrong is signalled, so that stopping the agent
+cannot be held up."
+  (condition-case err
+      (when-let* ((command rat-kingdom-agent-shell-session-end-command)
+                  ((executable-find (car command)))
+                  (transcript (rat-kingdom-agent-shell-transcript buffer)))
+        (let ((default-directory (expand-file-name "~/")))
+          (apply #'call-process (car command) nil 0 nil
+                 (append (cdr command) (list transcript)))))
+    (error (message "rat-kingdom: session-end command not run: %s"
+                    (error-message-string err)))))
+
+(defun rat-kingdom-agent-shell-stop (buffer)
+  "Stop the agent in BUFFER by killing the buffer.
+Its transcript is given to the session-end command first."
+  (when (buffer-live-p buffer)
+    (rat-kingdom-agent-shell--end-session buffer)
     (let ((kill-buffer-query-functions nil))
       (kill-buffer buffer))))
 

@@ -1610,13 +1610,17 @@ gives them."
 
 (defun rat-kingdom-epic-foreman-phrase (space record)
   "Return what the epic RECORD in SPACE has to say of its foreman, or nil.
-That is \"foreman F-ID (AGENT, STATE)\": STATE is working or idle while
+That is \"foreman F-ID (NAME, AGENT, STATE)\": NAME is the rat's display
+name, as Pip-T-1, and STATE is working or idle while
 its agent runs, starting before then, and stopped, with why if it did
 not stop on purpose, after."
   (when-let* ((id (rat-kingdom-epic--payload record :foreman)))
     (let* ((run (rat-kingdom-run-get space id))
            (state (plist-get run :state)))
-      (format "foreman %s (%s, %s)" id
+      (format "foreman %s (%s%s, %s)" id
+              (if-let* ((name (rat-kingdom-run-display-name run)))
+                  (concat name ", ")
+                "")
               (or (plist-get run :agent) rat-kingdom-agent-shell-fallback-agent)
               (cond ((rat-kingdom-run-live-p id)
                      (if (rat-kingdom-run-busy-p id) "working" "idle"))
@@ -1941,7 +1945,8 @@ task_create" id))
            (branch (and feature-branch (rat-kingdom-epic-branch-name id))))
       (when branch
         (rat-kingdom-epic--prepare-branch
-         (plist-get (rat-kingdom-repo-get space repo) :path) branch target))
+         (plist-get (rat-kingdom-repo-get space repo) :path) branch target)
+        (rat-kingdom-config-push-guard-branch space repo branch))
       (rat-kingdom-space-put
        space 'epic :scope repo :identity id
        :payload (append

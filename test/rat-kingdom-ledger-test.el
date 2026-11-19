@@ -16,6 +16,7 @@
 ;;; Code:
 
 (require 'ert)
+(require 'rat-kingdom-test-helper)
 (require 'iso8601)
 (require 'rat-kingdom)
 (require 'rat-kingdom-ledger)

@@ -71,7 +71,9 @@
 ;; A story names the agent its workers run, `:agent' on its token,
 ;; fixed when it starts: "claude" or "codex", or another kind of
 ;; rat-kingdom-agent-shell.el.  Every worker it is given, after a failed
-;; check, a review or a restart too, runs that agent.
+;; check, a review or a restart too, runs that agent.  A story may name
+;; the Claude model its workers run too, `:model' on its token, which
+;; comes before `rat-kingdom-worker-model'.
 ;;
 ;; `rat-kingdom-story-reconcile' is the recovery after Emacs stopped
 ;; with work in flight (DESIGN.md, section 8.4): a worker that was cut
@@ -469,7 +471,8 @@ the token."
     id))
 
 (defun rat-kingdom-story-start (space repo title &optional description id
-                                      workflow task agent epic target)
+                                      workflow task agent epic target
+                                      model)
   "Start a story in SPACE for the repository REPO and return its id.
 TITLE says what to do in a line; DESCRIPTION gives the acceptance
 criteria.  ID names the story; one is made up if it is nil.  WORKFLOW
@@ -487,7 +490,9 @@ given, is the id of the epic the story was started for, kept on its
 token as `:epic'.  TARGET, if given, is the branch the story's worktree
 is cut from and its work merged into, instead of the repository's
 target, kept on its token as `:target'; it must be an existing local
-branch that is not checked out (`rat-kingdom-story-check-target')."
+branch that is not checked out (`rat-kingdom-story-check-target').
+MODEL, if given, is the Claude model id every worker of the story runs,
+kept on its token as `:model', instead of `rat-kingdom-worker-model'."
   (unless (rat-kingdom-repo-get space repo)
     (error "No repository called %s is registered" repo))
   (let ((id (or id (rat-kingdom-story--new-id space)))
@@ -530,7 +535,9 @@ branch that is not checked out (`rat-kingdom-story-check-target')."
                          :entered (funcall rat-kingdom-space-now-function))
                    (and task (list :task task))
                    (and epic (list :epic epic))
-                   (and target (list :target target)))
+                   (and target (list :target target))
+                   (and model (not (string-empty-p model))
+                        (list :model model)))
          :actor "user"))
       (when task
         (rat-kingdom-task-claim-for-story space repo task id))
@@ -591,7 +598,7 @@ Available tasks in status" repo id (error-message-string err)))))))
 (cl-defun rat-kingdom-story-start-for-task (space repo task
                                                   &key title description
                                                   agent workflow epic found
-                                                  target)
+                                                  target model)
   "Start a story in SPACE for the task TASK of the repository REPO.
 Return the story's id.  The task is looked up as `rat-kingdom-story-task'
 does, unless FOUND gives it already.  TITLE defaults to the task's.
@@ -599,9 +606,9 @@ Without DESCRIPTION the story's is the task's own text; with it, or if
 the task has none, it is DESCRIPTION followed by a line naming the task.
 AGENT and WORKFLOW default to the task's rk-agent: and rk-workflow:
 labels, then to the usual defaults.  EPIC, if given, is recorded on the
-token as `:epic', and TARGET as `:target'.  The task's `available'
-tuple is taken and the task is claimed for the story; see
-`rat-kingdom-story-start'."
+token as `:epic', TARGET as `:target' and MODEL as `:model'.  The
+task's `available' tuple is taken and the task is claimed for the
+story; see `rat-kingdom-story-start'."
   (let* ((found (or found (rat-kingdom-story-task space repo task)))
          (title (or title (plist-get found :title)
                     (error "Give a title, or a task to take it from")))
@@ -616,7 +623,74 @@ tuple is taken and the task is claimed for the story; see
      (or workflow (rat-kingdom-task-workflow found))
      task
      (or agent (rat-kingdom-task-agent found))
-     epic target)))
+     epic target model)))
+
+(defun rat-kingdom-story-work-place (workflow)
+  "Return the place of WORKFLOW where a worker's finished work goes.
+That is where the spawn steps from its start place lead, one after
+another, such as checking in the workflow story: work done without a
+worker, such as a consul's, starts there.  Signal an error if the
+workflow's start place takes no spawn step."
+  (let ((place (plist-get workflow :start))
+        (seen nil)
+        step)
+    (while (and (setq step (rat-kingdom-workflow-step workflow place))
+                (eq (plist-get step :kind) :spawn)
+                (not (member place seen)))
+      (push place seen)
+      (setq place (plist-get step :to)))
+    (unless seen
+      (error "The workflow %s does not start with a worker, so it cannot \
+take work that is already done" (plist-get workflow :name)))
+    place))
+
+(cl-defun rat-kingdom-story-start-from-branch (space repo title
+                                                     &key description branch
+                                                     worktree target summary
+                                                     agent)
+  "Start a story in SPACE for REPO from work already done on BRANCH.
+Return the story's id.  The work is committed on BRANCH, which is
+checked out in WORKTREE and was cut from TARGET, the repository's
+target.  The story follows the configuration's `:workflow' for REPO
+and starts at the place a worker's finished work goes,
+`rat-kingdom-story-work-place', with BRANCH's tip as its commit, so
+that it is checked, reviewed and merged as a worker's work is.  TITLE
+and DESCRIPTION are as for `rat-kingdom-story-start'; SUMMARY stands for
+a worker's summary.  AGENT is the agent of any worker it is given later,
+by default the configured `:agents' `:worker'."
+  (unless (rat-kingdom-repo-get space repo)
+    (error "No repository called %s is registered" repo))
+  (let* ((id (rat-kingdom-story--new-id space))
+         (where (list :scope repo :payload nil))
+         (name (rat-kingdom-workflow--name
+                (rat-kingdom-story-config space where :workflow)))
+         (workflow (or (condition-case err
+                           (rat-kingdom-config-build-workflow space name
+                                                              :repo repo)
+                         (rat-kingdom-config-error (error "%s" (cadr err))))
+                       (error "There is no workflow called %s" name)))
+         (path (plist-get (rat-kingdom-repo-get space repo) :path)))
+    (rat-kingdom-space-out
+     space 'story :scope repo :identity id :owner id
+     :payload (append
+               (list :workflow name
+                     :at (rat-kingdom-story-work-place workflow)
+                     :phase "enter" :title title :description description
+                     :agent (rat-kingdom-agent-name
+                             (or agent
+                                 (plist-get (rat-kingdom-story-config
+                                             space where :agents)
+                                            :worker)))
+                     :attempt 0 :branch branch :worktree worktree
+                     :commit (rat-kingdom-git-rev path branch)
+                     :summary summary
+                     :entered (funcall rat-kingdom-space-now-function))
+               (and target
+                    (not (equal target (rat-kingdom-story-repo-target
+                                        space repo)))
+                    (list :target target)))
+     :actor "user")
+    id))
 
 (defun rat-kingdom-story-warnings (space repo &optional target)
   "Return what a person starting a story in REPO in SPACE should know.
@@ -648,14 +722,17 @@ checkout first." target)))
 
 (defun rat-kingdom-story-sync (space repo)
   "Bring the target branch of REPO in SPACE up to the checkout's HEAD.
-The target is only ever moved forward.  Return a sentence saying what
-was done or why nothing was."
+The target is only ever moved forward, and is guarded from a push that
+names no remote if the configuration's :git :push-guard says so
+\(`rat-kingdom-config-push-guard-branch').  Return a sentence saying
+what was done or why nothing was."
   (let* ((record (or (rat-kingdom-repo-get space repo)
                      (error "No repository called %s is registered" repo)))
          (path (plist-get record :path))
          (target (rat-kingdom-story-repo-target space repo))
          (head (rat-kingdom-git-rev path "HEAD"))
          (old (rat-kingdom-git-rev path target)))
+    (rat-kingdom-config-push-guard-branch space record target)
     (cond
      ((equal head old)
       (format "%s is already at the checkout's HEAD." target))
@@ -689,9 +766,10 @@ Each is called with SPACE, the token STORY and RUN-ID."
     (nreverse sections)))
 
 (defun rat-kingdom-story--prompt (space story run-id worktree branch target
-                                        earlier &optional role step)
+                                        earlier &optional role step name)
   "Return what the worker RUN-ID is told about the token STORY in SPACE.
-It works in WORKTREE on BRANCH, cut from TARGET.  EARLIER is non-nil
+It works in WORKTREE on BRANCH, cut from TARGET.  NAME, if given, is
+the rat's name, which it is told with its id.  EARLIER is non-nil
 if the story has been worked on before.  ROLE is the worker's role, by
 default a rat; it chooses the instructions the prompt begins with
 \(`rat-kingdom-run-instructions').  STEP is the step that starts the
@@ -703,7 +781,12 @@ under \"For this step (STEP):\".  The sections from
     (concat (rat-kingdom-run-instructions (or role "rat"))
             (format "\n\nYou are %s.\nWorktree: %s\nBranch: %s (cut from %s)\
 \n\nTask %s: %s\n"
-                    run-id worktree branch target (plist-get story :identity)
+                    (if name
+                        (format "%s, called %s" run-id
+                                (rat-kingdom-run-display-name
+                                 (list :id run-id :name name)))
+                      run-id)
+                    worktree branch target (plist-get story :identity)
                     (plist-get payload :title))
             (when-let* ((description (plist-get payload :description)))
               (concat "\n" description "\n"))
@@ -818,7 +901,8 @@ the step's `:attempts', else the configuration's."
                (ignore-errors (rat-kingdom-git path "branch" "-D" branch))
                (signal (car err) (cdr err)))))
            (t (rat-kingdom-git path "worktree" "add" "-b" branch worktree
-                               target))))
+                               target)))
+          (rat-kingdom-config-push-guard-branch space repo branch))
         (condition-case err
             (if setup
                 (progn
@@ -831,15 +915,17 @@ the step's `:attempts', else the configuration's."
                space (list 'result :scope (plist-get story :scope) :identity id))
               (rat-kingdom-space-retract
                space (list 'blocked :scope (plist-get story :scope) :identity id))
-              (rat-kingdom-run-create
-               space :id run-id :repo (plist-get repo :name) :story id
-               :role (plist-get step :with)
-               :agent (plist-get payload :agent)
-               :worktree worktree :branch branch :target target
-               :prompt (rat-kingdom-story--prompt
-                        space story run-id worktree branch target
-                        (or known (> attempt 1)) (plist-get step :with)
-                        step))
+              (let ((name (rat-kingdom-run-new-name space)))
+                (rat-kingdom-run-create
+                 space :id run-id :repo (plist-get repo :name) :story id
+                 :role (plist-get step :with) :name name
+                 :agent (plist-get payload :agent)
+                 :model (plist-get payload :model)
+                 :worktree worktree :branch branch :target target
+                 :prompt (rat-kingdom-story--prompt
+                          space story run-id worktree branch target
+                          (or known (> attempt 1)) (plist-get step :with)
+                          step name)))
               (rat-kingdom-story--wait space story step "worker"
                                        :run run-id :branch branch
                                        :worktree worktree :attempt attempt
@@ -1597,6 +1683,8 @@ releases the task and its epic does not count it.  The story waits for
                         when (plist-get payload key)
                         append (list key (plist-get payload key)))
                (and target (list :target target))
+               (and (plist-get payload :model)
+                    (list :model (plist-get payload :model)))
                (and epic (list :config-epic epic))
                (and task (list :config-task task))
                (list :entered (funcall rat-kingdom-space-now-function)))
@@ -1847,7 +1935,10 @@ CHANGES is merged into its payload."
   (rat-kingdom-story--leave rat-kingdom-reaction-space
                             (car rat-kingdom-reaction-tuples) :blocked
                             :reason (format "The worker %s is blocked: %s"
-                                            $run $why)))
+                                            (rat-kingdom-run-label
+                                             (rat-kingdom-run-get
+                                              rat-kingdom-reaction-space $run))
+                                            $why)))
 
 (rat-kingdom-defreaction rat-kingdom-story-worker-gone
   "Stop a story whose worker's session ended before it reported."
@@ -1859,7 +1950,8 @@ CHANGES is merged into its payload."
      rat-kingdom-reaction-space story
      (format "The session of the worker %s ended before it reported%s. Its \
 work so far is in %s."
-             $run
+             (rat-kingdom-run-label (rat-kingdom-run--record
+                                     (cadr rat-kingdom-reaction-tuples)))
              (if-let* ((why (plist-get run :error))) (concat ": " why) "")
              (plist-get (plist-get story :payload) :worktree)))))
 

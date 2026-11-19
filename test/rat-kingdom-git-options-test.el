@@ -13,6 +13,7 @@
 ;;; Code:
 
 (require 'ert)
+(require 'rat-kingdom-test-helper)
 (require 'rat-kingdom)
 (require 'rat-kingdom-config)
 (require 'rat-kingdom-story-test)
@@ -119,13 +120,13 @@ ID is the epic's or task's id for those layers."
       (should (string-search (cadr case) (car problems)))))
   ;; The default is today's behaviour.
   (should (equal (plist-get (rat-kingdom-config-defaults) :git)
-                 '(:branch "rats/%i" :integrate merge))))
+                 '(:branch "rats/%i" :integrate merge :push-guard t))))
 
 (ert-deftest rat-kingdom-git-options-test-layers-and-config-set ()
   (rat-kingdom-story-test-with-repo (space path)
     (let ((rat-kingdom-config--errors (make-hash-table :test #'equal)))
       (should (equal (rat-kingdom-config-get space :git :repo "demo")
-                     '(:branch "rats/%i" :integrate merge)))
+                     '(:branch "rats/%i" :integrate merge :push-guard t)))
       ;; config_set refuses a bad format or mode, writing nothing.
       (dolist (value '((:branch "x/%q") (:branch "bad name %i")
                        (:integrate fold)))
@@ -143,7 +144,7 @@ ID is the epic's or task's id for those layers."
       (rat-kingdom-git-options-test--set space '(:branch "t/%i") 'task "T-9")
       (should (equal (rat-kingdom-config-get space :git :repo "demo"
                                              :task "T-9")
-                     '(:branch "t/%i" :integrate rebase)))
+                     '(:branch "t/%i" :integrate rebase :push-guard t)))
       (let ((show (rat-kingdom-config-show space "demo" :task "T-9")))
         (should (string-search "- :git :branch \"t/%i\" (task)" show))
         (should (string-search "- :git :integrate rebase (repo)" show)))
@@ -152,7 +153,7 @@ ID is the epic's or task's id for those layers."
         (insert "(:git (:branch \"x/%z\" :integrate squash))\n"))
       (clrhash rat-kingdom-config--files)
       (should (equal (rat-kingdom-config-get space :git :repo "demo")
-                     '(:branch "rats/%i" :integrate merge)))
+                     '(:branch "rats/%i" :integrate merge :push-guard t)))
       (should (string-search "%z, which is not a specifier"
                              (cadr (assoc (expand-file-name ".rk/config.eld"
                                                             path)
@@ -166,15 +167,16 @@ ID is the epic's or task's id for those layers."
     ;; Stored on the repo tuple, read back as the registration layer.
     (rat-kingdom-repo-add space path :git '(:branch "r/%i" :integrate squash))
     (should (equal (assq :git (rat-kingdom-config-explain space :repo "demo"))
-                   '(:git (:branch "r/%i" :integrate squash)
-                          (:branch registration :integrate registration))))
+                   '(:git (:branch "r/%i" :integrate squash :push-guard t)
+                          (:branch registration :integrate registration
+                                   :push-guard defaults))))
     ;; repo_add takes it as Emacs Lisp text.
     (let ((answer (rat-kingdom-git-options-test--king
                    "repo_add" (cons 'path path)
                    '(git . "(:integrate rebase)"))))
       (should-not (cdr answer)))
     (should (equal (rat-kingdom-config-get space :git :repo "demo")
-                   '(:branch "rats/%i" :integrate rebase)))
+                   '(:branch "rats/%i" :integrate rebase :push-guard t)))
     ;; Without it the registration is as before.
     (rat-kingdom-repo-add space path)
     (should-not (plist-member (rat-kingdom-repo-get space "demo") :git))))

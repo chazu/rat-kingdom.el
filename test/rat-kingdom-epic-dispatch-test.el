@@ -12,6 +12,7 @@
 ;;; Code:
 
 (require 'ert)
+(require 'rat-kingdom-test-helper)
 (require 'rat-kingdom-epic)
 (require 'rat-kingdom-story-test)
 (require 'rat-kingdom-task-test)
@@ -316,7 +317,8 @@ starts until epic_resume. Its stories in progress carry on: %s." a))))
       (let ((news (rat-kingdom-king-test--news space)))
         (should (eql (length news) 1))
         (should (string-prefix-p (format "%s (Base) has stopped at blocked. \
-Reason: The worker %s.1 is blocked: The base is unclear." a a)
+Reason: The worker %s is blocked: The base is unclear."
+                                         a (rat-kingdom-run-label (concat a ".1")))
                                  (car news)))
         (should (string-search "It is the story of the task T-2 of the epic \
 T-1 (Plan). Tasks of the epic now waiting on it: T-3 (directly), T-4 \
@@ -325,8 +327,9 @@ T-1 (Plan). Tasks of the epic now waiting on it: T-3 (directly), T-4 \
       (should (string-search (format "    held up behind the stopped %s (T-2): \
 T-3 (directly), T-4 (directly), T-5 (through T-3)" a)
                              (rat-kingdom-king-test--ok "status")))
-      (should (string-search (format "%s (T-2) has stopped: The worker %s.1 is \
-blocked: The base is unclear. Waiting on it: T-3" a a)
+      (should (string-search (format "%s (T-2) has stopped: The worker %s is \
+blocked: The base is unclear. Waiting on it: T-3"
+                                     a (rat-kingdom-run-label (concat a ".1")))
                              (rat-kingdom-king-test--ok "epic_show"
                                                         '(epic . "T-1"))))
       ;; Nothing else starts, and the parked task is not held.

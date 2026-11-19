@@ -10,6 +10,7 @@
 ;;; Code:
 
 (require 'ert)
+(require 'rat-kingdom-test-helper)
 (require 'rat-kingdom-agent-shell)
 (require 'rat-kingdom-king)
 (require 'rat-kingdom-story-test)
@@ -140,10 +141,18 @@ is the user's `agent-shell-openai-default-session-mode-id', bound to
     (funcall (map-elt config :client-maker) nil)))
 
 (defun rat-kingdom-push-test--without-git-config (environment)
-  "Return ENVIRONMENT without its GIT_CONFIG_ variables.
-So that a test of an agent's environment holds when the tests
-themselves run in one."
-  (seq-remove (lambda (entry) (string-prefix-p "GIT_CONFIG_" entry))
+  "Return ENVIRONMENT without the GIT_CONFIG_ variables a session sets.
+Those are GIT_CONFIG_COUNT, GIT_CONFIG_KEY_n, GIT_CONFIG_VALUE_n and
+GIT_CONFIG_PARAMETERS, so that a test of an agent's environment holds
+when the tests themselves run in one.  GIT_CONFIG_GLOBAL and
+GIT_CONFIG_NOSYSTEM stay: `rat-kingdom-test-environment' sets them to
+keep the user's own Git configuration out of the tests."
+  (seq-remove (lambda (entry)
+                (string-match-p (rx bos "GIT_CONFIG_"
+                                    (or "COUNT" "PARAMETERS"
+                                        (seq (or "KEY_" "VALUE_") (+ digit)))
+                                    "=")
+                                entry))
               environment))
 
 (ert-deftest rat-kingdom-push-test-codex-config ()

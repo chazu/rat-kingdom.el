@@ -305,6 +305,7 @@ read."
          (awaiting (plist-get payload :awaiting))
          (run-id (plist-get payload :run))
          (run (and run-id (rat-kingdom-run-get space run-id)))
+         (worker (if run (rat-kingdom-run-label run) run-id))
          (state (plist-get run :state))
          (next "It will be given to the story's next worker, in its brief")
          (unread "If the story is merged without going back to a worker, \
@@ -312,12 +313,12 @@ the message will not be read."))
     (cond
      ((not (rat-kingdom-space-rd space (list 'message
                                              :id (plist-get tuple :id))))
-      (format "Delivered now to worker %s." run-id))
+      (format "Delivered now to worker %s." worker))
      ((rat-kingdom-message--worker space story)
       (format "Worker %s is %s, so the message waits. It is given to the \
 worker when its current turn ends; the worker can also read it sooner with \
 inbox."
-              run-id
+              worker
               (if (rat-kingdom-run-busy-p run-id)
                   "in the middle of a turn"
                 "not taking prompts just now")))
@@ -325,18 +326,18 @@ inbox."
       (format "Worker %s is starting, so the message waits. It is given to \
 the worker when its first turn ends; the worker can also read it sooner with \
 inbox."
-              run-id))
+              worker))
      ((and (equal awaiting "worker")
            (member state '("interrupted" "working")))
       ;; Working, but with no agent in this Emacs: Emacs was restarted
       ;; and the run is about to be found interrupted.
       (format "%s's worker %s was cut off by a restart. %s, when it is \
 replaced."
-              story run-id next))
+              story worker next))
      ((equal awaiting "worker")
       (format "%s's worker %s has already %s, so it will not be given the \
 message. %s, if it gets one. %s"
-              story run-id
+              story worker
               (pcase state
                 ("ready" "reported that it is done")
                 ("blocked" "reported that it is blocked")

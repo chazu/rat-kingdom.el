@@ -10,6 +10,7 @@
 ;;; Code:
 
 (require 'ert)
+(require 'rat-kingdom-test-helper)
 (require 'rat-kingdom)
 (require 'rat-kingdom-story-test)
 (require 'rat-kingdom-task-test)
@@ -93,9 +94,9 @@ Return its directory.  It is not registered."
                        (buffer-string))
                      ""))
       ;; br init never runs there, but the exclude line follows :track,
-      ;; whose default keeps .beads (and .rk) out of Git.
+      ;; whose default keeps .beads (and .rk and .a2ui) out of Git.
       (should (equal (rat-kingdom-task-test--exclude other)
-                     (concat exclude "/.rk/\n/.beads/\n")))
+                     (concat exclude "/.rk/\n/.beads/\n/.a2ui/\n")))
       (should (equal (rat-kingdom-task-test--status other) "")))))
 
 (ert-deftest rat-kingdom-git-test-register-fails-cleanly ()
@@ -149,17 +150,18 @@ Return its directory.  It is not registered."
 
 (ert-deftest rat-kingdom-git-test-register-applies-track ()
   (rat-kingdom-story-test-with-repo (space path)
-    ;; By default both are kept out: br init adds its line, then :track
-    ;; the other.
+    ;; By default all are kept out: br init adds its line, then :track
+    ;; the others.
     (should (equal (rat-kingdom-git-test--exclude-lines path)
-                   '("/.beads/" "/.rk/")))
+                   '("/.beads/" "/.rk/" "/.a2ui/")))
     ;; :track (:beads t): br init adds no line, and none is left.
     (rat-kingdom-git-test--global-config "(:track (:beads t))")
     (let* ((other (rat-kingdom-git-test--repo space "other"))
            (repo (rat-kingdom-repo-add space other)))
       (should (plist-get repo :task-initialized))
       (should-not (plist-get repo :track-warnings))
-      (should (equal (rat-kingdom-git-test--exclude-lines other) '("/.rk/")))
+      (should (equal (rat-kingdom-git-test--exclude-lines other)
+                     '("/.rk/" "/.a2ui/")))
       (should (equal (rat-kingdom-task-test--status other) "?? .beads/"))
       ;; Registered again with the line there by hand: it is taken out.
       (with-temp-buffer
@@ -169,7 +171,8 @@ Return its directory.  It is not registered."
         (insert "/.beads/\n")
         (write-region nil nil (expand-file-name ".git/info/exclude" other)))
       (rat-kingdom-repo-add space other)
-      (should (equal (rat-kingdom-git-test--exclude-lines other) '("/.rk/"))))))
+      (should (equal (rat-kingdom-git-test--exclude-lines other)
+                     '("/.rk/" "/.a2ui/"))))))
 
 (ert-deftest rat-kingdom-git-test-register-warns-of-tracked-beads ()
   (rat-kingdom-story-test-with-repo (space _path)
@@ -200,20 +203,20 @@ already tracks 1 file in \\.beads"
       (should (equal (rat-kingdom-git other "diff" "--cached" "--name-only")
                      ""))
       (should (equal (rat-kingdom-git-test--exclude-lines other)
-                     '("/.rk/" "/.beads/"))))))
+                     '("/.rk/" "/.beads/" "/.a2ui/"))))))
 
 (ert-deftest rat-kingdom-git-test-mode-applies-track ()
   (rat-kingdom-story-test-with-repo (space path)
     (let ((rat-kingdom-mode nil)
           (rat-kingdom--watch-timer nil))
       (should (equal (rat-kingdom-git-test--exclude-lines path)
-                     '("/.beads/" "/.rk/")))
+                     '("/.beads/" "/.rk/" "/.a2ui/")))
       (rat-kingdom-git-test--global-config "(:track (:rk t))")
       (unwind-protect
           (rat-kingdom-mode 1)
         (rat-kingdom-mode -1))
       (should (equal (rat-kingdom-git-test--exclude-lines path)
-                     '("/.beads/")))
+                     '("/.beads/" "/.a2ui/")))
       (should (equal (rat-kingdom-task-test--status path) "")))))
 
 (ert-deftest rat-kingdom-git-test-repo-add-tool-reports-init ()

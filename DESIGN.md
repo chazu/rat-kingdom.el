@@ -711,11 +711,11 @@ the list, other than whitespace and comments, makes the file invalid.
 | `:commands` | a property list from a command name (`:lint`) to an argument list of strings, run without a shell | global, repo |
 | `:setup` | an argument list of strings, or a list of command names | global, repo |
 | `:check` | as `:setup` | all |
-| `:agents` | a property list: `:worker`, `:foreman`, each an agent kind, `claude` or `codex` | all |
+| `:agents` | a property list: `:worker`, `:foreman`, `:consul`, each an agent kind, `claude` or `codex` | all |
 | `:timeouts` | a property list: `:worker`, `:check`, each a number of seconds | all |
 | `:attempts` | how many workers a story is given before it is parked, a positive integer | all |
 | `:max-workers` | how many workers run at once, across all repositories, a positive integer | global |
-| `:track` | a property list: `:rk`, `:beads`, each `t` to track that directory in Git or `nil` to keep it out | global, repo |
+| `:track` | a property list: `:rk`, `:beads`, `:a2ui`, each `t` to track that directory in Git or `nil` to keep it out | global, repo |
 | `:mixins` | a list of mixin names, symbols, applied to whatever workflow a story runs (7.1) | global, registration, repo, epic, task |
 | `:git` | a property list: `:branch`, a format for story branch names; `:integrate`, `merge`, `rebase` or `squash` | all |
 
@@ -763,15 +763,16 @@ the list, other than whitespace and comments, makes the file invalid.
   `rat-kingdom-story-default-workflow`, `:target` from
   `rat-kingdom-git-default-target`, `:agents :worker` from
   `rat-kingdom-default-agent`, `:agents :foreman` is `claude` (as the
-  foreman runs today), `:timeouts` from `rat-kingdom-story-timeouts` (its
+  foreman runs today), `:agents :consul` from `rat-kingdom-default-agent`,
+  `:timeouts` from `rat-kingdom-story-timeouts` (its
   `:spawn` entry is `:worker`), `:attempts` from
   `rat-kingdom-story-attempts`, `:max-workers` from
   `rat-kingdom-story-max-workers`, `:track :beads` from
   `rat-kingdom-task-br-untracked` (non-nil there is `nil` here), and
-  `:track :rk` is `nil`. There is no default `:commands`, `:setup` or
-  `:check`. `:git` is `(:branch "rats/%i" :integrate merge)`, the
-  behaviour from before `:git` existed, and there is no default
-  `:mixins`.
+  `:track :rk` and `:track :a2ui` are `nil`. There is no default
+  `:commands`, `:setup` or `:check`. `:git` is
+  `(:branch "rats/%i" :integrate merge)`, the behaviour from before
+  `:git` existed, and there is no default `:mixins`.
 - Registration stays a layer of its own, between global and repo, so a
   repository registered before configuration existed needs nothing
   migrated. Its values are written only by registering.
@@ -811,7 +812,7 @@ reason (7.2). `config_set` refuses such a change before it is made; only
 a hand-edited file can cause it.
 
 **`:track`.** The engine never commits anything. `:track` only adds or
-removes the line `/.rk/` or `/.beads/` in the repository's
+removes the line `/.rk/`, `/.beads/` or `/.a2ui/` in the repository's
 `info/exclude`, in the directory `git rev-parse --git-common-dir` names,
 which worktrees share. It never writes `.gitignore`.
 
@@ -833,6 +834,10 @@ which worktrees share. It never writes `.gitignore`.
   follows `:track` like any other: kept out by default, with the warning
   above if Git already tracks it. A user who keeps `.beads` in Git sets
   `:track (:beads t)`.
+- `:track :a2ui` is for `.a2ui`, where a2ui (`a2ui-library-directory`)
+  saves UIs in the user's checkout. It is kept out by default, so a saved
+  UI is not committed and pushed by accident. A user who keeps saved UIs
+  in Git sets `:track (:a2ui t)`.
 - Built: `rat-kingdom-config-track-apply` (one repository, returning the
   lines added and removed and any warnings, which `status` and
   `repo_add` also show), `rat-kingdom-config-track-apply-all` (mode
@@ -993,6 +998,24 @@ Run states, kept distinct as in rk2: `starting`, `working`, `ready`,
 `blocked`, `stopped`, `exited` (its session ended before it reported) and
 `interrupted` (Emacs stopped while it worked). A run that cannot be
 started is `exited` with the error.
+
+**Built: names.** Every rat, that is every run but the king's (workers,
+researchers, foremen, consuls), has a name, `:name` in its run record,
+taken in turn from `rat-kingdom-rat-names` (Pip, Nibbles, Whiskers and
+some sixty more, each one word). The place in the list is kept in the
+file `rat-names` in `rat-kingdom-directory`, so it carries on after a
+restart, and a name a live rat holds is skipped: one whose run is
+`starting`, `working` or `interrupted`, or whose agent runs in this
+Emacs, or a consul not yet dismissed. If every name is held, the next is
+numbered, as Pip2. A name is shown with the run's suffix, the four hex
+digits of its story or consul, or the epic's id for a foreman: Pip-3a9c
+for S-3a9c's first worker, Nibbles-3a9c for its second, Bean-T-1 for the
+foreman F-T-1. People see it with the id beside it, "Pip-3a9c
+(S-3a9c.1)", in agent-shell buffer names ("rat Pip-3a9c (S-3a9c.1)"),
+status lines, `story_show`'s worker line, `tell`'s answers and the
+engine's news, and a worker is told its own in its prompt. Ids stay the
+references every tool takes. A foreman or consul taken up again after a
+restart keeps its name.
 
 A story's run counts against the worker limit (section 7.2) while it is
 `starting` or `working`. Once it reports, its agent sits idle until its
@@ -1198,6 +1221,17 @@ a session (`:resume`) is given the agent of the run that started the
 session. Today only the king resumes sessions. `status` lists the agent
 kinds and the default, and shows each story's agent, as does `story_show`.
 
+The Claude model is chosen apart from the king's. `story_start` takes an
+optional `model`, a Claude model id, and so does `rat-kingdom-story-start`.
+When given, it is recorded on the story token as `:model` and on each of
+its workers' runs (and on a child story's token), like `:agent`. When a
+run's config is made, a run that is not the king's and whose agent kind is
+`claude` is given `:default-model-id`, a function that returns the run's
+`:model`, else `rat-kingdom-worker-model` (default nil). With neither, the
+config keeps agent-shell's own `:default-model-id`. The king's config and
+Codex configs are never changed. `story_show` shows the model when one was
+given.
+
 **Codex runs in full access**, the equivalent of `codex --yolo`. codex-acp
 has four session modes: `read-only`, `workspace-write`, `agent` (its
 default, auto review) and `agent-full-access` (approval policy `never`,
@@ -1247,9 +1281,10 @@ go, and it lets a role be denied built-in tools as well.
 
 | Role | Lifetime | Tools |
 |---|---|---|
-| king | long-lived, global, no worktree | built: `status` (with the tracker tasks available, each with its epic and agent), `repo_add`, `repo_sync`, `workflow_list`, `story_start` (optionally from a `task`, with an `agent`; a task's `rk-agent:` and `rk-workflow:` labels are the defaults), `story_show`, `story_diff`, `story_move`, `story_cancel`, `verdict`, `publish`, `query`, `fact_forget`, `task_create`, `epic_create`, `epic_propose` (the epic plan surface, 14.1), `epic_start` (optionally with a `feature_branch`, and a `foreman`), `epic_pause`, `epic_resume`, `epic_cancel`, `epic_retry`, `epic_show`, `epic_diff`, `epic_verdict` (section 10), `tell`, `foreman_start`, `foreman_stop`, `config_show` and `config_set` (7.3), `doc_list`, `doc_show` and `doc_forget` (7.1), `story_signal` (7.1), `issue_show` (the issue inspector, 14.1), `ledger_show` (the epic ledger, 14.1); `story_start` also takes a rarely needed `target`; built (step 8): `mixins` and `git` on `repo_add` |
+| king | long-lived, global, no worktree | built: `status` (with the tracker tasks available, each with its epic and agent), `repo_add`, `repo_sync`, `workflow_list`, `story_start` (optionally from a `task`, with an `agent` and a `model`; a task's `rk-agent:` and `rk-workflow:` labels are the defaults), `story_show`, `story_diff`, `story_move`, `story_cancel`, `verdict`, `publish`, `query`, `fact_forget`, `task_create`, `epic_create`, `epic_propose` (the epic plan surface, 14.1), `epic_start` (optionally with a `feature_branch`, and a `foreman`), `epic_pause`, `epic_resume`, `epic_cancel`, `epic_retry`, `epic_show`, `epic_diff`, `epic_verdict` (section 10), `tell`, `foreman_start`, `foreman_stop`, `consul_start`, `consul_dismiss`, `config_show` and `config_set` (7.3), `doc_list`, `doc_show` and `doc_forget` (7.1), `story_signal` (7.1), `issue_show` (the issue inspector, 14.1), `ledger_show` (the epic ledger, 14.1), `compact_self` (below); `story_start` also takes a rarely needed `target`; built (step 8): `mixins` and `git` on `repo_add` |
 | rat (worker) | one task | built: `finish`, `block`, `note_fact`, `inbox`, `read_doc` |
 | researcher | one task | built: `write_doc`, `read_doc`, `note_fact`, `inbox`, `block`, `finish` |
+| consul | one repository, until the user dismisses it | built: `write_doc` (its docs are approved at once), `read_doc`, `note_fact` |
 | foreman | one epic, optional | built: `status` (its epic: the `epic_show` view and its stories' lines), `story_show`, `story_diff`, `verdict`, `tell`, `query`, `task_create` (its epic is the parent), `epic_retry`, `story_start` (for a task of its epic), `report` (to the king); every one but `query` limited to its epic |
 | ambient | one event | set by the reaction that starts it |
 
@@ -1257,11 +1292,24 @@ The king's instructions list its tools by name, generated from the tools
 defined for the role `king` (`{tools}` in `rat-kingdom-king-instructions`),
 so a tool added later is listed without editing them. A changed list
 changes the king's fingerprint, and a reload restarts it in place.
+The king's and the consul's instructions, not other roles', say to also
+show an explained concept, implementation detail or plan visually with
+a2ui (`a2ui_catalog`, then `render_a2ui`), keeping the text answer
+complete.
 
 A tool is defined per role: a definition replaces only the tools of its
 name that share a role with it, so the foreman's `status` or `tell` is
 its own and the king's is unchanged, and no role is offered two tools of
 one name.
+
+Other Emacs packages can ask which run an agent-shell buffer holds:
+`(rat-kingdom-buffer-run &optional BUFFER)` returns its role, id, name,
+story, title (the story's, the foreman's epic's, or the consul's topic),
+repo and state, or nil. The agent-shell backend sets the buffer-local
+`rat-kingdom-run-buffer-id` when it makes the buffer, for every role, so
+the lookup does not parse buffer names; the rest is read from the space
+at each call. The variable is permanent-local, a reload keeps it, and a
+restart's new buffers are marked as they are made.
 
 **Built: the foreman** (`rat-kingdom-foreman.el`). An optional long-lived
 agent that runs one epic on the king's behalf, so that a big epic does not
@@ -1295,6 +1343,60 @@ king's, offered to both roles. The foreman has no `publish`, `repo_add`,
 `story_move`, `story_cancel` or `foreman_*`. `status` and `epic_show`
 show "foreman F-… (agent, working)", idle, starting or stopped.
 
+**Built: the consul** (`rat-kingdom-consul.el`). A rat the user asks
+the king for in one registered repository, whose only job is to talk
+with the user about that project, directly, in its own agent-shell
+buffer, while the king is busy. The king does not drive it, review its
+turns or relay messages to it. It is a run like the foreman's, with the
+id `C-` and four hex digits (unique as story ids are, against live and
+archived runs), the role `consul`, and `:repo`, `:name`, `:topic` (an
+optional line), `:branch`, `:worktree`, `:target` and `:started` in its
+record. It works in a worktree of its own under
+`rat-kingdom-directory`, cut from the repository's target on a new
+branch made by `:git :branch` with the id `consul-NAME-XXXX`
+(`rats/consul-pip-3a9c` by default), push-guarded as any `rats/*`
+branch; it never touches the user's checkout. It runs the agent it is
+given, else `:agents :consul` for its repository (7.3), and the model
+it is given, else `rat-kingdom-worker-model`. Its instructions
+(`rat-kingdom-consul-instructions`, with `{name}`, `{repo}`, `{topic}`,
+`{worktree}`, `{branch}`, `{target}`, `{checkout}` and `{tools}`) say:
+explore and explain the code, answer questions, propose designs; write
+docs when asked or when a discussion reaches a decision worth keeping;
+change code and commit in its worktree when the user asks; never push;
+never start stories or epics; wait until the user dismisses it.
+
+Lifecycle:
+
+- **Start.** The king's `consul_start` (`repo`, optionally `topic`,
+  `agent`, `model`) makes the worktree and branch, records the run and
+  starts its agent; its buffer is shown to the user. It answers with the
+  consul's name, id and buffer. `M-x rat-kingdom-consul-start` asks for
+  a repository and a topic and pops to the buffer, which is in
+  `rat-kingdom-consul-mode`.
+- **While it runs.** No engine news goes to it: it has no story and no
+  epic, so nothing routes to it, and the king's story tools (`tell`,
+  `story_*`, `verdict`) never reach it. `status` lists the consuls in a
+  section of their own: id, name, repository, state, age, agent, topic,
+  branch and how many commits it is ahead of the target.
+- **Dismissal.** `consul_dismiss` (`consul`, its id or name, and
+  optionally `force`), or `M-x rat-kingdom-consul-dismiss`, bound to
+  `C-c ~ d` in the consul's buffer, stops its agent. Uncommitted changes
+  in its worktree refuse the dismissal, with the paths, unless `force`
+  is given; then they are committed first as a WIP commit. If its
+  branch then has commits its target lacks, they become a story in the
+  repository's workflow (`rat-kingdom-story-start-from-branch`), titled
+  by the topic or "Consul NAME: <first commit's subject>", on the
+  consul's branch and worktree, at the place a worker's finished work
+  goes (`rat-kingdom-story-work-place`, where the spawn steps from the
+  start lead: `checking` in `story`), so the check runs and the king
+  reviews and merges it as usual. Otherwise its worktree and branch are
+  removed. Its docs stay either way. The answer says which happened.
+  Its run record is then archived.
+- **Restarts.** A consul lasts until it is dismissed. One that Emacs cut
+  off is taken up again in its session, with its name, on reconcile
+  (`rat-kingdom-consul-reconcile`); `M-x rat-kingdom-consul-show` shows
+  its buffer, starting it again if its agent ended.
+
 **Built:** `query` (`rat-kingdom-fact.el`) is the king's read-only look
 into the space (5.5). It takes a `category`, which must be a known one,
 and optionally `scope`, `identity`, `owner`, `contains` (a substring of
@@ -1319,7 +1421,10 @@ and `git` arguments (7.3), are in `rat-kingdom-king.el`.
   or body, a body over `rat-kingdom-doc-max-length` (100000) characters,
   an `id` that is not a doc of this repo, and a run that is not its
   story's working run. It answers with the doc's id.
-- `read_doc` (rat, researcher): `id`. It returns the doc's title, topic,
+- `write_doc` (consul): as the researcher's, but the doc is `approved`
+  when written, since the user asked for it, and belongs to no story;
+  `:run` is the consul's id.
+- `read_doc` (rat, researcher, consul): `id`. It returns the doc's title, topic,
   status and body, and refuses a doc of another repo.
 - `finish` (researcher): `summary` and `checks`, as a rat's. It needs at
   least one doc whose `:story` is this story, and no commit (7.1).
@@ -1340,6 +1445,34 @@ and `git` arguments (7.3), are in `rat-kingdom-king.el`.
   opens.
 - `repo_add` (king) takes optional `mixins` and `git`, Emacs Lisp text read
   as `config_set` reads a value, for the registration layer (7.3).
+
+**Built: the king compacts its own context** (`rat-kingdom-king.el`).
+**Checked, 2026-11-18:** a `/compact` sent as an ordinary prompt through
+agent-shell runs Claude Code's compact command. claude-agent-acp 0.93.0
+hands the prompt text to the SDK as it is. `compact` is not in its
+`UNSUPPORTED_COMMANDS`, so it is in the `available_commands_update` it
+sends; agent-shell keeps that list in its state and uses it only to
+complete and show commands. The adapter knows `/compact`: it hides the
+command when it replays a session, and it settles the compaction's turn,
+which echoes no user message, so the prompt request ends and agent-shell
+emits `turn-complete`. Text after the command, `/compact <focus>`, is
+Claude Code's instructions for the summary. So no restart with a handoff
+is needed.
+
+The king's tool `compact_self`, with an optional `focus`, only schedules
+the compaction, because the king calls it in the middle of its own turn.
+When the king's turn ends (`turn-complete`, then
+`rat-kingdom-run-idle-functions`), the engine sends `/compact <focus>`, the
+focus put on one line, and tries again after
+`rat-kingdom-king-retry-interval` if the king cannot take a prompt. News
+for the king waits in the space while the compaction is scheduled or runs.
+When the compaction's own turn ends, the king is given one prompt: a line
+saying that it was compacted and that it should call `status`, then the
+news that waited. A new session of the king forgets a compaction under
+way; its first prompt says how things stand anyway. `M-x
+rat-kingdom-king-compact` does the same for the user, at once if the king
+is between turns. The state is kept in Emacs, not in the space: a
+compaction asked just before Emacs exits is not done.
 
 The king's chores from imp and rk2 (run the check, merge, close the task,
 clean the worktree, notice a finished worker, start an epic's next
@@ -1694,6 +1827,32 @@ next push. `M-x rat-kingdom-publish` is the user's own way in.
     ("missing config key"), so the block fails closed.
 
   rat-kingdom does not check the user's Codex config.
+- **The user's own pushes of rat-kingdom's branches** are guarded by a
+  fourth layer, in rat-kingdom-git.el, so that the user does not push
+  them by accident from their checkout with `git push` or magit. They go
+  out only through `publish`, when the user asks.
+  4. **pushRemote.** For each branch rat-kingdom makes, it sets
+     `branch.<name>.pushRemote` to `rat-kingdom-refuses-to-push::<name>`
+     in the repository's own Git configuration, in the common Git
+     directory (`rat-kingdom-git-push-guard`). The branches are the
+     target, at `repo_add` (also when the target was already there) and
+     each `repo_sync`, every worker branch a story cuts, and an epic's
+     feature branch. Candidate worktrees are detached and need none. A
+     `git push` that names no remote on such a branch goes to that URL,
+     whatever `push.default` says, and fails with an error that names
+     rat-kingdom. A push that names its remote, such as `git push origin
+     rk/integration`, is unaffected; `publish` pushes that way, so it
+     still works. Nothing is committed and no hook is installed. When
+     Git deletes a branch, it deletes the branch's configuration too.
+
+  The configuration sub-key `:git :push-guard`, default t, may be set at
+  the global and repo layers only. With nil, rat-kingdom sets no guard
+  and takes the guard off every branch that has it; with t, it guards
+  the target, every `rats/*` branch and the branch of every story and
+  epic (`rat-kingdom-config-push-guard-apply`). It is applied to every
+  repository when `rat-kingdom-mode` turns on, and at `config_set`, as
+  `:track` is. A `pushRemote` that is not the guard is never changed,
+  and the user's other branches are never touched.
 - ACP permission requests pass through Emacs, so a policy function can
   refuse a tool call before it runs. This applies only when the session
   mode asks for permission.
@@ -1792,6 +1951,47 @@ started from the surface counts as their approval to run it. The
 surface is shown off the selected window, so it never takes the place
 of the buffer the user is typing in. Not yet: keeping an open plan
 across an Emacs restart.
+
+**Built: the story board**, in `rat-kingdom-board.el`, a first form of
+the factory floor (1). `rat-kingdom-board`, or the king's `board_show`,
+shows the surface "Story board" in the main window: the selected window
+of the selected frame takes it in place of its buffer, unless that is a
+side or dedicated window, when a2ui's main window does; `q` buries it.
+Its columns are phases shared by every workflow: Queued, Working,
+Checking, Review, Merging, Done and Stopped. A story's column comes from
+its token and its workflow: waiting for a free worker, or at a spawn
+step whose worker has not started, is Queued; a final place, or a story
+that ended, is Done; parked, at the failure place, or cancelled is
+Stopped; otherwise the place, the step's name or the step's kind is
+looked up in `rat-kingdom-board-phases` (by default spawn and child
+workflow steps Working, check and run Checking, review and gate Review,
+merge Merging). Done and Stopped keep stories that ended in the last
+`rat-kingdom-board-done-hours`, read from the archive, and a child
+story is not shown. A card has the id, the worker's display name (its
+run's `:name` as Name-hex, else the run id), repository, epic, title,
+agent and time at its place, in a tone when it waits for review, is
+stopped, stuck or running long, and buttons that open the worker's
+buffer, show `story_show` and `story_diff` text, and cancel after
+asking; no verdict. A picker limits it to one repository and a check
+box hides Done and Stopped. Cards live at `/cards/COLUMN/ID`.
+`rat-kingdom-space-change-functions` marks the stories a change to a
+`story`, `run` or `stuck` tuple, or a sweep, touches; at most every
+half second the marked cards are made again and only those that
+changed are sent, a removal from the old column, the card in the new
+one and the column's count. A timer refreshes ages each minute; nothing
+reads git. Opening it builds it from the space, so it is right after a
+restart. The layout is measured in the window that shows the board's
+buffer, not the selected window, and is made again, throttled, when
+that window changes width (`window-size-change-functions`, local to the
+buffer). The columns shown share the width, each at most
+`rat-kingdom-board-column-width` characters; when each has at least
+`rat-kingdom-board-min-column-width` they are a Row of Columns, with
+`a2ui-vui-width` (a2ui has no fixed-width columns) made the window's
+width in the board's buffer and every card line cut to its column, and
+otherwise a Section per column titled with its count. Columns with no
+cards are left out (`rat-kingdom-board-hide-empty-columns`) and named on
+one line with a count of 0; a flush that empties or fills a column draws
+the board again.
 
 **Built: the issue inspector**, in `rat-kingdom-issue.el`. It shows one
 tracker issue in full in the surface "Issue inspector". The command
@@ -1916,7 +2116,7 @@ shows nothing for an unknown repository or a missing a2ui.
 
 | # | Surface | Shows | Actions | Kind |
 |---|---|---|---|---|
-| 1 | Factory floor | one table per epic: each story's place, worker, time in place (warning tone near its timeout), check result; a progress bar per epic | open the shell, tell, move, show diff | engine |
+| 1 | Factory floor (first form built: the story board) | one table per epic: each story's place, worker, time in place (warning tone near its timeout), check result; a progress bar per epic | open the shell, tell, move, show diff | engine |
 | 2 | Attention queue | everything waiting on a person: review requests, stuck tokens, blocked runs, failed checks, oldest first | verdict, resume, move to a picked place, discard | engine |
 | 3 | Review card | one `review`: the worker's summary, what integration verified beside what the worker reported, the diff | pass, or fix with notes; writes a `verdict` tuple | engine |
 | 4 | Epic plan (built) | the repository, title and description; the king's proposed stories grouped into waves, each with an include checkbox, its key, editable title and description, what it depends on, and pickers for its agent and its workflow (which sets the review mode); options to start right away, to give the epic a feature branch (it lands as one unit, after one check and `epic_verdict`) and to limit stories in parallel | approve (create, and start if asked, with a feature branch if ticked), send back with notes, cancel | engine, opened by the king's `epic_propose` |
@@ -1996,7 +2196,11 @@ wait longer for review than for implementation.
    and `foreman_stop`, news of an epic's stories routed to it through the
    king's delivery, its tools limited to its epic, `report`, its end with
    the epic's, and its session taken up again on reconcile, tested with
-   the backend that starts no agent.
+   the backend that starts no agent. The consul is built
+   (`rat-kingdom-consul.el`): `consul_start` and `consul_dismiss`, its own
+   worktree and branch, its work made a story on dismissal, and its
+   session taken up again on reconcile. Every rat has a name from
+   `rat-kingdom-rat-names`, shown with its id.
 
    **Facts** (built: `rat-kingdom-fact.el`): the worker's `note_fact`,
    facts in every worker's brief through

@@ -9,6 +9,7 @@
 ;;; Code:
 
 (require 'ert)
+(require 'rat-kingdom-test-helper)
 (require 'url)
 (require 'rat-kingdom-story)
 (require 'rat-kingdom-king)
@@ -487,6 +488,30 @@ Return what finish answered."
                              (error-message-string err)))
       (should (string-search "claude, codex" (error-message-string err))))
     (should-not (rat-kingdom-story-get space "S-5"))
+    (should-not (rat-kingdom-reaction-failures space))))
+
+(ert-deftest rat-kingdom-story-test-workers-run-the-story-s-model ()
+  (rat-kingdom-story-test-with-repo (space path)
+    (rat-kingdom-repo-add space path
+                          :check '("sh" "-c" "test -f wanted.txt"))
+    ;; Named, the model is recorded on the story and given to its worker.
+    (rat-kingdom-story-start space "demo" "Add the wanted file" nil "S-1"
+                             nil nil nil nil nil "claude-haiku-5-5")
+    (should (equal (rat-kingdom-story-test--get space "S-1" :model)
+                   "claude-haiku-5-5"))
+    (rat-kingdom-reaction-run space)
+    (should (equal (plist-get (rat-kingdom-run-get space "S-1.1") :model)
+                   "claude-haiku-5-5"))
+    ;; A failed check gives the story a new worker with the same model.
+    (rat-kingdom-story-test--work space "S-1" "other.txt")
+    (rat-kingdom-story-test--settle space "S-1")
+    (should (equal (rat-kingdom-story-test--get space "S-1" :run) "S-1.2"))
+    (should (equal (plist-get (rat-kingdom-run-get space "S-1.2") :model)
+                   "claude-haiku-5-5"))
+    ;; Unnamed, the story has none, and its worker is left to
+    ;; `rat-kingdom-worker-model'.
+    (rat-kingdom-story-start space "demo" "Another" nil "S-2")
+    (should-not (rat-kingdom-story-test--get space "S-2" :model))
     (should-not (rat-kingdom-reaction-failures space))))
 
 (ert-deftest rat-kingdom-story-test-gives-up-after-enough-workers ()

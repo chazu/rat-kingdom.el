@@ -13,6 +13,7 @@
 ;;; Code:
 
 (require 'ert)
+(require 'rat-kingdom-test-helper)
 (require 'rat-kingdom)
 (require 'rat-kingdom-epic)
 (require 'rat-kingdom-story-test)
@@ -191,6 +192,8 @@ rk/epic/T-1; rk/integration lands only after every task is closed" answer))
         (should (string-search "for T-3 (Right)" answer)))
       (should (equal (rat-kingdom-epic-branch-test--rev path "rk/epic/T-1")
                      integration))
+      ;; The feature branch is guarded from a push that names no remote.
+      (should (rat-kingdom-git-push-guarded-p path "rk/epic/T-1"))
       (should (equal (rat-kingdom-epic-branch-test--epic space :branch)
                      "rk/epic/T-1"))
       (should (equal (rat-kingdom-epic-branch-test--epic space :target)
