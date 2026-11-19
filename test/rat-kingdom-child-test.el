@@ -11,6 +11,7 @@
 ;;; Code:
 
 (require 'ert)
+(require 'rat-kingdom-test-helper)
 (require 'rat-kingdom-story-test)
 (require 'rat-kingdom-steps-test)
 (require 'rat-kingdom-task-test)

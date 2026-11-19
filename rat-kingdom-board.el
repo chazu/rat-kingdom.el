@@ -34,7 +34,11 @@
 ;; story as `story_show' does, show its diff as `story_diff' does, and
 ;; cancel it, after asking.  Verdicts stay the king's: there is no
 ;; button for one.  A picker limits the board to one repository, and a
-;; check box hides Done and Stopped.
+;; check box hides Done and Stopped.  `rat-kingdom-board' with a prefix
+;; argument, and `board_show' with its `repo', open the board with the
+;; picker set to one repository; `rat-kingdom-board-open' says how.
+;; Opened without one, an open board keeps its repository, and a board
+;; that is not open shows all of them.
 ;;
 ;; The board follows `rat-kingdom-space-change-functions'.  A change to
 ;; a story, its run or its stuck report marks the story; at most every
@@ -908,13 +912,74 @@ Signal an error if a2ui cannot be loaded.  Return the board's window."
         (select-window window))
       window)))
 
+(defun rat-kingdom-board--open-p (space)
+  "Return non-nil if the story board of SPACE is open."
+  (and space (eq rat-kingdom-board--space space) (rat-kingdom-board--live-p)))
+
+(defun rat-kingdom-board-check-repo (space repo)
+  "Signal an error unless REPO is the name of a repository registered in SPACE.
+The error names the registered repositories."
+  (unless (rat-kingdom-repo-get space repo)
+    (let ((names (mapcar (lambda (record) (plist-get record :name))
+                         (rat-kingdom-repo-list space))))
+      (user-error "There is no repository named %s.  %s" repo
+                  (if names
+                      (format "The registered repositories are: %s"
+                              (string-join (sort names #'string<) ", "))
+                    "No repository is registered")))))
+
+(defun rat-kingdom-board-scope (space scope)
+  "Return the repository the board of SPACE is to show under SCOPE, or nil.
+SCOPE is the name of a registered repository, `all' for all of them,
+or nil.  With nil, an open board keeps its repository, and a board
+that is not open shows all.  Signal an error if SCOPE names no
+registered repository."
+  (cond ((stringp scope) (rat-kingdom-board-check-repo space scope) scope)
+        ((eq scope 'all) nil)
+        ((rat-kingdom-board--open-p space)
+         (plist-get rat-kingdom-board--filter :repo))))
+
+(defun rat-kingdom-board-open (&optional space scope select)
+  "Show the story board of SPACE, limited as SCOPE says, and return its window.
+SPACE is by default the space rat-kingdom works in.  SCOPE is as for
+`rat-kingdom-board-scope': a repository's name sets the board's
+repository picker to it, `all' sets it to all repositories, and nil
+keeps the picker of an open board, or shows all.  The check box that
+hides Done and Stopped is kept.  With SELECT, select the board's
+window.  Nothing is shown if SCOPE names no registered repository."
+  (rat-kingdom-board--require-a2ui)
+  (let* ((space (or space (rat-kingdom-space-default)))
+         (repo (rat-kingdom-board-scope space scope)))
+    (setq rat-kingdom-board--filter
+          (plist-put (copy-sequence rat-kingdom-board--filter) :repo repo))
+    (rat-kingdom-board-show space select)))
+
+(defun rat-kingdom-board--read-repo (space)
+  "Ask for a repository registered in SPACE, and return its name.
+Return `all' if the answer is blank."
+  (let* ((names (mapcar (lambda (record) (plist-get record :name))
+                        (rat-kingdom-repo-list space)))
+         (name (completing-read
+                "Story board for the repository (blank for all): "
+                names nil t)))
+    (if (string-empty-p name) 'all name)))
+
 ;;;###autoload
-(defun rat-kingdom-board ()
+(defun rat-kingdom-board (&optional repo)
   "Show the story board: the stories in the pipeline, as a Kanban board.
 It takes the place of the buffer in the selected window, and keeps
-itself up to date as the stories move.  \\`q' buries it."
-  (interactive)
-  (rat-kingdom-board-show nil t))
+itself up to date as the stories move.  \\`q' buries it.
+With a prefix argument, ask for a repository, with completion over
+those registered, and set the board's repository picker to it; a
+blank answer shows all repositories.  Without one, an open board keeps
+its repository, and a board that is not open shows all.
+
+From Lisp, REPO is a repository's name, `all', or nil, as SCOPE is for
+`rat-kingdom-board-open'."
+  (interactive
+   (list (and current-prefix-arg
+              (rat-kingdom-board--read-repo (rat-kingdom-space-default)))))
+  (rat-kingdom-board-open nil repo t))
 
 (defun rat-kingdom-board-refresh ()
   "Draw the story board again from the space."
@@ -1158,15 +1223,35 @@ whose counts changed."
 in the pipeline (queued, working, checking, review, merging, done and \
 stopped), which keeps itself up to date. It takes the place of the buffer \
 in the user's main window. Use it when the user asks to see the board or \
-how the stories stand."
-    nil
+how the stories stand. Give repo to show the stories of one repository: \
+the board's repository picker is set to it, also when the board is open. \
+Without repo, a board that is not open shows all repositories, and an open \
+board keeps the repository its picker is set to; give all as true to show \
+all repositories then. The answer says which repositories it shows."
+    '((:name "repo" :type string :optional t
+       :description "The name of a registered repository, to show only its \
+stories. An unknown name is an error that lists the registered names, and \
+nothing is shown. Leave it out to show all repositories, or to keep the \
+repository of an open board.")
+      (:name "all" :type boolean :optional t
+       :description "true to show all repositories, also when the open \
+board is set to one. Do not give it with repo. Default false."))
   (unless (rat-kingdom-plan-a2ui-p)
     (error "The story board is not available: a2ui is not installed or \
 cannot be loaded in the user's Emacs.  Nothing was shown.  Tell the user \
 how the stories stand with status instead"))
-  (rat-kingdom-board-show space)
-  (format "Shown to the user: the story board, with %d stories."
-          (hash-table-count rat-kingdom-board--cards)))
+  (let ((repo (arg 'repo))
+        (all (rat-kingdom-plan--true-p (arg 'all))))
+    (when (and repo all)
+      (error "Give repo or all, not both.  Nothing was shown"))
+    (condition-case err
+        (rat-kingdom-board-open space (cond (repo) (all 'all)))
+      (user-error
+       (error "%s.  Nothing was shown" (error-message-string err))))
+    (let ((shown (plist-get rat-kingdom-board--filter :repo)))
+      (format "Shown to the user: the story board for %s, with %d stories."
+              (if shown (format "the repository %s" shown) "all repositories")
+              (hash-table-count rat-kingdom-board--cards)))))
 
 (provide 'rat-kingdom-board)
 ;;; rat-kingdom-board.el ends here

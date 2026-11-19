@@ -26,8 +26,9 @@
 ;; A task is a property list with at least `:id', `:title',
 ;; `:description', `:status' and `:priority', whatever the tracker
 ;; calls them, and, where the tracker knows them, `:type', `:labels'
-;; (a list of strings), `:parent' (the id of its epic) and
-;; `:depends-on' (the ids of the tasks it waits for).
+;; (a list of strings), `:parent' (the id of its epic),
+;; `:depends-on' (the ids of the tasks it waits for), and `:created-at',
+;; `:updated-at' and `:closed-at', ISO 8601 times.
 ;;
 ;; A task may say which agent and which workflow a story working on it
 ;; should have, with the labels rk-agent:NAME and rk-workflow:NAME.
@@ -209,7 +210,8 @@ arrays as lists.  Signal `rat-kingdom-task-error' if it fails."
   "Return the task the br ISSUE describes.
 `br show' gives an issue's `parent' and its `dependencies'; those of
 the type blocks are the tasks it depends on.  `br ready' and
-`br create' give neither."
+`br create' give neither.  br's times, ISO 8601 strings, are kept as
+`:created-at', `:updated-at' and `:closed-at'."
   (list :id (plist-get issue :id)
         :title (plist-get issue :title)
         :description (plist-get issue :description)
@@ -225,7 +227,10 @@ the type blocks are the tasks it depends on.  `br ready' and
                                                            :dependency_type)
                                                 "blocks")
                                          (plist-get dependency :id)))
-                                  (plist-get issue :dependencies)))))
+                                  (plist-get issue :dependencies)))
+        :created-at (plist-get issue :created_at)
+        :updated-at (plist-get issue :updated_at)
+        :closed-at (plist-get issue :closed_at)))
 
 (defun rat-kingdom-task-br--show-all (adapter ids)
   "Return the br issues IDS of ADAPTER's workspace, from one `br show'."
