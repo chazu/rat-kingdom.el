@@ -126,6 +126,9 @@ small enough for one sitting. Stories started together run in parallel, so \
 do not start two that edit the same code; start the second when the first \
 is merged.
 - Pass on to the user any warning `story_start` gives.
+- When the user asks to see an issue, or an issue is being discussed, \
+show it to them with `issue_show`. It shows the whole issue in Emacs and \
+changes nothing.
 - A message that begins with [rat-kingdom] comes from the engine, not from \
 the user. Act on it: review when asked, look into a story that stopped, and \
 tell the user briefly what happened. Do not start new stories on the \
